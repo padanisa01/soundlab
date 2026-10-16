@@ -7,8 +7,10 @@ import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
+import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.ProgressBar;
 import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -19,6 +21,8 @@ import androidx.documentfile.provider.DocumentFile;
 import com.chaquo.python.PyObject;
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
+
+import org.json.JSONArray;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -45,7 +49,10 @@ public class MainActivity extends Activity {
     private Spinner spinnerReverb;
     private Button btnProcess;
     private Button btnPlay;
+    private Button btnStop;
     private Button btnSave;
+    private ProgressBar progressBar;
+    private WaveformView waveformView;
 
     private String inputPath;   // cached WAV picked by the user
     private String inputFileName = "audio.wav";
@@ -67,7 +74,10 @@ public class MainActivity extends Activity {
         spinnerReverb = findViewById(R.id.spinner_reverb);
         btnProcess = findViewById(R.id.btn_process);
         btnPlay = findViewById(R.id.btn_play);
+        btnStop = findViewById(R.id.btn_stop);
         btnSave = findViewById(R.id.btn_save);
+        progressBar = findViewById(R.id.progress_bar);
+        waveformView = findViewById(R.id.waveform);
 
         ArrayAdapter<CharSequence> adapter = ArrayAdapter.createFromResource(
                 this, R.array.reverb_presets, android.R.layout.simple_spinner_item);
@@ -81,6 +91,7 @@ public class MainActivity extends Activity {
         findViewById(R.id.btn_pick).setOnClickListener(v -> pickAudio());
         btnProcess.setOnClickListener(v -> processAudio());
         btnPlay.setOnClickListener(v -> playOutput());
+        btnStop.setOnClickListener(v -> stopPlayback());
         btnSave.setOnClickListener(v -> onSaveClicked());
 
         outputPath = new File(getCacheDir(), "output.wav").getAbsolutePath();
@@ -122,6 +133,7 @@ public class MainActivity extends Activity {
                 inputFileName = getDisplayName(uri);
                 tvPicked.setText("Picked: " + inputFileName);
                 setStatus("Ready. Adjust the effects and tap Apply.");
+                loadWaveform();
             } catch (Exception e) {
                 setStatus("Could not read file: " + e.getMessage());
             }
@@ -157,6 +169,32 @@ public class MainActivity extends Activity {
         return wavName + ".mp3";
     }
 
+    private void loadWaveform() {
+        final String path = inputPath;
+        new Thread(() -> {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                PyObject result = Python.getInstance().getModule("audiofx.android_bridge")
+                        .callAttr("waveform_peaks", path, 240);
+                // peaks_json is a Python str; PyObject.toString() gives str().
+                JSONArray arr = new JSONArray(result.callAttr("get", "peaks_json").toString());
+                final float[] peaks = new float[arr.length()];
+                for (int i = 0; i < arr.length(); i++) {
+                    peaks[i] = (float) arr.getDouble(i);
+                }
+                runOnUiThread(() -> waveformView.setPeaks(peaks));
+            } catch (Exception e) {
+                runOnUiThread(() -> setStatus("Waveform failed: " + e.getMessage()));
+            }
+        }).start();
+    }
+
+    private void showProgress(boolean show) {
+        progressBar.setVisibility(show ? View.VISIBLE : View.GONE);
+    }
+
     private void copyUriToFile(Uri uri, File dest) throws Exception {
         try (InputStream in = getContentResolver().openInputStream(uri);
              OutputStream out = new FileOutputStream(dest)) {
@@ -177,6 +215,8 @@ public class MainActivity extends Activity {
         final String preset = spinnerReverb.getSelectedItem().toString();
         final double echo = seekEcho.getProgress() / 100.0;
         btnProcess.setEnabled(false);
+        showProgress(true);
+        waveformView.startProgressAnimation();
         setStatus("Processing...");
         new Thread(() -> {
             try {
@@ -195,9 +235,15 @@ public class MainActivity extends Activity {
                     setStatus(msg);
                     btnPlay.setEnabled(true);
                     btnSave.setEnabled(true);
+                    showProgress(false);
+                    waveformView.finishProgressAnimation();
                 });
             } catch (Exception e) {
-                runOnUiThread(() -> setStatus("Error: " + e.getMessage()));
+                runOnUiThread(() -> {
+                    setStatus("Error: " + e.getMessage());
+                    showProgress(false);
+                    waveformView.clearProgress();
+                });
             } finally {
                 runOnUiThread(() -> btnProcess.setEnabled(true));
             }
@@ -226,16 +272,24 @@ public class MainActivity extends Activity {
                 prepared[0] = true;
                 mp.start();
                 setStatus("Playing processed audio...");
+                btnStop.setEnabled(true);
             });
-            player.setOnCompletionListener(mp -> setStatus("Playback finished."));
+            player.setOnCompletionListener(mp -> {
+                setStatus("Playback finished.");
+                btnStop.setEnabled(false);
+            });
             player.setOnErrorListener((mp, what, extra) -> {
                 setStatus("Playback error: " + what + "/" + extra);
+                btnStop.setEnabled(false);
                 return true;
             });
             player.prepareAsync();
             setStatus("Preparing audio...");
+            final MediaPlayer thisPlayer = player;
             new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-                if (!prepared[0]) {
+                // Only report if this player is still the active one (i.e. the
+                // user did not stop it or start a new playback since).
+                if (player == thisPlayer && !prepared[0]) {
                     setStatus("Still preparing after 15s (" + (f.length() / 1024)
                             + " KB file) - prepareAsync never called back.");
                 }
@@ -243,6 +297,19 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             setStatus("Playback failed: " + e);
         }
+    }
+
+    private void stopPlayback() {
+        if (player != null) {
+            try {
+                player.stop();
+            } catch (Exception ignored) {
+            }
+            player.release();
+            player = null;
+        }
+        btnStop.setEnabled(false);
+        setStatus("Playback stopped.");
     }
 
     private void onSaveClicked() {
@@ -261,6 +328,7 @@ public class MainActivity extends Activity {
     private void doSaveMp3() {
         final String mp3Name = toMp3Name(inputFileName);
         btnSave.setEnabled(false);
+        showProgress(true);
         setStatus("Encoding MP3...");
         new Thread(() -> {
             try {
@@ -277,7 +345,10 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 runOnUiThread(() -> setStatus("Save failed: " + e.getMessage()));
             } finally {
-                runOnUiThread(() -> btnSave.setEnabled(true));
+                runOnUiThread(() -> {
+                    btnSave.setEnabled(true);
+                    showProgress(false);
+                });
             }
         }).start();
     }

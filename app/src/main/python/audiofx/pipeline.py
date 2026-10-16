@@ -73,6 +73,31 @@ def write_wav(path, samples, sample_rate):
         w.writeframes(frames)
 
 
+def waveform_peaks(samples, n_buckets=240):
+    """Peak amplitude per bucket for waveform display, normalized to 0..1.
+
+    Each bucket covers an equal slice of the samples; within a bucket every
+    k-th sample is examined (k chosen so at most ~512 samples are scanned
+    per bucket), which keeps this fast on long recordings.
+    """
+    n = len(samples)
+    if n == 0 or n_buckets <= 0:
+        return [0.0] * max(n_buckets, 0)
+    peaks = []
+    for b in range(n_buckets):
+        start = (b * n) // n_buckets
+        end = ((b + 1) * n) // n_buckets
+        step = max(1, (end - start) // 512)
+        peak = 0.0
+        for i in range(start, end, step):
+            a = abs(samples[i])
+            if a > peak:
+                peak = a
+        peaks.append(peak)
+    top = max(peaks) or 1.0
+    return [p / top for p in peaks]
+
+
 def encode_mp3(samples, sample_rate, bitrate_kbps=192, quality=2):
     """Encode mono float samples as MP3 (CBR) via the ``lameenc`` package.
 

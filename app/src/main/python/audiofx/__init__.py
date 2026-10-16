@@ -6,7 +6,16 @@ mono float samples in [-1.0, 1.0] and are exact bypass at zero amount.
 """
 
 from .effects import Warmth, Reverb, Echo
-from .pipeline import EffectChain, read_wav_mono, write_wav
+from .pipeline import EffectChain, encode_mp3, read_wav_mono, waveform_peaks, write_wav
 
 __version__ = "1.0.0"
-__all__ = ["Warmth", "Reverb", "Echo", "EffectChain", "read_wav_mono", "write_wav"]
+__all__ = [
+    "Warmth",
+    "Reverb",
+    "Echo",
+    "EffectChain",
+    "read_wav_mono",
+    "write_wav",
+    "encode_mp3",
+    "waveform_peaks",
+]

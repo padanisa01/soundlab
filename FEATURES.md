@@ -9,6 +9,8 @@ or the plan changes.
 - Pick a WAV file from device storage (Storage Access Framework).
 - 8-bit and 16-bit PCM supported; stereo is mixed down to mono.
 - The input file name is remembered and reused for the MP3 save name.
+- A waveform display below the picker shows the picked audio
+  (peak amplitudes computed in the Python module).
 
 ### Effects (applied in fixed order: Warmth -> Reverb -> Echo)
 - **Warmth** slider (0-100%): saturated low-end; 0% is an exact bypass.
@@ -22,6 +24,13 @@ or the plan changes.
 ### Playback
 - **Play result** plays the processed WAV through MediaPlayer
   (async prepare, so the UI never blocks).
+- **Stop** halts playback; enabled only while audio is playing.
+
+### Progress indication
+- A horizontal progress bar is shown while Apply effects or Save as MP3
+  runs, and hidden when idle.
+- While Apply effects runs, the waveform fills left to right with a
+  translucent gradient to indicate progress.
 
 ### Save
 - **Save as MP3**: encodes the processed audio with `lameenc`

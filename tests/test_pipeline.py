@@ -144,5 +144,42 @@ class TestAndroidBridge(unittest.TestCase):
                 )
 
 
+class TestWaveformPeaks(unittest.TestCase):
+    def test_bucket_count_and_range(self):
+        from audiofx.pipeline import waveform_peaks
+
+        peaks = waveform_peaks([0.5, -0.25, 0.0, 1.0] * 100, n_buckets=16)
+        self.assertEqual(len(peaks), 16)
+        self.assertTrue(all(0.0 <= p <= 1.0 for p in peaks))
+        # Normalized so the loudest bucket hits 1.0.
+        self.assertAlmostEqual(max(peaks), 1.0)
+
+    def test_silence_is_flat(self):
+        from audiofx.pipeline import waveform_peaks
+
+        self.assertEqual(waveform_peaks([0.0] * 1000, n_buckets=8), [0.0] * 8)
+
+    def test_empty(self):
+        from audiofx.pipeline import waveform_peaks
+
+        self.assertEqual(waveform_peaks([], n_buckets=8), [0.0] * 8)
+
+    def test_bridge_returns_json(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.wav")
+            write_wav(src, sine(440.0, 0.5, 22050), 22050)
+            result = android_bridge.waveform_peaks(src, n_buckets=32)
+            peaks = json.loads(result["peaks_json"])
+            self.assertEqual(len(peaks), 32)
+            self.assertTrue(all(0.0 <= p <= 1.0 for p in peaks))
+            self.assertAlmostEqual(max(peaks), 1.0)
+
+    def test_bridge_missing_input_raises(self):
+        with self.assertRaises(ValueError):
+            android_bridge.waveform_peaks("/nonexistent/in.wav")
+
+
 if __name__ == "__main__":
     unittest.main()

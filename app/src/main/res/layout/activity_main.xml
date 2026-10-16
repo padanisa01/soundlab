@@ -11,11 +11,17 @@
         android:layout_height="wrap_content"
         android:text="Pick audio (WAV)" />
 
+    <com.audiofx.app.WaveformView
+        android:id="@+id/waveform"
+        android:layout_width="match_parent"
+        android:layout_height="120dp"
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="4dp" />
+
     <TextView
         android:id="@+id/tv_picked"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
         android:text="No file picked" />
 
     <TextView
@@ -77,12 +83,27 @@
         android:layout_marginTop="24dp"
         android:text="Apply effects" />
 
-    <Button
-        android:id="@+id/btn_play"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:enabled="false"
-        android:text="Play result" />
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btn_play"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:enabled="false"
+            android:text="Play result" />
+
+        <Button
+            android:id="@+id/btn_stop"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:enabled="false"
+            android:text="Stop" />
+    </LinearLayout>
 
     <Button
         android:id="@+id/btn_save"
@@ -90,6 +111,15 @@
         android:layout_height="wrap_content"
         android:enabled="false"
         android:text="Save as MP3" />
+
+    <ProgressBar
+        android:id="@+id/progress_bar"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:indeterminate="true"
+        android:visibility="gone" />
 
     <TextView
         android:id="@+id/tv_status"

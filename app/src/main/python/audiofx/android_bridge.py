@@ -7,7 +7,13 @@ effect order Warmth -> Reverb -> Echo.
 import os
 
 from .effects import Echo, Reverb, Warmth
-from .pipeline import EffectChain, encode_mp3, read_wav_mono, write_wav
+from .pipeline import (
+    EffectChain,
+    encode_mp3,
+    read_wav_mono,
+    waveform_peaks as _waveform_peaks,
+    write_wav,
+)
 
 
 def list_reverb_presets():
@@ -54,4 +60,23 @@ def encode_wav_to_mp3(input_wav_path, output_mp3_path, bitrate_kbps=192):
         "output_path": output_mp3_path,
         "sample_rate": sample_rate,
         "size_bytes": len(mp3_bytes),
+    }
+
+
+def waveform_peaks(input_path, n_buckets=240):
+    """Peak amplitudes of a WAV file for the waveform display.
+
+    Returns a dict with peaks_json (a JSON array of floats in 0..1),
+    sample_rate and duration_s. Raises ValueError on a missing input.
+    """
+    import json
+
+    if not os.path.isfile(input_path):
+        raise ValueError("input file not found: %s" % input_path)
+    samples, sample_rate = read_wav_mono(input_path)
+    peaks = _waveform_peaks(samples, int(n_buckets))
+    return {
+        "peaks_json": json.dumps(peaks),
+        "sample_rate": sample_rate,
+        "duration_s": round(len(samples) / sample_rate, 2),
     }
