@@ -1,0 +1,49 @@
+plugins {
+    id "com.android.application"
+    id "com.chaquo.python"
+}
+
+android {
+    namespace "com.audiofx.app"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.audiofx.app"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        ndk {
+            // Chaquopy ships a native Python interpreter: declare the ABIs.
+            abiFilters "arm64-v8a", "x86_64"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        // Python version bundled in the APK. Chaquopy 17.1 supports up to 3.14.
+        version "3.12"
+        pip {
+            // NumPy gives the reverb an FFT convolution fast path on device.
+            // The module also runs without it via a pure-Python fallback.
+            install "numpy"
+        }
+    }
+}
+
+dependencies {
+}

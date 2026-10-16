@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AudioFX</string>
+    <string-array name="reverb_presets">
+        <item>studio</item>
+        <item>concert_hall</item>
+        <item>bathroom</item>
+        <item>cave</item>
+    </string-array>
+</resources>

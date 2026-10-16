@@ -1,0 +1,15 @@
+// Top-level build file for AudioFX.
+plugins {
+    id "com.android.application" version "8.7.0" apply false
+    id "com.chaquo.python" version "17.1.0" apply false
+}
+
+// Runs the audiofx Python compile check + unit tests + Android scaffold
+// static check. Needs only python3 on PATH: no JVM, no Android SDK.
+// Usage: gradle testPython
+tasks.register("testPython", Exec) {
+    group = "verification"
+    description = "Compile-checks and unit-tests the audiofx Python module (no Android SDK needed)."
+    workingDir = rootDir
+    commandLine("python3", "tools/verify.py")
+}
