@@ -29,6 +29,10 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * Thin UI shell. All DSP lives in the Python module
@@ -48,6 +52,7 @@ public class MainActivity extends Activity {
     private SeekBar seekEcho;
     private Spinner spinnerReverb;
     private Button btnProcess;
+    private Button btnUndo;
     private Button btnPlay;
     private Button btnStop;
     private Button btnSave;
@@ -56,9 +61,70 @@ public class MainActivity extends Activity {
 
     private String inputPath;   // cached WAV picked by the user
     private String inputFileName = "audio.wav";
-    private String outputPath;  // processed WAV written by Python
+    private String currentOutputPath;  // file backing Play/Save; null until first Apply
+    private String playerOutputPath;   // file the live player was built for
+    private double audioDurationSec;
+    private int outputSeq;  // disambiguates output files within the same millisecond
     private Uri saveFolderUri;  // session-only; never persisted
     private MediaPlayer player;
+
+    // In-memory session state for Undo.
+    private final Map<String, String> originalInputPath = new HashMap<>(); // fileHash -> pristine WAV
+    private final EffectHistoryDb historyDb = new EffectHistoryDb();
+
+    /**
+     * Session-only log of applied effects, keyed by input filename hash.
+     * Each row records what was applied, when, and which file it produced,
+     * so Undo can walk the stack back to the original audio.
+     */
+    private static final class EffectHistoryDb {
+        static final class Row {
+            final String fileHash;
+            final String effects;
+            final long timestamp;
+            final String outputPath;
+
+            Row(String fileHash, String effects, long timestamp, String outputPath) {
+                this.fileHash = fileHash;
+                this.effects = effects;
+                this.timestamp = timestamp;
+                this.outputPath = outputPath;
+            }
+        }
+
+        private final Map<String, Deque<Row>> rows = new HashMap<>();
+
+        void log(String fileHash, String effects, long timestamp, String outputPath) {
+            Deque<Row> stack = rows.get(fileHash);
+            if (stack == null) {
+                stack = new ArrayDeque<>();
+                rows.put(fileHash, stack);
+            }
+            stack.addLast(new Row(fileHash, effects, timestamp, outputPath));
+        }
+
+        /** Remove and return the most recent row, or null if none. */
+        Row undo(String fileHash) {
+            Deque<Row> stack = rows.get(fileHash);
+            return (stack == null || stack.isEmpty()) ? null : stack.removeLast();
+        }
+
+        /** Most recent remaining row, or null. */
+        Row latest(String fileHash) {
+            Deque<Row> stack = rows.get(fileHash);
+            return (stack == null || stack.isEmpty()) ? null : stack.peekLast();
+        }
+
+        boolean canUndo(String fileHash) {
+            Deque<Row> stack = rows.get(fileHash);
+            return stack != null && !stack.isEmpty();
+        }
+    }
+
+    /** Session key for the effect history: hash of the input file name. */
+    private static String fileHash(String fileName) {
+        return Integer.toHexString(fileName.hashCode());
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -73,11 +139,13 @@ public class MainActivity extends Activity {
         seekEcho = findViewById(R.id.seek_echo);
         spinnerReverb = findViewById(R.id.spinner_reverb);
         btnProcess = findViewById(R.id.btn_process);
+        btnUndo = findViewById(R.id.btn_undo);
         btnPlay = findViewById(R.id.btn_play);
         btnStop = findViewById(R.id.btn_stop);
         btnSave = findViewById(R.id.btn_save);
         progressBar = findViewById(R.id.progress_bar);
         waveformView = findViewById(R.id.waveform);
+        waveformView.setOnSeekListener(this::onWaveformSeek);
 
         ArrayAdapter<CharSequence> adapter = ArrayAdapter.createFromResource(
                 this, R.array.reverb_presets, android.R.layout.simple_spinner_item);
@@ -90,11 +158,11 @@ public class MainActivity extends Activity {
 
         findViewById(R.id.btn_pick).setOnClickListener(v -> pickAudio());
         btnProcess.setOnClickListener(v -> processAudio());
+        btnUndo.setOnClickListener(v -> undoLastEffect());
         btnPlay.setOnClickListener(v -> playOutput());
         btnStop.setOnClickListener(v -> stopPlayback());
         btnSave.setOnClickListener(v -> onSaveClicked());
 
-        outputPath = new File(getCacheDir(), "output.wav").getAbsolutePath();
         setStatus("Pick a WAV file to begin.");
     }
 
@@ -131,6 +199,22 @@ public class MainActivity extends Activity {
                 copyUriToFile(uri, dest);
                 inputPath = dest.getAbsolutePath();
                 inputFileName = getDisplayName(uri);
+                // Pristine per-file copy, so Undo can always return to the
+                // original audio even if another file is picked later.
+                String hash = fileHash(inputFileName);
+                File pristine = new File(getCacheDir(), "orig_" + hash + ".wav");
+                copyUriToFile(uri, pristine);
+                originalInputPath.put(hash, pristine.getAbsolutePath());
+                // Reset playback state for the new file.
+                releasePlayer();
+                btnStop.setEnabled(false);
+                currentOutputPath = null;
+                audioDurationSec = 0;
+                btnPlay.setEnabled(false);
+                btnSave.setEnabled(false);
+                btnUndo.setEnabled(historyDb.canUndo(hash));
+                waveformView.setPeaks(new float[0]);
+                waveformView.setDuration(0);
                 tvPicked.setText("Picked: " + inputFileName);
                 setStatus("Ready. Adjust the effects and tap Apply.");
                 loadWaveform();
@@ -184,7 +268,13 @@ public class MainActivity extends Activity {
                 for (int i = 0; i < arr.length(); i++) {
                     peaks[i] = (float) arr.getDouble(i);
                 }
-                runOnUiThread(() -> waveformView.setPeaks(peaks));
+                final double dur = Double.parseDouble(
+                        result.callAttr("get", "duration_s").toString());
+                runOnUiThread(() -> {
+                    waveformView.setPeaks(peaks);
+                    waveformView.setDuration(dur);
+                    audioDurationSec = dur;
+                });
             } catch (Exception e) {
                 runOnUiThread(() -> setStatus("Waveform failed: " + e.getMessage()));
             }
@@ -214,7 +304,16 @@ public class MainActivity extends Activity {
         final double warmth = seekWarmth.getProgress() / 100.0;
         final String preset = spinnerReverb.getSelectedItem().toString();
         final double echo = seekEcho.getProgress() / 100.0;
+        final String hash = fileHash(inputFileName);
+        final String effectsDesc = "Warmth " + seekWarmth.getProgress() + "%, Reverb "
+                + preset + ", Echo " + seekEcho.getProgress() + "%";
+        // Every application writes its own file so Undo can restore earlier ones.
+        final String outPath = new File(getCacheDir(),
+                "output_" + System.currentTimeMillis() + "_" + (outputSeq++) + ".wav")
+                .getAbsolutePath();
+        final long timestamp = System.currentTimeMillis();
         btnProcess.setEnabled(false);
+        btnUndo.setEnabled(false); // no racing an undo mid-apply
         showProgress(true);
         waveformView.startProgressAnimation();
         setStatus("Processing...");
@@ -225,16 +324,22 @@ public class MainActivity extends Activity {
                 }
                 Python py = Python.getInstance();
                 PyObject result = py.getModule("audiofx.android_bridge").callAttr(
-                        "process_file", inputPath, outputPath, warmth, preset, echo);
+                        "process_file", inputPath, outPath, warmth, preset, echo);
                 // process_file returns a Python dict. PyObject.get(String) does
                 // getattr(), which returns null for dict keys, so read values
                 // via dict.get() instead.
-                final String msg = "Done: " + result.callAttr("get", "duration_s") + "s @ "
-                        + result.callAttr("get", "sample_rate") + " Hz";
+                final double dur = Double.parseDouble(
+                        result.callAttr("get", "duration_s").toString());
+                historyDb.log(hash, effectsDesc, timestamp, outPath);
+                currentOutputPath = outPath;
+                audioDurationSec = dur;
+                final String msg = "Done: " + dur + "s @ "
+                        + result.callAttr("get", "sample_rate") + " Hz — " + effectsDesc;
                 runOnUiThread(() -> {
                     setStatus(msg);
                     btnPlay.setEnabled(true);
                     btnSave.setEnabled(true);
+                    btnUndo.setEnabled(true);
                     showProgress(false);
                     waveformView.finishProgressAnimation();
                 });
@@ -243,6 +348,7 @@ public class MainActivity extends Activity {
                     setStatus("Error: " + e.getMessage());
                     showProgress(false);
                     waveformView.clearProgress();
+                    btnUndo.setEnabled(historyDb.canUndo(hash));
                 });
             } finally {
                 runOnUiThread(() -> btnProcess.setEnabled(true));
@@ -250,28 +356,106 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    private void undoLastEffect() {
+        final String hash = fileHash(inputFileName);
+        EffectHistoryDb.Row removed = historyDb.undo(hash);
+        if (removed == null) {
+            Toast.makeText(this, "Nothing to undo", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new File(removed.outputPath).delete();
+        releasePlayer();
+        btnStop.setEnabled(false);
+        EffectHistoryDb.Row top = historyDb.latest(hash);
+        if (top == null) {
+            currentOutputPath = originalInputPath.get(hash);
+            setStatus("Undone: " + removed.effects + " — back to the original audio.");
+        } else {
+            currentOutputPath = top.outputPath;
+            setStatus("Undone: " + removed.effects + " — now at: " + top.effects + ".");
+        }
+        if (currentOutputPath == null || !(new File(currentOutputPath).exists())) {
+            btnPlay.setEnabled(false);
+            btnSave.setEnabled(false);
+        }
+        btnUndo.setEnabled(historyDb.canUndo(hash));
+    }
+
+    private void releasePlayer() {
+        if (player != null) {
+            try {
+                player.stop();
+            } catch (Exception ignored) {
+            }
+            player.release();
+            player = null;
+            playerOutputPath = null;
+        }
+    }
+
     private void playOutput() {
-        File f = new File(outputPath);
+        playOutputAt(0f);
+    }
+
+    private void onWaveformSeek(float fraction) {
+        if (currentOutputPath == null) {
+            Toast.makeText(this, "Apply effects first", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        playOutputAt(fraction);
+    }
+
+    private int seekMs(float fraction) {
+        if (audioDurationSec <= 0) {
+            return 0;
+        }
+        float f = Math.max(0f, Math.min(1f, fraction));
+        return (int) (f * audioDurationSec * 1000);
+    }
+
+    private void playOutputAt(float fraction) {
+        if (currentOutputPath == null) {
+            Toast.makeText(this, "Apply effects first", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        File f = new File(currentOutputPath);
         if (!f.exists() || f.length() < 44) {
-            setStatus("No output to play (file missing or empty).");
+            setStatus("No audio to play (file missing or empty).");
+            return;
+        }
+        // If the live player is already on this exact file, just seek in place.
+        if (player != null && currentOutputPath.equals(playerOutputPath)) {
+            int ms = seekMs(fraction);
+            try {
+                player.seekTo(ms);
+            } catch (Exception ignored) {
+            }
+            setStatus("Playing from " + (ms / 1000) + "s...");
+            btnStop.setEnabled(true);
             return;
         }
         setStatus("Creating player...");
         try {
-            if (player != null) {
-                player.release();
-                player = null;
-            }
+            releasePlayer();
             player = new MediaPlayer();
             // If the UI freezes on one of these status lines, the blocking
             // call is the one AFTER the last line shown.
             setStatus("Opening " + (f.length() / 1024) + " KB audio...");
-            player.setDataSource(outputPath);
+            player.setDataSource(currentOutputPath);
             final boolean[] prepared = {false};
             player.setOnPreparedListener(mp -> {
                 prepared[0] = true;
+                int ms = seekMs(fraction);
+                if (ms > 0) {
+                    try {
+                        mp.seekTo(ms);
+                    } catch (Exception ignored) {
+                    }
+                }
                 mp.start();
-                setStatus("Playing processed audio...");
+                playerOutputPath = currentOutputPath;
+                setStatus(ms > 0 ? "Playing from " + (ms / 1000) + "s..."
+                        : "Playing processed audio...");
                 btnStop.setEnabled(true);
             });
             player.setOnCompletionListener(mp -> {
@@ -300,20 +484,13 @@ public class MainActivity extends Activity {
     }
 
     private void stopPlayback() {
-        if (player != null) {
-            try {
-                player.stop();
-            } catch (Exception ignored) {
-            }
-            player.release();
-            player = null;
-        }
+        releasePlayer();
         btnStop.setEnabled(false);
         setStatus("Playback stopped.");
     }
 
     private void onSaveClicked() {
-        if (outputPath == null || !(new File(outputPath).exists())) {
+        if (currentOutputPath == null || !(new File(currentOutputPath).exists())) {
             Toast.makeText(this, "Apply effects first", Toast.LENGTH_SHORT).show();
             return;
         }
@@ -339,7 +516,7 @@ public class MainActivity extends Activity {
                 // via Chaquopy pip), so it is unit-tested like the effects.
                 File tmpMp3 = new File(getCacheDir(), "output.mp3");
                 Python.getInstance().getModule("audiofx.android_bridge").callAttr(
-                        "encode_wav_to_mp3", outputPath, tmpMp3.getAbsolutePath());
+                        "encode_wav_to_mp3", currentOutputPath, tmpMp3.getAbsolutePath());
                 String savedAs = copyToSaveFolder(tmpMp3, mp3Name);
                 runOnUiThread(() -> setStatus("Saved: " + savedAs));
             } catch (Exception e) {

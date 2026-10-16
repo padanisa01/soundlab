@@ -10,7 +10,9 @@ or the plan changes.
 - 8-bit and 16-bit PCM supported; stereo is mixed down to mono.
 - The input file name is remembered and reused for the MP3 save name.
 - A waveform display below the picker shows the picked audio
-  (peak amplitudes computed in the Python module).
+  (peak amplitudes computed in the Python module), with a seconds
+  timeline on the x-axis. Tapping the waveform starts playback from
+  that point (seeks in place if already playing the same file).
 
 ### Effects (applied in fixed order: Warmth -> Reverb -> Echo)
 - **Warmth** slider (0-100%): saturated low-end; 0% is an exact bypass.
@@ -20,6 +22,10 @@ or the plan changes.
 - **Echo** slider (0-100%): 320 ms feedback delay; 0% is an exact bypass.
 - All DSP runs in the Python module (`audiofx`, bundled via Chaquopy);
   NumPy FFT fast path with a pure-Python fallback.
+- **Undo**: every Apply is logged in an in-memory history keyed by input
+  filename hash (effects applied, timestamp, output file). Undo removes
+  the latest entry and restores the previous output, and can be repeated
+  until the original unprocessed audio is back.
 
 ### Playback
 - **Play result** plays the processed WAV through MediaPlayer

@@ -76,12 +76,27 @@
         android:layout_height="wrap_content"
         android:text="30%" />
 
-    <Button
-        android:id="@+id/btn_process"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="24dp"
-        android:text="Apply effects" />
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btn_process"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="2"
+            android:text="Apply effects" />
+
+        <Button
+            android:id="@+id/btn_undo"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:enabled="false"
+            android:text="Undo" />
+    </LinearLayout>
 
     <LinearLayout
         android:layout_width="match_parent"
