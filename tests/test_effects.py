@@ -108,6 +108,14 @@ class TestReverb(unittest.TestCase):
         self.assertTrue(all(s == 0.0 for s in ir[:predelay]))
         self.assertTrue(any(s != 0.0 for s in ir[predelay : predelay + 50]))
 
+    def test_sustained_input_does_not_clip(self):
+        # Regression: peak-normalized IRs gave ~29x RMS gain on the wet path
+        # and clipped sustained material. Unit-energy IRs must keep even the
+        # hottest preset (cave, wet=0.45) comfortably under full scale.
+        sig = sine(220, 1.0, self.SR, amplitude=0.8)
+        out = Reverb("cave").process(sig, self.SR)
+        self.assertLess(max(abs(s) for s in out), 0.95)
+
     def test_numpy_and_pure_python_agree(self):
         sig = sine(330, 0.1, self.SR)
         with_numpy = Reverb("studio", ir_seconds=0.03).process(sig, self.SR)

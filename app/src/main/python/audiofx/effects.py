@@ -140,8 +140,12 @@ class Reverb:
         ]
         cutoff = 1200.0 + p["brightness"] * 6800.0
         ir = _lowpass(ir, cutoff, sample_rate)
-        peak = max(abs(s) for s in ir) or 1.0
-        ir = [s / peak for s in ir]
+        # Unit-energy normalization: the wet path then has ~unity RMS gain,
+        # so the `wet` mix directly sets reverb loudness relative to dry.
+        # (Peak normalization blew up sustained signals: ~29x RMS gain on a
+        # 0.8 s IR, caught on a real 112 s track, 2026-10-16.)
+        energy = math.sqrt(sum(s * s for s in ir)) or 1.0
+        ir = [s / energy for s in ir]
         predelay = int(p["predelay_ms"] * sample_rate / 1000.0)
         return [0.0] * predelay + ir
 
