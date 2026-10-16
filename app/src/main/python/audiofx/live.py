@@ -28,7 +28,7 @@ class LiveChain:
     """
 
     def __init__(self, warmth=0.5, reverb_preset="studio", echo=0.3,
-                 sample_rate=48000, block_size=2048, channels=2):
+                 sample_rate=48000, block_size=2048, channels=2, seed=1234):
         if not _HAVE_NUMPY:
             raise RuntimeError("live effects need numpy")
         self.sample_rate = int(sample_rate)
@@ -39,7 +39,7 @@ class LiveChain:
         self._lp_alpha = 1.0 - math.exp(-2.0 * math.pi * 750.0 / self.sample_rate)
         self._lp_y = 0.0
         # Reverb: partitioned convolution state.
-        self._reverb = Reverb(reverb_preset)
+        self._reverb = Reverb(reverb_preset, seed=seed)
         self._rev_wet = self._reverb.params["wet"]
         self._rev_dry = 1.0 - self._rev_wet
         self._init_reverb_partitions()
@@ -146,4 +146,35 @@ class LiveChain:
         return struct.pack(
             "<%dh" % len(wet),
             *[int(round(max(-1.0, min(1.0, s)) * 32767)) for s in wet],
+        )
+
+
+class StereoLiveChain:
+    """Two LiveChains, one per channel, with decorrelated reverb seeds so
+    the stereo image survives the wet path."""
+
+    def __init__(self, warmth=0.5, reverb_preset="studio", echo=0.3,
+                 sample_rate=48000, block_size=2048):
+        if not _HAVE_NUMPY:
+            raise RuntimeError("live effects need numpy")
+        self.block_size = int(block_size)
+        self.left = LiveChain(warmth, reverb_preset, echo, sample_rate,
+                              block_size, channels=1, seed=1234)
+        self.right = LiveChain(warmth, reverb_preset, echo, sample_rate,
+                               block_size, channels=1, seed=987654)
+
+    def process_pcm_block(self, pcm_bytes):
+        """Stereo interleaved PCM16 in; stereo interleaved PCM16 out."""
+        n = len(pcm_bytes) // 4
+        vals = struct.unpack("<%dh" % (n * 2), pcm_bytes)
+        left = [vals[2 * i] / 32768.0 for i in range(n)]
+        right = [vals[2 * i + 1] / 32768.0 for i in range(n)]
+        wet_l = self.left.process_block(left)
+        wet_r = self.right.process_block(right)
+        interleaved = [0.0] * (2 * n)
+        interleaved[0::2] = wet_l
+        interleaved[1::2] = wet_r
+        return struct.pack(
+            "<%dh" % (2 * n),
+            *[int(round(max(-1.0, min(1.0, s)) * 32767)) for s in interleaved],
         )

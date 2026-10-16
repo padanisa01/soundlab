@@ -98,12 +98,18 @@ def normalize_file(input_path, output_path, target_db=-1.0):
 
 
 def live_chain_create(warmth, reverb_preset, echo, sample_rate,
-                      block_size=2048, channels=2):
-    """Create a stateful LiveChain for real-time block processing.
+                      block_size=2048, channels=2, stereo=False):
+    """Create a stateful live chain for real-time block processing.
 
-    The chain snapshots the effect params; feed it consecutive PCM16
-    blocks via process_pcm_block.
+    With stereo=True the chain keeps stereo in/out (two decorrelated
+    mono chains); otherwise it mixes down to mono. Feed it consecutive
+    PCM16 blocks via process_pcm_block.
     """
+    if stereo:
+        from .live import StereoLiveChain
+        return StereoLiveChain(warmth=warmth, reverb_preset=reverb_preset,
+                               echo=echo, sample_rate=sample_rate,
+                               block_size=block_size)
     from .live import LiveChain
     return LiveChain(warmth=warmth, reverb_preset=reverb_preset, echo=echo,
                      sample_rate=sample_rate, block_size=block_size,

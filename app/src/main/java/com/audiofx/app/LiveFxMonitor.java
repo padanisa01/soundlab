@@ -15,10 +15,10 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 
 /**
- * Live effect mode: microphone -> Python LiveChain (Warmth -> Reverb ->
+ * Live effect mode: microphone -> Python live chain (Warmth -> Reverb ->
  * Echo, params snapshotted at start) -> monitor output, with the wet
- * signal written to a WAV take. The take is mono 16-bit, like the rest
- * of the app's pipeline.
+ * signal written to a WAV take. The take keeps the capture channel
+ * count (stereo when the device captures stereo).
  *
  * Monitoring latency is one block plus device buffering (roughly
  * 0.1-0.3 s); this is a creative monitor, not a pro-audio path.
@@ -79,16 +79,18 @@ public class LiveFxMonitor {
             return false;
         }
         final PyObject newChain;
+        final boolean outStereo = h.channels == 2;
+        final int outChannels = outStereo ? 2 : 1;
         try {
             newChain = Python.getInstance().getModule("audiofx.android_bridge")
                     .callAttr("live_chain_create", warmth, reverbPreset, echo,
-                            h.sampleRate, BLOCK_SAMPLES, h.channels);
+                            h.sampleRate, BLOCK_SAMPLES, h.channels, outStereo);
         } catch (Exception e) {
             h.rec.release();
             return false;
         }
         try {
-            WavWriter.writeHeader(outFile, h.sampleRate, 1);
+            WavWriter.writeHeader(outFile, h.sampleRate, outChannels);
         } catch (IOException e) {
             h.rec.release();
             return false;
@@ -101,10 +103,12 @@ public class LiveFxMonitor {
                 .setAudioFormat(new AudioFormat.Builder()
                         .setSampleRate(h.sampleRate)
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .setChannelMask(outStereo
+                                ? AudioFormat.CHANNEL_OUT_STEREO
+                                : AudioFormat.CHANNEL_OUT_MONO)
                         .build())
                 .setTransferMode(AudioTrack.MODE_STREAM)
-                .setBufferSizeInBytes(BLOCK_SAMPLES * 2 * 4);
+                .setBufferSizeInBytes(BLOCK_SAMPLES * outChannels * 2 * 4);
         if (Build.VERSION.SDK_INT >= 26) {
             tb.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY);
         }

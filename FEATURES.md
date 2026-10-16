@@ -23,10 +23,12 @@ or the plan changes.
   default, choices persist). The record-start toast reports which
   effects actually engaged, or that the device doesn't support them.
 - **Live effects** toggle: while recording, the mic feeds a Python
-  LiveChain (Warmth -> Reverb -> Echo, params snapshotted from the
+  live chain (Warmth -> Reverb -> Echo, params snapshotted from the
   sliders at record start) in 2048-sample blocks. The wet signal
-  plays back live for monitoring and is baked into the take (mono
-  16-bit WAV). Monitoring latency is roughly 0.1-0.3 s; use
+  plays back live for monitoring and is baked into the take (stereo
+  16-bit WAV when the device captures stereo; each channel gets its
+  own chain with a decorrelated reverb seed so the stereo image
+  survives). Monitoring latency is roughly 0.1-0.3 s; use
   headphones, the mic hears the speaker (a best-effort echo
   canceler is attached when the device offers one). Effect sliders
   lock during a live take.

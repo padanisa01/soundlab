@@ -14,7 +14,7 @@ sys.path.insert(
 
 from audiofx import Echo, EffectChain, Reverb, Warmth, read_wav_mono, write_wav
 from audiofx import android_bridge
-from audiofx.live import LiveChain
+from audiofx.live import LiveChain, StereoLiveChain
 
 
 def sine(freq_hz, seconds, sample_rate, amplitude=0.5):
@@ -344,8 +344,52 @@ class TestLiveChain(unittest.TestCase):
     def test_bridge_factory(self):
         chain = android_bridge.live_chain_create(0.5, "studio", 0.3, self.SR)
         self.assertIsInstance(chain, LiveChain)
+        stereo = android_bridge.live_chain_create(0.5, "studio", 0.3, self.SR,
+                                                  stereo=True)
+        self.assertIsInstance(stereo, StereoLiveChain)
         with self.assertRaises(ValueError):
             android_bridge.live_chain_create(0.5, "arena", 0.3, self.SR)
+
+    def test_stereo_blocks_match_offline_per_channel(self):
+        # Each channel must equal the offline chain with the matching
+        # reverb seed (left 1234, right 987654).
+        sig_l = sine(440, 0.4, self.SR, amplitude=0.3)
+        sig_r = sine(550, 0.4, self.SR, amplitude=0.25)
+        live = StereoLiveChain(0.6, "concert_hall", 0.4, self.SR,
+                               block_size=self.BLOCK)
+        got_l, got_r = [], []
+        for i in range(0, len(sig_l), self.BLOCK):
+            sl = sig_l[i:i + self.BLOCK]
+            sr = sig_r[i:i + self.BLOCK]
+            n = len(sl)
+            pcm = struct.pack("<%dh" % (2 * n),
+                              *[int(round(s * 32767))
+                                for pair in zip(sl, sr)
+                                for s in pair])
+            # process_pcm_block expects full blocks; pad the tail block.
+            pad = self.BLOCK - n
+            pcm += struct.pack("<%dh" % (2 * pad), *[0] * (2 * pad))
+            wet = live.process_pcm_block(pcm)
+            vals = struct.unpack("<%dh" % (2 * self.BLOCK), wet)
+            got_l.extend(v / 32768.0 for v in vals[0:2 * n:2])
+            got_r.extend(v / 32768.0 for v in vals[1:2 * n:2])
+        for got, sig, seed in ((got_l, sig_l, 1234), (got_r, sig_r, 987654)):
+            ref = EffectChain([Warmth(0.6), Reverb("concert_hall", seed=seed),
+                               Echo(0.4)]).process(sig, self.SR)
+            self.assertEqual(len(got), len(sig))
+            # places=3: the PCM16 pack/unpack round trip adds ~1 LSB of noise.
+            for a, b in zip(got, ref[:len(sig)]):
+                self.assertAlmostEqual(a, b, places=3)
+
+    def test_stereo_pcm_length_and_decorrelation(self):
+        live = StereoLiveChain(0.5, "studio", 0.3, self.SR, block_size=1024)
+        n = 1024
+        pcm = struct.pack("<%dh" % (2 * n), *[1000] * (2 * n))
+        wet = live.process_pcm_block(pcm)
+        self.assertEqual(len(wet), 4 * n)
+        vals = struct.unpack("<%dh" % (2 * n), wet)
+        # Decorrelated reverb seeds: channels must differ.
+        self.assertTrue(any(a != b for a, b in zip(vals[0::2], vals[1::2])))
 
 
 if __name__ == "__main__":
