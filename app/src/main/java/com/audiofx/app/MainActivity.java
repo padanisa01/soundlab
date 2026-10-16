@@ -1,7 +1,11 @@
 package com.audiofx.app;
 
 import android.app.Activity;
+import android.Manifest;
+import android.animation.ObjectAnimator;
+import android.animation.ValueAnimator;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Typeface;
 import android.media.MediaPlayer;
@@ -33,9 +37,12 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
+import java.util.Date;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -47,6 +54,7 @@ public class MainActivity extends Activity {
 
     private static final int PICK_AUDIO = 1001;
     private static final int PICK_FOLDER = 1002;
+    private static final int REQ_RECORD_AUDIO = 2001;
 
     private LinearLayout trackCard;
     private TextView tvTrackName;
@@ -76,6 +84,7 @@ public class MainActivity extends Activity {
     private Button btnUndo;
     private TextView undoBadge;
     private ImageButton btnPlayPause;
+    private ImageButton btnRecord;
     private ImageButton btnStop;
     private Button btnSave;
     private ProgressBar progressBar;
@@ -98,8 +107,22 @@ public class MainActivity extends Activity {
     private Uri saveFolderUri;  // session-only; never persisted
     private MediaPlayer player;
     private boolean isPaused;
+    private final AudioRecorder recorder = new AudioRecorder();
+    private String pendingRecName;
+    private ObjectAnimator recPulse;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Runnable scheduledStop;
+
+    /** Ticks the elapsed-time readout while the mic is recording. */
+    private final Runnable recTick = new Runnable() {
+        @Override
+        public void run() {
+            if (recorder.isRecording()) {
+                tvTimeCur.setText(fmtTime(recorder.elapsedSec()));
+                mainHandler.postDelayed(this, 200);
+            }
+        }
+    };
 
     /** Polls getCurrentPosition() and moves the waveform progress fill. */
     private final Runnable positionUpdater = new Runnable() {
@@ -243,6 +266,7 @@ public class MainActivity extends Activity {
         btnUndo = findViewById(R.id.btn_undo);
         undoBadge = findViewById(R.id.undo_badge);
         btnPlayPause = findViewById(R.id.btn_play_pause);
+        btnRecord = findViewById(R.id.btn_record);
         btnStop = findViewById(R.id.btn_stop);
         btnSave = findViewById(R.id.btn_save);
         progressBar = findViewById(R.id.progress_bar);
@@ -286,6 +310,7 @@ public class MainActivity extends Activity {
         });
         btnUndo.setOnClickListener(v -> undoLastEffect());
         btnPlayPause.setOnClickListener(v -> togglePlayPause());
+        btnRecord.setOnClickListener(v -> onRecordClicked());
         btnStop.setOnClickListener(v -> stopPlayback());
         btnSave.setOnClickListener(v -> onSaveClicked());
 
@@ -425,34 +450,7 @@ public class MainActivity extends Activity {
             try {
                 File dest = new File(getCacheDir(), "input.wav");
                 copyUriToFile(uri, dest);
-                inputPath = dest.getAbsolutePath();
-                inputFileName = getDisplayName(uri);
-                // Pristine per-file copy, so Undo can always return to the
-                // original audio even if another file is picked later.
-                String hash = fileHash(inputFileName);
-                File pristine = new File(getCacheDir(), "orig_" + hash + ".wav");
-                copyUriToFile(uri, pristine);
-                originalInputPath.put(hash, pristine.getAbsolutePath());
-                // Reset playback state for the new file.
-                releasePlayer();
-                btnStop.setEnabled(false);
-                currentOutputPath = null;
-                audioDurationSec = 0;
-                setPlayPauseEnabled(false);
-                refreshPlayPause();
-                btnSave.setEnabled(false);
-                updateUndoBadge();
-                waveformView.setPeaks(new float[0]);
-                waveformView.setDuration(0);
-                tvTimeCur.setText("0:00");
-                tvTimeTot.setText("0:00");
-                tvSource.setVisibility(View.GONE);
-                btnPick.setVisibility(View.GONE);
-                trackCard.setVisibility(View.VISIBLE);
-                tvTrackName.setText(inputFileName);
-                tvTrackMeta.setText("Loading…");
-                setStatus("Ready. Adjust the effects and tap Apply.");
-                loadWaveform();
+                adoptAudioFile(dest, getDisplayName(uri));
             } catch (Exception e) {
                 setStatus("Could not read file: " + e.getMessage());
             }
@@ -537,6 +535,142 @@ public class MainActivity extends Activity {
                 out.write(buf, 0, n);
             }
         }
+    }
+
+    private static void copyFile(File src, File dest) throws Exception {
+        try (InputStream in = new FileInputStream(src);
+             OutputStream out = new FileOutputStream(dest)) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) != -1) {
+                out.write(buf, 0, n);
+            }
+        }
+    }
+
+    /**
+     * Make {@code wavFile} the current input: copies it to input.wav,
+     * snapshots a pristine copy for Undo, and resets the UI.
+     */
+    private void adoptAudioFile(File wavFile, String displayName) {
+        try {
+            File dest = new File(getCacheDir(), "input.wav");
+            copyFile(wavFile, dest);
+            inputPath = dest.getAbsolutePath();
+            inputFileName = displayName;
+            // Pristine per-file copy, so Undo can always return to the
+            // original audio even if another file is picked later.
+            String hash = fileHash(inputFileName);
+            File pristine = new File(getCacheDir(), "orig_" + hash + ".wav");
+            copyFile(wavFile, pristine);
+            originalInputPath.put(hash, pristine.getAbsolutePath());
+            // Reset playback state for the new file.
+            releasePlayer();
+            btnStop.setEnabled(false);
+            currentOutputPath = null;
+            audioDurationSec = 0;
+            setPlayPauseEnabled(false);
+            refreshPlayPause();
+            btnSave.setEnabled(false);
+            updateUndoBadge();
+            waveformView.setPeaks(new float[0]);
+            waveformView.setDuration(0);
+            tvTimeCur.setText("0:00");
+            tvTimeTot.setText("0:00");
+            tvSource.setVisibility(View.GONE);
+            btnPick.setVisibility(View.GONE);
+            trackCard.setVisibility(View.VISIBLE);
+            tvTrackName.setText(inputFileName);
+            tvTrackMeta.setText("Loading…");
+            setStatus("Ready. Adjust the effects and tap Apply.");
+            loadWaveform();
+        } catch (Exception e) {
+            setStatus("Could not read file: " + e.getMessage());
+        }
+    }
+
+    // ---- Microphone recording ----
+
+    private void onRecordClicked() {
+        if (recorder.isRecording()) {
+            stopRecording();
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(
+                    new String[]{Manifest.permission.RECORD_AUDIO}, REQ_RECORD_AUDIO);
+            return;
+        }
+        startRecording();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions,
+                                          int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQ_RECORD_AUDIO) {
+            if (grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                startRecording();
+            } else {
+                setStatus("Microphone permission denied — can't record.");
+            }
+        }
+    }
+
+    private void startRecording() {
+        if (player != null && player.isPlaying()) {
+            stopPlayback();
+        }
+        File take = new File(getCacheDir(), "rec_take.wav");
+        if (!recorder.start(take)) {
+            setStatus("Microphone unavailable on this device.");
+            return;
+        }
+        pendingRecName = "Recording "
+                + new SimpleDateFormat("yyyy-MM-dd HH-mm", Locale.US).format(new Date())
+                + ".wav";
+        // Recording UI state.
+        btnRecord.setImageResource(R.drawable.ic_stop_white);
+        recPulse = ObjectAnimator.ofFloat(btnRecord, "alpha", 1f, 0.35f);
+        recPulse.setDuration(600);
+        recPulse.setRepeatMode(ValueAnimator.REVERSE);
+        recPulse.setRepeatCount(ValueAnimator.INFINITE);
+        recPulse.start();
+        setPlayPauseEnabled(false);
+        btnStop.setEnabled(false);
+        btnProcess.setEnabled(false);
+        btnProcess.setAlpha(0.55f);
+        tvSource.setVisibility(View.VISIBLE);
+        tvSource.setText("REC");
+        tvSource.setTextColor(getColor(R.color.sl_red));
+        tvTimeCur.setText("0:00");
+        tvTimeTot.setText("--:--");
+        mainHandler.post(recTick);
+        setStatus("Recording " + recorder.activeLabel() + " — tap the red button to stop.");
+    }
+
+    private void stopRecording() {
+        File take = recorder.stop();
+        mainHandler.removeCallbacks(recTick);
+        if (recPulse != null) {
+            recPulse.cancel();
+            recPulse = null;
+        }
+        btnRecord.setAlpha(1f);
+        btnRecord.setImageResource(0);
+        tvSource.setVisibility(View.GONE);
+        tvSource.setTextColor(getColor(R.color.sl_org));
+        btnProcess.setEnabled(true);
+        btnProcess.setAlpha(1f);
+        if (take == null) {
+            setStatus("Recording failed — nothing captured.");
+            return;
+        }
+        File named = new File(getCacheDir(), pendingRecName);
+        take.renameTo(named);
+        adoptAudioFile(named, pendingRecName);
     }
 
     private void processAudio() {
@@ -1000,6 +1134,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (recorder.isRecording()) {
+            recorder.stop();
+        }
         if (player != null) {
             player.release();
             player = null;

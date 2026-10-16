@@ -7,6 +7,16 @@ or the plan changes.
 
 ### Audio input
 - Pick a WAV file from device storage (Storage Access Framework).
+- **Record**: the red record button captures from the microphone to a
+  16-bit PCM WAV take, tried in order: UNPROCESSED @ 48 kHz stereo
+  (raw, no AGC or noise suppression — the highest-fidelity path),
+  VOICE_RECOGNITION @ 48 kHz stereo, MIC @ 44.1 kHz stereo, MIC @
+  44.1 kHz mono. Stereo capture is how Android engages multiple
+  built-in mics; apps cannot address individual mics. The take is
+  named "Recording YYYY-MM-DD HH-mm.wav" and loaded as the current
+  input (stereo is mixed down to mono like any other input).
+  RECORD_AUDIO is requested at runtime; a pulsing red button, a REC
+  pill, and a live elapsed timer show while recording.
 - 8-bit and 16-bit PCM supported; stereo is mixed down to mono.
 - The input file name is remembered and reused for the MP3 save name.
 - A waveform display below the picker shows the picked audio
