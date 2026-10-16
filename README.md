@@ -77,6 +77,10 @@ Chaquopy downloads its Maven artifacts and the NumPy wheel on first build
 1. Open the app, tap **Pick audio** and choose a WAV file.
 2. Set Warmth, pick a Reverb preset, set Echo.
 3. Tap **Apply effects**, then **Play result**.
+4. Tap **Save as MP3**: pick a destination folder the first time (it's reused
+   for the rest of the session, never persisted). The MP3 keeps the input's
+   file name with an `.mp3` extension (VBR q2 via libmp3lame, through
+   FFmpegKit).
 
 Notes and limits (v1):
 
