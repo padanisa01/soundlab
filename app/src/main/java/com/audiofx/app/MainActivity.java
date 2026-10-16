@@ -331,6 +331,8 @@ public class MainActivity extends Activity {
                     waveformView.setPeaks(peaks);
                     waveformView.setDuration(dur);
                     audioDurationSec = dur;
+                    // The raw input can be auditioned before any Apply.
+                    btnPlay.setEnabled(true);
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> setStatus("Waveform failed: " + e.getMessage()));
@@ -454,7 +456,7 @@ public class MainActivity extends Activity {
             setStatus("Undone: " + removed.effects + " — now at: " + top.effects + ".");
         }
         if (currentOutputPath == null || !(new File(currentOutputPath).exists())) {
-            btnPlay.setEnabled(false);
+            btnPlay.setEnabled(inputPath != null && new File(inputPath).exists());
             btnSave.setEnabled(false);
         }
         btnUndo.setEnabled(historyDb.canUndo(hash));
@@ -585,11 +587,17 @@ public class MainActivity extends Activity {
     }
 
     private String playbackStatus(int startMs, Integer stopMs) {
+        String what = isPlayingInput() ? "input" : "processed audio";
         if (stopMs != null) {
-            return "Playing " + (startMs / 1000) + "s–" + (stopMs / 1000) + "s...";
+            return "Playing " + what + " " + (startMs / 1000) + "s–" + (stopMs / 1000) + "s...";
         }
-        return startMs > 0 ? "Playing from " + (startMs / 1000) + "s..."
-                : "Playing processed audio...";
+        return startMs > 0 ? "Playing " + what + " from " + (startMs / 1000) + "s..."
+                : "Playing " + what + "...";
+    }
+
+    /** True when the live player is on the raw input rather than an output. */
+    private boolean isPlayingInput() {
+        return playerOutputPath != null && playerOutputPath.equals(inputPath);
     }
 
     private void playOutput() {
@@ -614,17 +622,20 @@ public class MainActivity extends Activity {
     }
 
     private void playOutputAt(float fraction) {
-        if (currentOutputPath == null) {
-            Toast.makeText(this, "Apply effects first", Toast.LENGTH_SHORT).show();
+        // Audition the processed output when there is one, otherwise the
+        // raw input — so a selection can be heard before any Apply.
+        final String playPath = currentOutputPath != null ? currentOutputPath : inputPath;
+        if (playPath == null) {
+            Toast.makeText(this, "Pick an audio file first", Toast.LENGTH_SHORT).show();
             return;
         }
-        File f = new File(currentOutputPath);
+        File f = new File(playPath);
         if (!f.exists() || f.length() < 44) {
             setStatus("No audio to play (file missing or empty).");
             return;
         }
         // If the live player is already on this exact file, just seek in place.
-        if (player != null && currentOutputPath.equals(playerOutputPath)) {
+        if (player != null && playPath.equals(playerOutputPath)) {
             int startMs = seekMs(fraction);
             Integer stopMs = computeStopMs(startMs);
             try {
@@ -651,7 +662,7 @@ public class MainActivity extends Activity {
             // If the UI freezes on one of these status lines, the blocking
             // call is the one AFTER the last line shown.
             setStatus("Opening " + (f.length() / 1024) + " KB audio...");
-            player.setDataSource(currentOutputPath);
+            player.setDataSource(playPath);
             final boolean[] prepared = {false};
             player.setOnPreparedListener(mp -> {
                 prepared[0] = true;
@@ -664,7 +675,7 @@ public class MainActivity extends Activity {
                     }
                 }
                 mp.start();
-                playerOutputPath = currentOutputPath;
+                playerOutputPath = playPath;
                 isPaused = false;
                 scheduleStopAt(stopMs, startMs, mp);
                 showPlaybackRange(startMs);
@@ -709,7 +720,7 @@ public class MainActivity extends Activity {
 
     private void stopPlayback() {
         releasePlayer();
-        btnPlay.setEnabled(currentOutputPath != null);
+        btnPlay.setEnabled(currentOutputPath != null || inputPath != null);
         btnPause.setEnabled(false);
         btnStop.setEnabled(false);
         setStatus("Playback stopped.");

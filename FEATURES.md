@@ -35,9 +35,11 @@ or the plan changes.
   until the original unprocessed audio is back.
 
 ### Playback
-- **Play result** plays the processed WAV through MediaPlayer
-  (async prepare, so the UI never blocks). Starts at the selection
-  start when one is set, and stops at the selection end.
+- **Play result** plays through MediaPlayer (async prepare, so the UI
+  never blocks): the processed output when one exists, otherwise the
+  raw input — so a selection can be auditioned before any Apply.
+  Starts at the selection start when one is set, and stops at the
+  selection end. The status line says which source is playing.
 - **Pause** freezes playback; **Play** resumes from the pause point.
 - **Stop** halts playback; enabled only while audio is playing or paused.
   Play is re-enabled after every stop, so different windows can be
