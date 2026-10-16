@@ -143,6 +143,49 @@ class TestAndroidBridge(unittest.TestCase):
                     os.path.join(d, "nope.wav"), os.path.join(d, "o.wav")
                 )
 
+    def test_normalize_hits_target_peak(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.wav")
+            write_wav(src, sine(440, 0.3, self.SR, amplitude=0.07), self.SR)
+            dst = os.path.join(d, "out.wav")
+            res = android_bridge.normalize_file(src, dst)
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["sample_rate"], self.SR)
+            samples, _ = read_wav_mono(dst)
+            peak = max(abs(s) for s in samples)
+            # 16-bit quantization: peak lands within 1 LSB of -1 dBFS.
+            self.assertAlmostEqual(20 * math.log10(peak), -1.0, places=2)
+            self.assertAlmostEqual(res["peak_before_db"],
+                                   20 * math.log10(0.07), places=1)
+            self.assertEqual(res["peak_after_db"], -1.0)
+            self.assertGreater(res["applied_gain_db"], 20)
+
+    def test_normalize_preserves_dynamics(self):
+        # Whole-file constant gain: sample ratios are unchanged.
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.wav")
+            orig = sine(440, 0.3, self.SR, amplitude=0.2)
+            write_wav(src, orig, self.SR)
+            dst = os.path.join(d, "out.wav")
+            android_bridge.normalize_file(src, dst)
+            out, _ = read_wav_mono(dst)
+            ratios = [o / n for o, n in zip(orig, out) if abs(n) > 1e-6]
+            self.assertTrue(all(abs(r - ratios[0]) < 1e-3 for r in ratios))
+
+    def test_normalize_silent_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.wav")
+            write_wav(src, [0.0] * 800, self.SR)
+            with self.assertRaises(ValueError):
+                android_bridge.normalize_file(src, os.path.join(d, "o.wav"))
+
+    def test_normalize_missing_input_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ValueError):
+                android_bridge.normalize_file(
+                    os.path.join(d, "nope.wav"), os.path.join(d, "o.wav")
+                )
+
 
 class TestWaveformPeaks(unittest.TestCase):
     def test_bucket_count_and_range(self):

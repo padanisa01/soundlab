@@ -97,6 +97,17 @@
                 </LinearLayout>
 
                 <Button
+                    android:id="@+id/btn_normalize"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="8dp"
+                    android:background="@drawable/bg_ghost"
+                    android:text="Normalize"
+                    android:textColor="@color/sl_teal2"
+                    android:textSize="12.5sp"
+                    android:padding="8dp" />
+
+                <Button
                     android:id="@+id/btn_change"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"

@@ -88,6 +88,7 @@ public class MainActivity extends Activity {
     private ImageButton btnPlayPause;
     private ImageButton btnRecord;
     private ImageButton btnStop;
+    private Button btnNormalize;
     private Switch switchAgc;
     private Switch switchNs;
     private Button btnSave;
@@ -252,6 +253,8 @@ public class MainActivity extends Activity {
         tvTrackMeta = findViewById(R.id.tv_track_meta);
         btnPick = findViewById(R.id.btn_pick);
         btnChange = findViewById(R.id.btn_change);
+        btnNormalize = findViewById(R.id.btn_normalize);
+        btnNormalize.setOnClickListener(v -> normalizeAudio());
         toastView = findViewById(R.id.toast_view);
         tvWarmthVal = findViewById(R.id.tv_warmth_val);
         tvEchoVal = findViewById(R.id.tv_echo_val);
@@ -782,6 +785,73 @@ public class MainActivity extends Activity {
                 });
             } finally {
                 runOnUiThread(() -> {
+                    btnProcess.setEnabled(true);
+                    btnProcess.setAlpha(1f);
+                });
+            }
+        }).start();
+    }
+
+    /**
+     * Peak-normalize the current audio (processed output when there is
+     * one, else the input) to -1 dBFS. Whole-file gain, undoable like
+     * any other processing step.
+     */
+    private void normalizeAudio() {
+        final String srcPath = (currentOutputPath != null
+                && new File(currentOutputPath).exists()) ? currentOutputPath : inputPath;
+        if (srcPath == null || !(new File(srcPath).exists())) {
+            Toast.makeText(this, "Pick an audio file or record first",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final String hash = fileHash(inputFileName);
+        // Every application writes its own file so Undo can restore earlier ones.
+        final String outPath = new File(getCacheDir(),
+                "output_" + System.currentTimeMillis() + "_" + (outputSeq++) + ".wav")
+                .getAbsolutePath();
+        final long timestamp = System.currentTimeMillis();
+        final String effectsDesc = "Normalize to -1 dBFS";
+        btnNormalize.setEnabled(false);
+        btnProcess.setEnabled(false);
+        btnProcess.setAlpha(0.55f);
+        btnUndo.setEnabled(false); // no racing an undo mid-normalize
+        showProgress(true);
+        waveformView.startProgressAnimation();
+        setStatus("Normalizing...");
+        new Thread(() -> {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                PyObject result = Python.getInstance().getModule("audiofx.android_bridge")
+                        .callAttr("normalize_file", srcPath, outPath);
+                final double dur = Double.parseDouble(
+                        result.callAttr("get", "duration_s").toString());
+                historyDb.log(hash, effectsDesc, timestamp, outPath);
+                currentOutputPath = outPath;
+                audioDurationSec = dur;
+                final String msg = "Normalized: peak "
+                        + result.callAttr("get", "peak_before_db").toString() + " dB to "
+                        + result.callAttr("get", "peak_after_db").toString() + " dBFS";
+                runOnUiThread(() -> {
+                    setStatus(msg);
+                    setPlayPauseEnabled(true);
+                    btnSave.setEnabled(true);
+                    updateUndoBadge();
+                    showProgress(false);
+                    waveformView.finishProgressAnimation();
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setStatus("Error: " + e.getMessage());
+                    showProgress(false);
+                    waveformView.clearProgress();
+                    updateUndoBadge();
+                });
+            } finally {
+                runOnUiThread(() -> {
+                    btnNormalize.setEnabled(true);
                     btnProcess.setEnabled(true);
                     btnProcess.setAlpha(1f);
                 });

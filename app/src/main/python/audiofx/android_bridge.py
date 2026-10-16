@@ -4,6 +4,7 @@ Kept deliberately thin: argument validation, WAV in/out, and the fixed
 effect order Warmth -> Reverb -> Echo.
 """
 
+import math
 import os
 
 from .effects import Echo, Reverb, Warmth
@@ -63,6 +64,36 @@ def process_file(input_path, output_path, warmth=0.5, reverb_preset="studio", ec
         "duration_s": round(len(processed) / sample_rate, 2),
         "start_s": round(s / sample_rate, 2),
         "end_s": round(e / sample_rate, 2),
+    }
+
+
+def normalize_file(input_path, output_path, target_db=-1.0):
+    """Peak-normalize a WAV file so its peak reaches target_db dBFS.
+
+    A whole-file gain change: every sample is scaled by the same factor,
+    so dynamics are preserved. Target defaults to -1 dBFS, leaving
+    headroom for MP3 encoding. Returns a dict with ok/output_path/
+    sample_rate/duration_s/peak_before_db/peak_after_db/applied_gain_db.
+    Raises ValueError on a missing input or on silent input (no peak to
+    normalize to).
+    """
+    if not os.path.isfile(input_path):
+        raise ValueError("input file not found: %s" % input_path)
+    samples, sample_rate = read_wav_mono(input_path)
+    peak = max(abs(s) for s in samples)
+    if peak <= 0:
+        raise ValueError("input is silent: nothing to normalize")
+    target_peak = 10.0 ** (target_db / 20.0)
+    gain = target_peak / peak
+    write_wav(output_path, [s * gain for s in samples], sample_rate)
+    return {
+        "ok": True,
+        "output_path": output_path,
+        "sample_rate": sample_rate,
+        "duration_s": round(len(samples) / sample_rate, 2),
+        "peak_before_db": round(20 * math.log10(peak), 2),
+        "peak_after_db": round(target_db, 2),
+        "applied_gain_db": round(20 * math.log10(gain), 2),
     }
 
 

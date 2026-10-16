@@ -24,6 +24,11 @@ or the plan changes.
   effects actually engaged, or that the device doesn't support them.
 - 8-bit and 16-bit PCM supported; stereo is mixed down to mono.
 - The input file name is remembered and reused for the MP3 save name.
+- **Normalize** button (track card): peak-normalizes the current audio
+  to -1 dBFS with a single whole-file gain change (dynamics
+  preserved). Applies to the processed output when there is one,
+  else the input; undoable like any effect; the status reports the
+  before/after peak.
 - A waveform display below the picker shows the picked audio
   (peak amplitudes computed in the Python module), with a seconds
   timeline on the x-axis.
