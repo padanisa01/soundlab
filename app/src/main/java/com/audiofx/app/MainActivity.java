@@ -379,7 +379,16 @@ public class MainActivity extends Activity {
         btnProcess.setEnabled(false);
         btnUndo.setEnabled(false); // no racing an undo mid-apply
         showProgress(true);
-        waveformView.startProgressAnimation();
+        if (selStartSec != null && audioDurationSec > 0) {
+            float fromFrac = (float) (selStartSec / audioDurationSec);
+            float toFrac = 1f;
+            if (selEndSec != null) {
+                toFrac = (float) Math.min(1.0, selEndSec / audioDurationSec);
+            }
+            waveformView.startProgressAnimation(fromFrac, toFrac);
+        } else {
+            waveformView.startProgressAnimation();
+        }
         setStatus("Processing...");
         new Thread(() -> {
             try {
@@ -395,11 +404,16 @@ public class MainActivity extends Activity {
                 // via dict.get() instead.
                 final double dur = Double.parseDouble(
                         result.callAttr("get", "duration_s").toString());
+                // Echo back the window Python actually applied (start_s/end_s
+                // in the result) so a lost selection is visible in the status.
+                final String appliedStart = result.callAttr("get", "start_s").toString();
+                final String appliedEnd = result.callAttr("get", "end_s").toString();
                 historyDb.log(hash, effectsDesc, timestamp, outPath);
                 currentOutputPath = outPath;
                 audioDurationSec = dur;
                 final String msg = "Done: " + dur + "s @ "
-                        + result.callAttr("get", "sample_rate") + " Hz — " + effectsDesc;
+                        + result.callAttr("get", "sample_rate") + " Hz — " + effectsDesc
+                        + " (applied " + appliedStart + "s–" + appliedEnd + "s)";
                 runOnUiThread(() -> {
                     setStatus(msg);
                     btnPlay.setEnabled(true);

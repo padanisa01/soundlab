@@ -53,6 +53,8 @@ public class WaveformView extends View {
 
     private float[] peaks = new float[0];
     private float progress; // 0..1; 0 means no fill
+    private float progressFromFrac; // window the apply-progress fill sweeps
+    private float progressToFrac;
     private double durationSec;
 
     private float zoom = 1f;
@@ -121,6 +123,8 @@ public class WaveformView extends View {
         this.viewStart = 0f;
         cancelProgressAnimation();
         this.progress = 0f;
+        this.progressFromFrac = 0f;
+        this.progressToFrac = 1f;
         clearPlayback();
         clearSelection();
         invalidate();
@@ -303,10 +307,22 @@ public class WaveformView extends View {
 
     /**
      * Animate the fill easing toward ~92% over ~20s while background work
-     * runs. Call {@link #finishProgressAnimation()} when the work completes.
+     * runs. The fill spans the whole waveform by default; use
+     * {@link #startProgressAnimation(float, float)} to confine it to a
+     * window. Call {@link #finishProgressAnimation()} when the work completes.
      */
     public void startProgressAnimation() {
+        startProgressAnimation(0f, 1f);
+    }
+
+    /**
+     * Same as {@link #startProgressAnimation()}, but the fill sweeps only
+     * between the given audio fractions (e.g. a selection window).
+     */
+    public void startProgressAnimation(float fromFrac, float toFrac) {
         cancelProgressAnimation();
+        progressFromFrac = Math.max(0f, Math.min(1f, fromFrac));
+        progressToFrac = Math.max(0f, Math.min(1f, toFrac));
         progressAnimator = ValueAnimator.ofFloat(0f, 0.92f);
         progressAnimator.setDuration(20000);
         progressAnimator.setInterpolator(new DecelerateInterpolator());
@@ -332,6 +348,8 @@ public class WaveformView extends View {
     /** Stop any progress animation and remove the fill. */
     public void clearProgress() {
         cancelProgressAnimation();
+        progressFromFrac = 0f;
+        progressToFrac = 1f;
         setProgress(0f);
     }
 
@@ -386,13 +404,18 @@ public class WaveformView extends View {
         }
 
         if (progress > 0f) {
-            float fillW = w * progress;
-            overlayPaint.setShader(new LinearGradient(
-                    0, 0, fillW, 0, GRADIENT_START, GRADIENT_END,
-                    Shader.TileMode.CLAMP));
-            canvas.drawRect(0, 0, fillW, barH, overlayPaint);
-            overlayPaint.setShader(null);
-            canvas.drawLine(fillW, 0, fillW, barH, edgePaint);
+            float winX0 = fractionToX(progressFromFrac);
+            float winX1 = fractionToX(progressToFrac);
+            float fillX0 = Math.max(0f, winX0);
+            float fillX1 = Math.min(w, winX0 + (winX1 - winX0) * progress);
+            if (fillX1 > fillX0) {
+                overlayPaint.setShader(new LinearGradient(
+                        fillX0, 0, fillX1, 0, GRADIENT_START, GRADIENT_END,
+                        Shader.TileMode.CLAMP));
+                canvas.drawRect(fillX0, 0, fillX1, barH, overlayPaint);
+                overlayPaint.setShader(null);
+                canvas.drawLine(fillX1, 0, fillX1, barH, edgePaint);
+            }
         }
 
         // Playback progress: track across the played range, filled up to

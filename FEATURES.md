@@ -47,7 +47,9 @@ or the plan changes.
 - A horizontal progress bar is shown while Apply effects or Save as MP3
   runs, and hidden when idle.
 - While Apply effects runs, the waveform fills left to right with a
-  translucent gradient to indicate progress.
+  translucent gradient to indicate progress — confined to the
+  selection window when one is set. The status line reports the
+  window Python actually applied, e.g. `(applied 10.0s–20.0s)`.
 
 ### Save
 - **Save as MP3**: encodes the processed audio with `lameenc`
