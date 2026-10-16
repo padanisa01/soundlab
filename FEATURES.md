@@ -115,16 +115,44 @@ or the plan changes.
   selection window when one is set. The toast reports the
   window Python actually applied, e.g. `(applied 10.0s–20.0s)`.
 
+### Library of recordings
+- Every recording becomes a durable project in `filesDir/library/`:
+  one immutable pristine WAV (`takes/<uuid>.wav`) plus an ordered,
+  re-runnable op chain in SQLite (`soundlab_library.db`), surviving
+  app restarts. Picked/imported files stay on the old session-only path.
+- **Library screen** (`LibraryActivity`, via the header icon or the
+  "Open library" button): newest first; rows show name, recorded
+  date/time, duration, size, up to 3 effect chips, and a teal dot when
+  an MP3 was exported. Tap loads the entry into the waveform screen;
+  long-press/overflow offers Rename, Duplicate, Delete (confirm).
+  Header shows total size with a warning past 2 GB.
+- **Cumulative ops, no generational loss**: Apply / Normalize / Trim /
+  Join append an op row with parameters and re-render the whole chain
+  from pristine in float (`render_chain`), writing 16-bit PCM once to
+  the render cache. Undo pops the last op and re-renders — it works
+  across sessions; the badge shows the persisted op count.
+- Auto-normalize is op #1, so the pristine stays truly raw. Live-FX
+  takes store the baked wet take as pristine with a display-only
+  first op (never re-run).
+- History is keyed by entry ID: renames never orphan it. Duplicate
+  forks an independent copy with a "Forked from" marker. Edits
+  auto-persist; there is no save-project step.
+
 ### Save
 - **Save as MP3**: encodes with `lameenc` (CBR 192 kbps), in the Python
   module so it stays unit-testable. Works with no Apply: saves the
   processed output when there is one, otherwise the input as-is
   (status says "no effects").
-- The output keeps the input's file name with an `.mp3` extension;
-  name collisions get a ` (n)` suffix.
-- The destination folder is chosen once via the system folder picker
-  and reused for every save in the session; it is never persisted
-  between app launches.
+- The save dialog offers an editable file name (prefilled from the
+  track name) and shows the destination folder with a Choose button,
+  whether or not a folder was picked before.
+- Saving to an existing MP3 name always asks: **Overwrite** or **Keep
+  both** (the ` (n)` suffix). Never silently overwrites.
+- The destination folder is chosen via the system folder picker and its
+  permission is persisted (`takePersistableUriPermission`), so re-export
+  works across app launches.
+- Every export of a library entry is logged (file name, folder, op count
+  at export time); picked files are not logged.
 
 ## Planned / known gaps
 - Compressed formats (MP3, etc.) as *input* — v1 is WAV-only.

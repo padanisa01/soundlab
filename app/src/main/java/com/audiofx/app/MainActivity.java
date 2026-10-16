@@ -7,6 +7,7 @@ import android.animation.ObjectAnimator;
 import android.animation.ValueAnimator;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.UriPermission;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Typeface;
@@ -47,8 +48,10 @@ import java.util.ArrayDeque;
 import java.util.Date;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * Thin UI shell. All DSP lives in the Python module
@@ -66,6 +69,8 @@ public class MainActivity extends Activity {
     private TextView tvTrackMeta;
     private Button btnPick;
     private Button btnChange;
+    private ImageButton btnLibrary;
+    private Button btnOpenLibrary;
     private TextView toastView;
     private final Runnable hideToast = () -> {
         toastView.animate().alpha(0f).setDuration(250)
@@ -111,15 +116,17 @@ public class MainActivity extends Activity {
     private TextView tvTimeTot;
     private TextView tvSource;
 
-    private String inputPath;   // cached WAV picked by the user
+    private String inputPath;   // cached WAV picked by the user, or a library pristine
     private String inputFileName = "audio.wav";
     private String currentOutputPath;  // file backing Play/Save; null until first Apply
     private String playerOutputPath;   // file the live player was built for
+    private String currentEntryId;     // library entry being edited; null for picked files
+    private LibraryDb libraryDb;
     private double audioDurationSec;
     private int outputSeq;  // disambiguates output files within the same millisecond
     private Double selStartSec;  // waveform selection window, null = none
     private Double selEndSec;    // null = from start point to end of file
-    private Uri saveFolderUri;  // session-only; never persisted
+    private Uri saveFolderUri;  // persisted via takePersistableUriPermission
     private MediaPlayer player;
     private boolean isPaused;
     private final AudioRecorder recorder = new AudioRecorder();
@@ -282,6 +289,10 @@ public class MainActivity extends Activity {
         tvTrackMeta = findViewById(R.id.tv_track_meta);
         btnPick = findViewById(R.id.btn_pick);
         btnChange = findViewById(R.id.btn_change);
+        btnLibrary = findViewById(R.id.btn_library);
+        btnOpenLibrary = findViewById(R.id.btn_open_library);
+        btnLibrary.setOnClickListener(v -> openLibrary());
+        btnOpenLibrary.setOnClickListener(v -> openLibrary());
         btnNormalize = findViewById(R.id.btn_normalize);
         btnNormalize.setOnClickListener(v -> normalizeAudio());
         toastView = findViewById(R.id.toast_view);
@@ -376,7 +387,46 @@ public class MainActivity extends Activity {
         btnStop.setOnClickListener(v -> stopPlayback());
         btnSave.setOnClickListener(v -> onSaveClicked());
 
-        setStatus("Pick a WAV file to begin.");
+        libraryDb = new LibraryDb(this);
+        restoreSaveFolderUri(prefs);
+
+        String launchEntryId = getIntent().getStringExtra(LibraryActivity.EXTRA_ENTRY_ID);
+        if (launchEntryId != null) {
+            adoptLibraryEntry(launchEntryId);
+        } else {
+            setStatus("Pick a WAV file to begin.");
+        }
+    }
+
+    private void openLibrary() {
+        startActivity(new Intent(this, LibraryActivity.class));
+    }
+
+    /** Restore the persisted SAF save-folder URI when we still hold permission. */
+    private void restoreSaveFolderUri(SharedPreferences prefs) {
+        String saved = prefs.getString("save_folder_uri", null);
+        if (saved == null) {
+            return;
+        }
+        try {
+            Uri uri = Uri.parse(saved);
+            boolean held = false;
+            List<UriPermission> perms =
+                    getContentResolver().getPersistedUriPermissions();
+            for (UriPermission p : perms) {
+                if (p.getUri().equals(uri) && p.isWritePermission()) {
+                    held = true;
+                    break;
+                }
+            }
+            if (held) {
+                saveFolderUri = uri;
+            } else {
+                prefs.edit().remove("save_folder_uri").apply();
+            }
+        } catch (Exception ignored) {
+            prefs.edit().remove("save_folder_uri").apply();
+        }
     }
 
     private SeekBar.OnSeekBarChangeListener sliderListener() {
@@ -472,7 +522,10 @@ public class MainActivity extends Activity {
 
     /** Undo depth badge; also drives the Undo button state. */
     private void updateUndoBadge() {
-        int depth = historyDb.depth(fileHash(inputFileName));
+        // Library entries use the persisted op chain; picked files use the
+        // legacy session-only history.
+        int depth = currentEntryId != null
+                ? undoDepth() : historyDb.depth(fileHash(inputFileName));
         undoBadge.setText(String.valueOf(depth));
         undoBadge.setBackgroundResource(
                 depth > 0 ? R.drawable.bg_badge : R.drawable.bg_badge_zero);
@@ -542,7 +595,17 @@ public class MainActivity extends Activity {
         }
         if (requestCode == PICK_FOLDER && resultCode == RESULT_OK
                 && data != null && data.getData() != null) {
-            saveFolderUri = data.getData();
+            Uri uri = data.getData();
+            // Persist the tree permission so re-export works across sessions.
+            try {
+                getContentResolver().takePersistableUriPermission(uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            } catch (Exception ignored) {
+            }
+            saveFolderUri = uri;
+            getSharedPreferences("soundlab", MODE_PRIVATE).edit()
+                    .putString("save_folder_uri", uri.toString()).apply();
             if (saveDialog != null && saveDialog.isShowing()
                     && saveFolderLabel != null) {
                 saveFolderLabel.setText(saveFolderName());
@@ -642,6 +705,9 @@ public class MainActivity extends Activity {
     /**
      * Make {@code wavFile} the current input: copies it to input.wav,
      * snapshots a pristine copy for Undo, and resets the UI.
+     *
+     * Picked-file path (recordings go through adoptLibraryEntry instead):
+     * session-only history, cache outputs, never touches the library.
      */
     private void adoptAudioFile(File wavFile, String displayName) {
         try {
@@ -649,6 +715,7 @@ public class MainActivity extends Activity {
             if (!wavFile.getAbsolutePath().equals(dest.getAbsolutePath())) {
                 copyFile(wavFile, dest);
             }
+            currentEntryId = null; // picked file: not a library entry
             inputPath = dest.getAbsolutePath();
             inputFileName = displayName;
             // Pristine per-file copy, so Undo can always return to the
@@ -672,6 +739,7 @@ public class MainActivity extends Activity {
             tvTimeTot.setText("0:00");
             tvSource.setVisibility(View.GONE);
             btnPick.setVisibility(View.GONE);
+            btnOpenLibrary.setVisibility(View.GONE);
             trackCard.setVisibility(View.VISIBLE);
             tvTrackName.setText(inputFileName);
             tvTrackMeta.setText("Loading…");
@@ -679,6 +747,404 @@ public class MainActivity extends Activity {
             loadWaveform();
         } catch (Exception e) {
             setStatus("Could not read file: " + e.getMessage());
+        }
+    }
+
+    // ---- Recordings library ----
+
+    /**
+     * Adopt a library entry as the current project. The pristine WAV is the
+     * read-only input; the render cache backs Play/Save once ops exist.
+     * History is keyed by the entry ID, so renames never orphan it.
+     */
+    private void adoptLibraryEntry(String entryId) {
+        adoptLibraryEntry(entryId, true);
+    }
+
+    private void adoptLibraryEntry(String entryId, boolean loadNow) {
+        LibraryDb.LibraryEntry e;
+        try {
+            e = libraryDb.getEntry(entryId);
+        } catch (Exception ex) {
+            setStatus("Library unavailable: " + ex.getMessage());
+            return;
+        }
+        if (e == null) {
+            setStatus("Library entry not found.");
+            return;
+        }
+        if (!(new File(e.pristinePath).exists())) {
+            // Defensive per spec: drop entries whose take is gone.
+            try {
+                libraryDb.deleteEntry(entryId);
+            } catch (Exception ignored) {
+            }
+            currentEntryId = null;
+            setStatus("Recording file missing — removed from library.");
+            return;
+        }
+        currentEntryId = entryId;
+        inputPath = e.pristinePath;
+        inputFileName = e.name;
+        releasePlayer();
+        btnStop.setEnabled(false);
+        currentOutputPath = null;
+        audioDurationSec = 0;
+        selStartSec = null;
+        selEndSec = null;
+        setPlayPauseEnabled(false);
+        refreshPlayPause();
+        btnSave.setEnabled(true); // the take is savable as-is, no Apply needed
+        waveformView.setPeaks(new float[0]);
+        waveformView.setDuration(0);
+        tvTimeCur.setText("0:00");
+        tvTimeTot.setText("0:00");
+        tvSource.setVisibility(View.GONE);
+        btnPick.setVisibility(View.GONE);
+        btnOpenLibrary.setVisibility(View.GONE);
+        trackCard.setVisibility(View.VISIBLE);
+        tvTrackName.setText(e.name);
+        tvTrackMeta.setText("Loading…");
+        int depth = undoDepth();
+        setStatus(depth > 0
+                ? "Loaded from library — " + depth + " effects in history."
+                : "Loaded from library — pristine take.");
+        updateUndoBadge();
+        if (!loadNow) {
+            return; // the caller chains straight into an op that loads
+        }
+        boolean engineOk = LibraryDb.DSP_VERSION.equals(e.dspVersion);
+        File render = libraryDb.renderFile(entryId);
+        if (!engineOk && render.exists()) {
+            // Engine moved on: keep the last render as the audible truth
+            // and warn instead of silently re-rendering.
+            currentOutputPath = render.getAbsolutePath();
+            setStatus("Note: rendered with an older engine — re-apply to refresh.");
+            loadWaveformForPath(currentOutputPath);
+            return;
+        }
+        if (!engineOk) {
+            setStatus("Note: engine updated since this take — re-rendering.");
+        }
+        if (hasRenderableOps(entryId)) {
+            reRenderEntry("Rendering...");
+        } else {
+            loadWaveformForPath(inputPath);
+        }
+    }
+
+    /** True for ops that render_chain executes (display-only ops excluded). */
+    private static boolean isRenderableOp(String opType) {
+        return "fx".equals(opType) || "normalize".equals(opType)
+                || "trim".equals(opType) || "join".equals(opType);
+    }
+
+    private boolean hasRenderableOps(String entryId) {
+        try {
+            for (LibraryDb.Op op : libraryDb.listOps(entryId)) {
+                if (isRenderableOp(op.opType)) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    /** Undo depth = persisted renderable op count; survives restarts. */
+    private int undoDepth() {
+        if (currentEntryId == null) {
+            return 0;
+        }
+        int n = 0;
+        try {
+            for (LibraryDb.Op op : libraryDb.listOps(currentEntryId)) {
+                if (isRenderableOp(op.opType)) {
+                    n++;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return n;
+    }
+
+    /** ops_json for render_chain: renderable ops only, in seq order. */
+    private String buildOpsJson(String entryId) throws Exception {
+        StringBuilder sb = new StringBuilder("[");
+        boolean first = true;
+        for (LibraryDb.Op op : libraryDb.listOps(entryId)) {
+            if (!isRenderableOp(op.opType)) {
+                continue; // livefx / fork are display-only
+            }
+            if (!first) {
+                sb.append(",");
+            }
+            first = false;
+            sb.append("{\"op\":\"").append(op.opType)
+                    .append("\",\"params\":").append(op.paramsJson).append("}");
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
+    /**
+     * Render the entry's op chain to the render cache (call on a background
+     * thread). Writes to a temp file and atomically renames into place.
+     * Returns the rendered duration in seconds.
+     */
+    private double renderChainToCache(String entryId) throws Exception {
+        LibraryDb.LibraryEntry e = libraryDb.getEntry(entryId);
+        if (e == null) {
+            throw new Exception("Library entry not found");
+        }
+        if (!Python.isStarted()) {
+            Python.start(new AndroidPlatform(this));
+        }
+        String opsJson = buildOpsJson(entryId);
+        File render = libraryDb.renderFile(entryId);
+        File tmp = new File(render.getParentFile(), render.getName() + ".tmp");
+        PyObject result = Python.getInstance().getModule("audiofx.android_bridge")
+                .callAttr("render_chain", e.pristinePath, opsJson,
+                        tmp.getAbsolutePath());
+        double dur = Double.parseDouble(
+                result.callAttr("get", "duration_s").toString());
+        if (!tmp.renameTo(render)) {
+            copyFile(tmp, render);
+            tmp.delete();
+        }
+        return dur;
+    }
+
+    /**
+     * Re-render the current entry in the background with the standard
+     * progress UI, then reload the waveform.
+     */
+    private void reRenderEntry(String workingMsg) {
+        final String entryId = currentEntryId;
+        if (entryId == null) {
+            return;
+        }
+        setBusy(true);
+        waveformView.startProgressAnimation();
+        setStatus(workingMsg);
+        new Thread(() -> {
+            try {
+                final double dur = renderChainToCache(entryId);
+                runOnUiThread(() -> {
+                    currentOutputPath =
+                            libraryDb.renderFile(entryId).getAbsolutePath();
+                    audioDurationSec = dur;
+                    releasePlayer();
+                    btnStop.setEnabled(false);
+                    loadWaveformForPath(currentOutputPath);
+                    setPlayPauseEnabled(true);
+                    btnSave.setEnabled(true);
+                    setBusy(false);
+                    waveformView.finishProgressAnimation();
+                    updateUndoBadge();
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setStatus("Error: " + e.getMessage());
+                    setBusy(false);
+                    waveformView.clearProgress();
+                    updateUndoBadge();
+                });
+            }
+        }).start();
+    }
+
+    /**
+     * Append an op to the current library entry and re-render the whole
+     * chain (cumulative semantics). The op row is rolled back if the
+     * render fails, so the DB never disagrees with the audio.
+     */
+    private void applyLibraryOp(final String opType, final String paramsJson,
+                                final String label, final String workingMsg,
+                                final String doneMsg, final Runnable onRendered) {
+        final String entryId = currentEntryId;
+        if (entryId == null) {
+            return;
+        }
+        setBusy(true);
+        if (selStartSec != null && audioDurationSec > 0
+                && ("fx".equals(opType))) {
+            float fromFrac = (float) (selStartSec / audioDurationSec);
+            float toFrac = 1f;
+            if (selEndSec != null) {
+                toFrac = (float) Math.min(1.0, selEndSec / audioDurationSec);
+            }
+            waveformView.startProgressAnimation(fromFrac, toFrac);
+        } else {
+            waveformView.startProgressAnimation();
+        }
+        setStatus(workingMsg);
+        new Thread(() -> {
+            boolean added = false;
+            try {
+                libraryDb.addOp(entryId, opType, paramsJson, label);
+                added = true;
+                final double dur = renderChainToCache(entryId);
+                runOnUiThread(() -> {
+                    currentOutputPath =
+                            libraryDb.renderFile(entryId).getAbsolutePath();
+                    audioDurationSec = dur;
+                    releasePlayer();
+                    btnStop.setEnabled(false);
+                    if (onRendered != null) {
+                        onRendered.run();
+                    }
+                    setStatus(doneMsg);
+                    setPlayPauseEnabled(true);
+                    btnSave.setEnabled(true);
+                    setBusy(false);
+                    waveformView.finishProgressAnimation();
+                    updateUndoBadge();
+                });
+            } catch (Exception e) {
+                if (added) {
+                    try {
+                        libraryDb.popLastOp(entryId);
+                    } catch (Exception ignored) {
+                    }
+                }
+                runOnUiThread(() -> {
+                    setStatus("Error: " + e.getMessage());
+                    setBusy(false);
+                    waveformView.clearProgress();
+                    updateUndoBadge();
+                });
+            }
+        }).start();
+    }
+
+    /** Pop the last renderable op and re-render (cross-session undo). */
+    private void undoLibraryOp() {
+        final String entryId = currentEntryId;
+        if (entryId == null) {
+            return;
+        }
+        final LibraryDb.Op last;
+        try {
+            List<LibraryDb.Op> ops = libraryDb.listOps(entryId);
+            LibraryDb.Op found = null;
+            for (int i = ops.size() - 1; i >= 0; i--) {
+                if (isRenderableOp(ops.get(i).opType)) {
+                    found = ops.get(i);
+                    break;
+                }
+            }
+            if (found == null
+                    || !isRenderableOp(ops.get(ops.size() - 1).opType)) {
+                // Nothing renderable to undo; display-only ops are never popped.
+                Toast.makeText(this, "Nothing to undo", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            last = found;
+        } catch (Exception e) {
+            setStatus("Undo failed: " + e.getMessage());
+            return;
+        }
+        setBusy(true);
+        waveformView.startProgressAnimation();
+        setStatus("Undoing...");
+        new Thread(() -> {
+            try {
+                libraryDb.popLastOp(entryId);
+                final boolean remaining = hasRenderableOps(entryId);
+                final String refreshPath;
+                if (remaining) {
+                    renderChainToCache(entryId);
+                    refreshPath = libraryDb.renderFile(entryId).getAbsolutePath();
+                } else {
+                    // Back to pristine: drop the render cache.
+                    File render = libraryDb.renderFile(entryId);
+                    if (render.exists()) {
+                        render.delete();
+                    }
+                    LibraryDb.LibraryEntry e = libraryDb.getEntry(entryId);
+                    refreshPath = e != null ? e.pristinePath : null;
+                }
+                if (refreshPath == null || !(new File(refreshPath).exists())) {
+                    throw new Exception("audio missing after undo");
+                }
+                runOnUiThread(() -> {
+                    currentOutputPath = remaining ? refreshPath : null;
+                    releasePlayer();
+                    btnStop.setEnabled(false);
+                    loadWaveformForPath(refreshPath);
+                    int depth = undoDepth();
+                    setStatus("Undone: " + last.label + (depth > 0
+                            ? " — " + depth + " op(s) left."
+                            : " — back to the original audio."));
+                    btnSave.setEnabled(true);
+                    setBusy(false);
+                    waveformView.finishProgressAnimation();
+                    updateUndoBadge();
+                });
+            } catch (Exception e) {
+                // Roll the popped op back on: re-add with the same content
+                // (it regains the top seq, preserving order).
+                try {
+                    libraryDb.addOp(entryId, last.opType, last.paramsJson, last.label);
+                } catch (Exception ignored) {
+                }
+                runOnUiThread(() -> {
+                    setStatus("Undo failed: " + e.getMessage());
+                    setBusy(false);
+                    waveformView.clearProgress();
+                    updateUndoBadge();
+                });
+            }
+        }).start();
+    }
+
+    /** Disable the edit controls + progress bar while background work runs. */
+    private void setBusy(boolean busy) {
+        setEditButtonsEnabled(!busy);
+        btnUndo.setEnabled(!busy);
+        showProgress(busy);
+    }
+
+    // ---- Library op params (spec section 6) ----
+
+    private static String fxParamsJson(double warmth, String preset, double echo,
+                                       Double startSec, Double endSec) {
+        return "{\"warmth\":" + warmth
+                + ",\"reverb_preset\":\"" + preset + "\""
+                + ",\"echo\":" + echo
+                + ",\"start_sec\":" + (startSec == null ? "null" : startSec)
+                + ",\"end_sec\":" + (endSec == null ? "null" : endSec) + "}";
+    }
+
+    private static String normalizeParamsJson() {
+        return "{\"target_db\":-1.0,\"percentile\":99.0}";
+    }
+
+    private static String editParamsJson(double startSec, Double endSec) {
+        return "{\"start_sec\":" + startSec
+                + ",\"end_sec\":" + (endSec == null ? "null" : endSec) + "}";
+    }
+
+    /** Sample rate / channels / duration from a 16-bit PCM WAV header. */
+    private static double[] wavInfo(File f) throws Exception {
+        try (InputStream in = new FileInputStream(f)) {
+            byte[] h = new byte[44];
+            int r = 0;
+            while (r < 44) {
+                int n = in.read(h, r, 44 - r);
+                if (n < 0) {
+                    throw new Exception("truncated WAV header");
+                }
+                r += n;
+            }
+            int channels = (h[22] & 0xff) | ((h[23] & 0xff) << 8);
+            int sampleRate = (h[24] & 0xff) | ((h[25] & 0xff) << 8)
+                    | ((h[26] & 0xff) << 16) | ((h[27] & 0xff) << 24);
+            long dataBytes = Math.max(0, f.length() - 44);
+            double dur = (sampleRate > 0 && channels > 0)
+                    ? dataBytes / (double) (sampleRate * channels * 2) : 0;
+            return new double[]{sampleRate, channels, dur};
         }
     }
 
@@ -851,8 +1317,16 @@ public class MainActivity extends Activity {
     }
 
     private void stopRecording() {
+        final boolean wasLive = liveMonitor.isRecording();
+        // Snapshot UI state before stop() resets the session labels.
+        final String captureLabel = wasLive
+                ? liveMonitor.activeLabel().replace(" live FX", "")
+                : recorder.activeLabel();
+        final int liveWarmthPct = seekWarmth.getProgress();
+        final String livePreset = reverbPreset;
+        final int liveEchoPct = seekEcho.getProgress();
         final File take;
-        if (liveMonitor.isRecording()) {
+        if (wasLive) {
             take = liveMonitor.stop();
         } else {
             take = recorder.stop();
@@ -862,16 +1336,94 @@ public class MainActivity extends Activity {
             setStatus("Recording failed — nothing captured.");
             return;
         }
-        File named = new File(getCacheDir(), pendingRecName);
-        if (!take.renameTo(named)) {
-            named = take; // rename failed; use the take file directly
+        // Durable home for the take: filesDir/library/takes/<uuid>.wav.
+        // The pristine stays raw; auto-normalize becomes op #1 below.
+        final String entryId = UUID.randomUUID().toString();
+        final File dest = libraryDb.takeFile(entryId);
+        try {
+            copyFile(take, dest);
+            take.delete();
+            double[] info = wavInfo(dest);
+            String name = pendingRecName;
+            if (name.toLowerCase(Locale.US).endsWith(".wav")) {
+                name = name.substring(0, name.length() - 4);
+            }
+            libraryDb.createEntryWithId(entryId, name, System.currentTimeMillis(),
+                    info[2], (int) info[0], (int) info[1],
+                    wasLive ? "mic-livefx" : "mic", captureLabel,
+                    LibraryDb.DSP_VERSION, dest.getAbsolutePath());
+            if (wasLive) {
+                // Display-only first op: the wet take IS the pristine.
+                libraryDb.addOp(entryId, "livefx",
+                        "{\"warmth\":" + (liveWarmthPct / 100.0)
+                                + ",\"reverb_preset\":\"" + livePreset + "\""
+                                + ",\"echo\":" + (liveEchoPct / 100.0) + "}",
+                        "Live FX · Warmth " + liveWarmthPct + "%, "
+                                + reverbDisplayName(livePreset)
+                                + ", Echo " + liveEchoPct + "%");
+            }
+        } catch (Exception e) {
+            dest.delete(); // don't orphan a take file with no DB row
+            setStatus("Could not save recording: " + e.getMessage());
+            return;
         }
-        adoptAudioFile(named, pendingRecName);
-        // Auto-normalize takes (not picked files): runs as an undoable
-        // history step, so the raw mic capture stays recoverable.
+        // Adopt without an initial load when auto-normalize follows: the
+        // normalize op's own render completion loads the waveform, which
+        // avoids a pristine-load racing the normalized render.
+        adoptLibraryEntry(entryId, !switchAutoNorm.isChecked());
         if (switchAutoNorm.isChecked()) {
             normalizeAudio();
         }
+    }
+
+    /** Library path for Apply: append an fx op, re-render cumulatively. */
+    private void applyFxOp() {
+        final double warmth = seekWarmth.getProgress() / 100.0;
+        final String preset = reverbPreset;
+        final double echo = seekEcho.getProgress() / 100.0;
+        final String windowDesc = selStartSec != null
+                ? " [" + fmtSec(selStartSec) + "–"
+                        + (selEndSec != null ? fmtSec(selEndSec) : "end") + "]"
+                : "";
+        final String label = "Warmth " + seekWarmth.getProgress() + "%, Reverb "
+                + preset + ", Echo " + seekEcho.getProgress() + "%" + windowDesc;
+        applyLibraryOp("fx", fxParamsJson(warmth, preset, echo, selStartSec, selEndSec),
+                label, "Processing...",
+                "Done — " + label + " (cumulative).",
+                () -> loadWaveformForPath(currentOutputPath));
+    }
+
+    /** Library path for Normalize: append the op, re-render. */
+    private void applyNormalizeOp() {
+        applyLibraryOp("normalize", normalizeParamsJson(), "Normalize to -1 dBFS",
+                "Normalizing...", "Normalized to -1 dBFS.",
+                () -> loadWaveformForPath(currentOutputPath));
+    }
+
+    /** Library path for Trim/Join: append the op, re-render. */
+    private void applyEditOp(String op, double startSec, Double endSec) {
+        final String rangeDesc = fmtSec(startSec) + "–"
+                + (endSec != null ? fmtSec(endSec) : "end");
+        final String label = op.equals("trim")
+                ? "Trim " + rangeDesc + " to silence"
+                : "Join (removed " + rangeDesc + ")";
+        final String workingMsg = op.equals("trim") ? "Trimming to silence..." : "Joining...";
+        final String doneMsg = op.equals("trim")
+                ? "Trimmed " + rangeDesc + " to silence — selection kept."
+                : "Joined: removed " + rangeDesc + ".";
+        final double s = startSec;
+        final Double e = endSec;
+        applyLibraryOp(op, editParamsJson(startSec, endSec), label, workingMsg, doneMsg,
+                () -> {
+                    if (op.equals("trim")) {
+                        // Duration unchanged: zero the affected peak buckets
+                        // locally; the selection stays exactly as it was.
+                        // (audioDurationSec is already the rendered duration.)
+                        zeroPeakRange(s, e != null ? e : audioDurationSec);
+                    } else {
+                        loadWaveformForPath(currentOutputPath);
+                    }
+                });
     }
 
     private void processAudio() {
@@ -879,6 +1431,12 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "Pick an audio file first", Toast.LENGTH_SHORT).show();
             return;
         }
+        if (currentEntryId != null) {
+            // Library entry: cumulative op appended to the persisted chain.
+            applyFxOp();
+            return;
+        }
+        // Legacy path for picked files (session-only history, cache outputs).
         final double warmth = seekWarmth.getProgress() / 100.0;
         final String preset = reverbPreset;
         final double echo = seekEcho.getProgress() / 100.0;
@@ -973,6 +1531,12 @@ public class MainActivity extends Activity {
                     Toast.LENGTH_SHORT).show();
             return;
         }
+        if (currentEntryId != null) {
+            // Library entry: cumulative op appended to the persisted chain.
+            applyNormalizeOp();
+            return;
+        }
+        // Legacy path for picked files (session-only history, cache outputs).
         final String hash = fileHash(inputFileName);
         // Every application writes its own file so Undo can restore earlier ones.
         final String outPath = new File(getCacheDir(),
@@ -1068,6 +1632,13 @@ public class MainActivity extends Activity {
                     Toast.LENGTH_SHORT).show();
             return;
         }
+        if (currentEntryId != null) {
+            // Library entry: cumulative op appended to the persisted chain.
+            // (joinSelection already cleared the selection above.)
+            applyEditOp(op, startSec, endSec);
+            return;
+        }
+        // Legacy path for picked files (session-only history, cache outputs).
         final String hash = fileHash(inputFileName);
         final String rangeDesc = fmtSec(startSec) + "–"
                 + (endSec != null ? fmtSec(endSec) : "end");
@@ -1160,6 +1731,12 @@ public class MainActivity extends Activity {
     }
 
     private void undoLastEffect() {
+        if (currentEntryId != null) {
+            // Library entry: pop the persisted op chain (cross-session).
+            undoLibraryOp();
+            return;
+        }
+        // Legacy path for picked files (session-only history, cache outputs).
         final String hash = fileHash(inputFileName);
         EffectHistoryDb.Row removed = historyDb.undo(hash);
         if (removed == null) {
@@ -1544,9 +2121,7 @@ public class MainActivity extends Activity {
         saveDialog = new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
                 .setTitle("Save as MP3")
                 .setView(root)
-                .setPositiveButton("Save",
-                        (d, w) -> doSaveMp3(sanitizeMp3Name(
-                                nameInput.getText().toString())))
+                .setPositiveButton("Save", null)
                 .setNegativeButton("Cancel", null)
                 .setOnDismissListener(d -> saveDialog = null)
                 .show();
@@ -1555,6 +2130,56 @@ public class MainActivity extends Activity {
                 .setTextColor(getColor(R.color.sl_teal2));
         saveDialog.getButton(AlertDialog.BUTTON_NEGATIVE)
                 .setTextColor(getColor(R.color.sl_mut));
+        // Manual click handling: the Save tap needs a folder first, and a
+        // collision check before the dialog dismisses itself.
+        saveDialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    String name = sanitizeMp3Name(nameInput.getText().toString());
+                    if (saveFolderUri == null) {
+                        Toast.makeText(this, "Choose a save folder first",
+                                Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    if (mp3ExistsInFolder(name)) {
+                        showCollisionDialog(name);
+                    } else {
+                        saveDialog.dismiss();
+                        doSaveMp3(name, false);
+                    }
+                });
+    }
+
+    /** "File exists" choice: Overwrite / Keep both. Never silently overwrite. */
+    private void showCollisionDialog(final String name) {
+        new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+                .setTitle("File exists")
+                .setMessage("\u201c" + name + "\u201d is already in this folder.")
+                .setPositiveButton("Overwrite", (d, w) -> {
+                    if (saveDialog != null) {
+                        saveDialog.dismiss();
+                    }
+                    doSaveMp3(name, true);
+                })
+                .setNegativeButton("Keep both", (d, w) -> {
+                    if (saveDialog != null) {
+                        saveDialog.dismiss();
+                    }
+                    doSaveMp3(name, false);
+                })
+                .setNeutralButton("Cancel", null)
+                .show();
+    }
+
+    private boolean mp3ExistsInFolder(String name) {
+        if (saveFolderUri == null) {
+            return false;
+        }
+        try {
+            DocumentFile dir = DocumentFile.fromTreeUri(this, saveFolderUri);
+            return dir != null && dir.findFile(name) != null;
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private String saveFolderName() {
@@ -1582,7 +2207,7 @@ public class MainActivity extends Activity {
         return name;
     }
 
-    private void doSaveMp3(String mp3Name) {
+    private void doSaveMp3(String mp3Name, boolean overwrite) {
         // Save the processed output when there is one, else the input as-is.
         final String srcPath = (currentOutputPath != null
                 && new File(currentOutputPath).exists()) ? currentOutputPath : inputPath;
@@ -1600,10 +2225,19 @@ public class MainActivity extends Activity {
                 File tmpMp3 = new File(getCacheDir(), "output.mp3");
                 Python.getInstance().getModule("audiofx.android_bridge").callAttr(
                         "encode_wav_to_mp3", srcPath, tmpMp3.getAbsolutePath());
-                String savedAs = copyToSaveFolder(tmpMp3, mp3Name);
+                String savedAs = copyToSaveFolder(tmpMp3, mp3Name, overwrite);
                 final String doneMsg = raw ? "Saved (no effects): " + savedAs
                         : "Saved: " + savedAs;
-                runOnUiThread(() -> setStatus(doneMsg));
+                runOnUiThread(() -> {
+                    setStatus(doneMsg);
+                    if (currentEntryId != null) {
+                        try {
+                            libraryDb.logExport(currentEntryId, savedAs,
+                                    saveFolderName(), undoDepth());
+                        } catch (Exception ignored) {
+                        }
+                    }
+                });
             } catch (Exception e) {
                 runOnUiThread(() -> setStatus("Save failed: " + e.getMessage()));
             } finally {
@@ -1615,18 +2249,26 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    private String copyToSaveFolder(File src, String baseName) throws Exception {
+    private String copyToSaveFolder(File src, String baseName, boolean overwrite)
+            throws Exception {
         DocumentFile dir = DocumentFile.fromTreeUri(this, saveFolderUri);
         if (dir == null || !dir.canWrite()) {
             throw new Exception("Save folder is not writable");
         }
         String name = baseName;
-        int copy = 1;
-        while (dir.findFile(name) != null) {
-            int dot = baseName.lastIndexOf('.');
-            String stem = dot > 0 ? baseName.substring(0, dot) : baseName;
-            String ext = dot > 0 ? baseName.substring(dot) : "";
-            name = stem + " (" + (copy++) + ")" + ext;
+        if (overwrite) {
+            DocumentFile existing = dir.findFile(baseName);
+            if (existing != null && !existing.delete()) {
+                throw new Exception("Could not overwrite existing file");
+            }
+        } else {
+            int copy = 1;
+            while (dir.findFile(name) != null) {
+                int dot = baseName.lastIndexOf('.');
+                String stem = dot > 0 ? baseName.substring(0, dot) : baseName;
+                String ext = dot > 0 ? baseName.substring(dot) : "";
+                name = stem + " (" + (copy++) + ")" + ext;
+            }
         }
         DocumentFile dest = dir.createFile("audio/mpeg", name);
         if (dest == null) {
