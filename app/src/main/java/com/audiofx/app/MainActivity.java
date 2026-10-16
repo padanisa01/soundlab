@@ -568,7 +568,9 @@ public class MainActivity extends Activity {
     private void adoptAudioFile(File wavFile, String displayName) {
         try {
             File dest = new File(getCacheDir(), "input.wav");
-            copyFile(wavFile, dest);
+            if (!wavFile.getAbsolutePath().equals(dest.getAbsolutePath())) {
+                copyFile(wavFile, dest);
+            }
             inputPath = dest.getAbsolutePath();
             inputFileName = displayName;
             // Pristine per-file copy, so Undo can always return to the
@@ -695,7 +697,9 @@ public class MainActivity extends Activity {
             return;
         }
         File named = new File(getCacheDir(), pendingRecName);
-        take.renameTo(named);
+        if (!take.renameTo(named)) {
+            named = take; // rename failed; use the take file directly
+        }
         adoptAudioFile(named, pendingRecName);
     }
 
