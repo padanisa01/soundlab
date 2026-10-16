@@ -263,6 +263,23 @@ public class WaveformView extends View {
         return true;
     }
 
+    /** Programmatic zoom (e.g. from +/- buttons): factor > 1 zooms in. */
+    public void zoomBy(float factor) {
+        if (getWidth() <= 0) {
+            return;
+        }
+        float newZoom = Math.max(1f, Math.min(MAX_ZOOM, zoom * factor));
+        if (newZoom == zoom) {
+            return;
+        }
+        // Keep the center of the view anchored.
+        float centerFrac = viewStart + 0.5f / zoom;
+        zoom = newZoom;
+        viewStart = newZoom == 1f ? 0f : centerFrac - 0.5f / newZoom;
+        clampViewStart();
+        invalidate();
+    }
+
     private class ScaleListener extends ScaleGestureDetector.SimpleOnScaleGestureListener {
         @Override
         public boolean onScale(ScaleGestureDetector detector) {

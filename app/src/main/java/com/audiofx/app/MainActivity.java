@@ -3,6 +3,7 @@ package com.audiofx.app;
 import android.app.Activity;
 import android.content.Intent;
 import android.database.Cursor;
+import android.graphics.Typeface;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Bundle;
@@ -10,11 +11,11 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.OpenableColumns;
 import android.view.View;
-import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.ImageButton;
+import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.SeekBar;
-import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -46,21 +47,43 @@ public class MainActivity extends Activity {
     private static final int PICK_AUDIO = 1001;
     private static final int PICK_FOLDER = 1002;
 
-    private TextView tvPicked;
-    private TextView tvStatus;
+    private LinearLayout trackCard;
+    private TextView tvTrackName;
+    private TextView tvTrackMeta;
+    private Button btnPick;
+    private Button btnChange;
+    private TextView toastView;
+    private final Runnable hideToast = () -> {
+        toastView.animate().alpha(0f).setDuration(250)
+                .withEndAction(() -> toastView.setVisibility(View.GONE)).start();
+    };
     private TextView tvWarmthVal;
     private TextView tvEchoVal;
+    private TextView tvReverbVal;
     private SeekBar seekWarmth;
     private SeekBar seekEcho;
-    private Spinner spinnerReverb;
+    private String reverbPreset = "concert_hall";
+    private LinearLayout chipStudio;
+    private LinearLayout chipHall;
+    private LinearLayout chipBath;
+    private LinearLayout chipCave;
+    private TextView chipStudioName;
+    private TextView chipHallName;
+    private TextView chipBathName;
+    private TextView chipCaveName;
     private Button btnProcess;
     private Button btnUndo;
-    private Button btnPlay;
-    private Button btnPause;
-    private Button btnStop;
+    private TextView undoBadge;
+    private ImageButton btnPlayPause;
+    private ImageButton btnStop;
     private Button btnSave;
     private ProgressBar progressBar;
     private WaveformView waveformView;
+    private LinearLayout selChipRow;
+    private TextView selChipText;
+    private Button btnSelClear;
+    private TextView tvTime;
+    private TextView tvSource;
 
     private String inputPath;   // cached WAV picked by the user
     private String inputFileName = "audio.wav";
@@ -84,6 +107,7 @@ public class MainActivity extends Activity {
                 try {
                     int ms = player.getCurrentPosition();
                     waveformView.setPlaybackPosition((float) (ms / 1000.0 / audioDurationSec));
+                    tvTime.setText(fmtTime(ms / 1000.0) + " / " + fmtTime(audioDurationSec));
                 } catch (Exception ignored) {
                 }
                 mainHandler.postDelayed(this, 200);
@@ -151,6 +175,11 @@ public class MainActivity extends Activity {
             Deque<Row> stack = rows.get(fileHash);
             return stack != null && !stack.isEmpty();
         }
+
+        int depth(String fileHash) {
+            Deque<Row> stack = rows.get(fileHash);
+            return stack == null ? 0 : stack.size();
+        }
     }
 
     /** Session key for the effect history: hash of the input file name. */
@@ -166,16 +195,19 @@ public class MainActivity extends Activity {
         if (startFrac == null || audioDurationSec <= 0) {
             selStartSec = null;
             selEndSec = null;
+            setSelChip(null, null);
             setStatus("Selection cleared — full file.");
             return;
         }
         selStartSec = (double) startFrac * audioDurationSec;
         if (endFrac != null) {
             selEndSec = (double) endFrac * audioDurationSec;
+            setSelChip(selStartSec, selEndSec);
             setStatus("Window: " + fmtSec(selStartSec) + "–" + fmtSec(selEndSec)
                     + " — tap for a new start, double-tap to clear.");
         } else {
             selEndSec = null;
+            setSelChip(selStartSec, null);
             setStatus("Start: " + fmtSec(selStartSec)
                     + " — tap again to set the end, double-tap to clear.");
         }
@@ -186,44 +218,65 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        tvPicked = findViewById(R.id.tv_picked);
-        tvStatus = findViewById(R.id.tv_status);
+        trackCard = findViewById(R.id.track_card);
+        tvTrackName = findViewById(R.id.tv_track_name);
+        tvTrackMeta = findViewById(R.id.tv_track_meta);
+        btnPick = findViewById(R.id.btn_pick);
+        btnChange = findViewById(R.id.btn_change);
+        toastView = findViewById(R.id.toast_view);
         tvWarmthVal = findViewById(R.id.tv_warmth_val);
         tvEchoVal = findViewById(R.id.tv_echo_val);
+        tvReverbVal = findViewById(R.id.tv_reverb_val);
         seekWarmth = findViewById(R.id.seek_warmth);
         seekEcho = findViewById(R.id.seek_echo);
-        spinnerReverb = findViewById(R.id.spinner_reverb);
+        chipStudio = findViewById(R.id.chip_studio);
+        chipHall = findViewById(R.id.chip_hall);
+        chipBath = findViewById(R.id.chip_bath);
+        chipCave = findViewById(R.id.chip_cave);
+        chipStudioName = findViewById(R.id.chip_studio_name);
+        chipHallName = findViewById(R.id.chip_hall_name);
+        chipBathName = findViewById(R.id.chip_bath_name);
+        chipCaveName = findViewById(R.id.chip_cave_name);
         btnProcess = findViewById(R.id.btn_process);
         btnUndo = findViewById(R.id.btn_undo);
-        btnPlay = findViewById(R.id.btn_play);
-        btnPause = findViewById(R.id.btn_pause);
+        undoBadge = findViewById(R.id.undo_badge);
+        btnPlayPause = findViewById(R.id.btn_play_pause);
         btnStop = findViewById(R.id.btn_stop);
         btnSave = findViewById(R.id.btn_save);
         progressBar = findViewById(R.id.progress_bar);
         waveformView = findViewById(R.id.waveform);
+        selChipRow = findViewById(R.id.sel_chip_row);
+        selChipText = findViewById(R.id.sel_chip_text);
+        btnSelClear = findViewById(R.id.btn_sel_clear);
+        tvTime = findViewById(R.id.tv_time);
+        tvSource = findViewById(R.id.tv_source);
         waveformView.setOnSelectionListener(this::onSelectionChanged);
 
-        ArrayAdapter<CharSequence> adapter = ArrayAdapter.createFromResource(
-                this, R.array.reverb_presets, android.R.layout.simple_spinner_item);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        spinnerReverb.setAdapter(adapter);
+        selectReverb(reverbPreset);
 
-        seekWarmth.setOnSeekBarChangeListener(sliderListener(tvWarmthVal));
-        seekEcho.setOnSeekBarChangeListener(sliderListener(tvEchoVal));
+        seekWarmth.setOnSeekBarChangeListener(sliderListener());
+        seekEcho.setOnSeekBarChangeListener(sliderListener());
         updateSliderLabels();
 
-        findViewById(R.id.btn_pick).setOnClickListener(v -> pickAudio());
+        btnPick.setOnClickListener(v -> pickAudio());
+        btnChange.setOnClickListener(v -> pickAudio());
+        findViewById(R.id.btn_zoom_in).setOnClickListener(v -> waveformView.zoomBy(1.4f));
+        findViewById(R.id.btn_zoom_out).setOnClickListener(v -> waveformView.zoomBy(1f / 1.4f));
+        btnSelClear.setOnClickListener(v -> waveformView.clearSelection());
+        chipStudio.setOnClickListener(v -> selectReverb("studio"));
+        chipHall.setOnClickListener(v -> selectReverb("concert_hall"));
+        chipBath.setOnClickListener(v -> selectReverb("bathroom"));
+        chipCave.setOnClickListener(v -> selectReverb("cave"));
         btnProcess.setOnClickListener(v -> processAudio());
         btnUndo.setOnClickListener(v -> undoLastEffect());
-        btnPlay.setOnClickListener(v -> playOutput());
-        btnPause.setOnClickListener(v -> pausePlayback());
+        btnPlayPause.setOnClickListener(v -> togglePlayPause());
         btnStop.setOnClickListener(v -> stopPlayback());
         btnSave.setOnClickListener(v -> onSaveClicked());
 
         setStatus("Pick a WAV file to begin.");
     }
 
-    private SeekBar.OnSeekBarChangeListener sliderListener(TextView label) {
+    private SeekBar.OnSeekBarChangeListener sliderListener() {
         return new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
                 updateSliderLabels();
@@ -231,6 +284,108 @@ public class MainActivity extends Activity {
             @Override public void onStartTrackingTouch(SeekBar s) {}
             @Override public void onStopTrackingTouch(SeekBar s) {}
         };
+    }
+
+    /** Toast pill replacing the old always-visible status line. */
+    private void setStatus(String msg) {
+        toastView.setText(msg);
+        toastView.setVisibility(View.VISIBLE);
+        toastView.setAlpha(0f);
+        toastView.animate().alpha(1f).setDuration(200).start();
+        mainHandler.removeCallbacks(hideToast);
+        mainHandler.postDelayed(hideToast, 2600);
+    }
+
+    private void togglePlayPause() {
+        if (isPlayerPlaying()) {
+            pausePlayback();
+            return;
+        }
+        playOutput();
+    }
+
+    private boolean isPlayerPlaying() {
+        try {
+            return player != null && player.isPlaying();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Swap the transport icon to match the live player state. */
+    private void refreshPlayPause() {
+        btnPlayPause.setImageResource(
+                isPlayerPlaying() ? R.drawable.ic_pause : R.drawable.ic_play);
+    }
+
+    private void setPlayPauseEnabled(boolean enabled) {
+        btnPlayPause.setEnabled(enabled);
+        btnPlayPause.setAlpha(enabled ? 1f : 0.4f);
+    }
+
+    private void selectReverb(String preset) {
+        reverbPreset = preset;
+        paintChip(chipStudio, chipStudioName, "studio");
+        paintChip(chipHall, chipHallName, "concert_hall");
+        paintChip(chipBath, chipBathName, "bathroom");
+        paintChip(chipCave, chipCaveName, "cave");
+        tvReverbVal.setText(reverbDisplayName(preset));
+    }
+
+    private void paintChip(LinearLayout chip, TextView name, String preset) {
+        boolean sel = preset.equals(reverbPreset);
+        chip.setBackgroundResource(
+                sel ? R.drawable.bg_chip_selected : R.drawable.bg_chip);
+        name.setTextColor(getColor(sel ? R.color.sl_teal2 : R.color.sl_txt));
+    }
+
+    private static String reverbDisplayName(String preset) {
+        switch (preset) {
+            case "studio": return "Studio";
+            case "bathroom": return "Bathroom";
+            case "cave": return "Cave";
+            default: return "Concert Hall";
+        }
+    }
+
+    /** Undo depth badge; also drives the Undo button state. */
+    private void updateUndoBadge() {
+        int depth = historyDb.depth(fileHash(inputFileName));
+        undoBadge.setText(String.valueOf(depth));
+        undoBadge.setBackgroundResource(
+                depth > 0 ? R.drawable.bg_badge : R.drawable.bg_badge_zero);
+        undoBadge.setTextColor(getColor(
+                depth > 0 ? android.R.color.white : R.color.sl_mut));
+        btnUndo.setEnabled(depth > 0);
+    }
+
+    private static String fmtTime(double s) {
+        s = Math.max(0, s);
+        int m = (int) (s / 60);
+        int sec = (int) (s % 60);
+        return m + ":" + (sec < 10 ? "0" + sec : sec);
+    }
+
+    private static String fmtSec1(double s) {
+        return (Math.round(s * 10) / 10.0) + "s";
+    }
+
+    private void setSelChip(Double startSec, Double endSec) {
+        if (startSec == null) {
+            selChipRow.setBackgroundResource(R.drawable.bg_sel_chip_empty);
+            selChipText.setText("Full track");
+            selChipText.setTextColor(getColor(R.color.sl_mut));
+            selChipText.setTypeface(null, Typeface.NORMAL);
+            btnSelClear.setVisibility(View.GONE);
+        } else {
+            selChipRow.setBackgroundResource(R.drawable.bg_sel_chip);
+            selChipText.setText(endSec != null
+                    ? "Window " + fmtSec1(startSec) + " – " + fmtSec1(endSec)
+                    : "Start " + fmtSec1(startSec) + " — tap again for end");
+            selChipText.setTextColor(getColor(R.color.sl_teal2));
+            selChipText.setTypeface(null, Typeface.BOLD);
+            btnSelClear.setVisibility(View.VISIBLE);
+        }
     }
 
     private void updateSliderLabels() {
@@ -267,12 +422,18 @@ public class MainActivity extends Activity {
                 btnStop.setEnabled(false);
                 currentOutputPath = null;
                 audioDurationSec = 0;
-                btnPlay.setEnabled(false);
+                setPlayPauseEnabled(false);
+                refreshPlayPause();
                 btnSave.setEnabled(false);
-                btnUndo.setEnabled(historyDb.canUndo(hash));
+                updateUndoBadge();
                 waveformView.setPeaks(new float[0]);
                 waveformView.setDuration(0);
-                tvPicked.setText("Picked: " + inputFileName);
+                tvTime.setText("0:00 / 0:00");
+                tvSource.setVisibility(View.GONE);
+                btnPick.setVisibility(View.GONE);
+                trackCard.setVisibility(View.VISIBLE);
+                tvTrackName.setText(inputFileName);
+                tvTrackMeta.setText("Loading…");
                 setStatus("Ready. Adjust the effects and tap Apply.");
                 loadWaveform();
             } catch (Exception e) {
@@ -331,8 +492,10 @@ public class MainActivity extends Activity {
                     waveformView.setPeaks(peaks);
                     waveformView.setDuration(dur);
                     audioDurationSec = dur;
+                    tvTrackMeta.setText(String.format("%.1fs · WAV · mono", dur));
+                    tvTime.setText("0:00 / " + fmtTime(dur));
                     // The raw input can be auditioned before any Apply.
-                    btnPlay.setEnabled(true);
+                    setPlayPauseEnabled(true);
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> setStatus("Waveform failed: " + e.getMessage()));
@@ -361,7 +524,7 @@ public class MainActivity extends Activity {
             return;
         }
         final double warmth = seekWarmth.getProgress() / 100.0;
-        final String preset = spinnerReverb.getSelectedItem().toString();
+        final String preset = reverbPreset;
         final double echo = seekEcho.getProgress() / 100.0;
         final String hash = fileHash(inputFileName);
         final String windowDesc = selStartSec != null
@@ -379,6 +542,7 @@ public class MainActivity extends Activity {
         final Double startSec = selStartSec;
         final Double endSec = selEndSec;
         btnProcess.setEnabled(false);
+        btnProcess.setAlpha(0.55f);
         btnUndo.setEnabled(false); // no racing an undo mid-apply
         showProgress(true);
         if (selStartSec != null && audioDurationSec > 0) {
@@ -418,9 +582,9 @@ public class MainActivity extends Activity {
                         + " (applied " + appliedStart + "s–" + appliedEnd + "s)";
                 runOnUiThread(() -> {
                     setStatus(msg);
-                    btnPlay.setEnabled(true);
+                    setPlayPauseEnabled(true);
                     btnSave.setEnabled(true);
-                    btnUndo.setEnabled(true);
+                    updateUndoBadge();
                     showProgress(false);
                     waveformView.finishProgressAnimation();
                 });
@@ -429,10 +593,13 @@ public class MainActivity extends Activity {
                     setStatus("Error: " + e.getMessage());
                     showProgress(false);
                     waveformView.clearProgress();
-                    btnUndo.setEnabled(historyDb.canUndo(hash));
+                    updateUndoBadge();
                 });
             } finally {
-                runOnUiThread(() -> btnProcess.setEnabled(true));
+                runOnUiThread(() -> {
+                    btnProcess.setEnabled(true);
+                    btnProcess.setAlpha(1f);
+                });
             }
         }).start();
     }
@@ -456,10 +623,10 @@ public class MainActivity extends Activity {
             setStatus("Undone: " + removed.effects + " — now at: " + top.effects + ".");
         }
         if (currentOutputPath == null || !(new File(currentOutputPath).exists())) {
-            btnPlay.setEnabled(inputPath != null && new File(inputPath).exists());
+            setPlayPauseEnabled(inputPath != null && new File(inputPath).exists());
             btnSave.setEnabled(false);
         }
-        btnUndo.setEnabled(historyDb.canUndo(hash));
+        updateUndoBadge();
     }
 
     private void releasePlayer() {
@@ -493,8 +660,8 @@ public class MainActivity extends Activity {
         isPaused = true;
         cancelScheduledStop();
         stopPositionUpdates();
-        btnPlay.setEnabled(true);
-        btnPause.setEnabled(false);
+        setPlayPauseEnabled(true);
+        refreshPlayPause();
         int sec = 0;
         try {
             sec = player.getCurrentPosition() / 1000;
@@ -524,9 +691,16 @@ public class MainActivity extends Activity {
         scheduleStopAt(stopMs, startMs, player);
         showPlaybackRange(startMs);
         startPositionUpdates();
-        btnPlay.setEnabled(false);
-        btnPause.setEnabled(true);
+        setPlayPauseEnabled(true);
+        refreshPlayPause();
+        showSourcePill();
         setStatus(playbackStatus(startMs, stopMs));
+    }
+
+    /** Orange pill: INPUT when auditioning raw audio, PROCESSED otherwise. */
+    private void showSourcePill() {
+        tvSource.setVisibility(View.VISIBLE);
+        tvSource.setText(isPlayingInput() ? "INPUT" : "PROCESSED");
     }
 
     /**
@@ -650,8 +824,9 @@ public class MainActivity extends Activity {
             showPlaybackRange(startMs);
             startPositionUpdates();
             setStatus(playbackStatus(startMs, stopMs));
-            btnPlay.setEnabled(false);
-            btnPause.setEnabled(true);
+            setPlayPauseEnabled(true);
+            refreshPlayPause();
+            showSourcePill();
             btnStop.setEnabled(true);
             return;
         }
@@ -681,8 +856,9 @@ public class MainActivity extends Activity {
                 showPlaybackRange(startMs);
                 startPositionUpdates();
                 setStatus(playbackStatus(startMs, stopMs));
-                btnPlay.setEnabled(false);
-                btnPause.setEnabled(true);
+                setPlayPauseEnabled(true);
+                refreshPlayPause();
+                showSourcePill();
                 btnStop.setEnabled(true);
             });
             player.setOnCompletionListener(mp -> {
@@ -690,15 +866,18 @@ public class MainActivity extends Activity {
                 stopPositionUpdates();
                 waveformView.clearPlayback();
                 setStatus("Playback finished.");
-                btnPlay.setEnabled(true);
-                btnPause.setEnabled(false);
+                setPlayPauseEnabled(true);
+                refreshPlayPause();
+                tvSource.setVisibility(View.GONE);
+                tvTime.setText(fmtTime(audioDurationSec) + " / " + fmtTime(audioDurationSec));
                 btnStop.setEnabled(false);
             });
             player.setOnErrorListener((mp, what, extra) -> {
                 setStatus("Playback error: " + what + "/" + extra);
                 releasePlayer();
-                btnPlay.setEnabled(true);
-                btnPause.setEnabled(false);
+                setPlayPauseEnabled(true);
+                refreshPlayPause();
+                tvSource.setVisibility(View.GONE);
                 btnStop.setEnabled(false);
                 return true;
             });
@@ -720,8 +899,10 @@ public class MainActivity extends Activity {
 
     private void stopPlayback() {
         releasePlayer();
-        btnPlay.setEnabled(currentOutputPath != null || inputPath != null);
-        btnPause.setEnabled(false);
+        setPlayPauseEnabled(currentOutputPath != null || inputPath != null);
+        refreshPlayPause();
+        tvSource.setVisibility(View.GONE);
+        tvTime.setText("0:00 / " + fmtTime(audioDurationSec));
         btnStop.setEnabled(false);
         setStatus("Playback stopped.");
     }
@@ -792,10 +973,6 @@ public class MainActivity extends Activity {
             while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
         }
         return name;
-    }
-
-    private void setStatus(String msg) {
-        tvStatus.setText(msg);
     }
 
     @Override

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.SoundLab" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/sl_phone</item>
+        <item name="android:colorBackground">@color/sl_phone</item>
+        <item name="android:statusBarColor">@color/sl_phone</item>
+        <item name="android:navigationBarColor">@color/sl_phone</item>
+        <item name="android:textColorPrimary">@color/sl_txt</item>
+        <item name="android:textColorSecondary">@color/sl_mut</item>
+    </style>
+</resources>
