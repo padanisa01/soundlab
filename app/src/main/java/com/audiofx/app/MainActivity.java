@@ -709,6 +709,7 @@ public class MainActivity extends Activity {
 
     private void stopPlayback() {
         releasePlayer();
+        btnPlay.setEnabled(currentOutputPath != null);
         btnPause.setEnabled(false);
         btnStop.setEnabled(false);
         setStatus("Playback stopped.");
