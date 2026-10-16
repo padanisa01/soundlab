@@ -53,6 +53,16 @@ or the plan changes.
   destination folder, whether or not one was chosen before.
 - **High-contrast mic switches**: on = bright teal thumb on a teal
   track, off = gray thumb on a dark track.
+- **Hamburger menu + project status bar**: the top bar holds a hamburger
+  menu (Open audio file, Recordings library, Save as MP3) and a status
+  bar showing the project name, or `<untitled project - date - time>`
+  when nothing is loaded. The old top-of-page Pick/Library buttons and
+  the standalone Save button are gone.
+- **Effect history panel**: the main page shows the full op history
+  (label + timestamp per op) for library entries and picked files alike.
+- **Auto-naming**: when a recording still has its auto-generated
+  "Recording ..." name, exporting with a user-chosen filename renames
+  the project to match. Manual renames are never overridden.
 - **Advanced mic settings**: AGC, noise suppression, live effects and
   auto-normalize live in a collapsible panel, collapsed by default
   (expansion persisted).

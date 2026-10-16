@@ -16,7 +16,7 @@
             android:orientation="vertical"
             android:padding="16dp">
 
-            <!-- App bar -->
+            <!-- App bar: hamburger menu + project status -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -25,61 +25,35 @@
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Sound"
-                    android:textColor="@color/sl_txt"
-                    android:textSize="22sp"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Lab"
-                    android:textColor="@color/sl_teal2"
-                    android:textSize="22sp"
-                    android:textStyle="bold" />
-
-                <View
-                    android:layout_width="0dp"
-                    android:layout_height="0dp"
-                    android:layout_weight="1" />
-
                 <ImageButton
-                    android:id="@+id/btn_library"
+                    android:id="@+id/btn_menu"
                     android:layout_width="40dp"
                     android:layout_height="40dp"
                     android:background="@drawable/bg_chip"
-                    android:contentDescription="Open recordings library"
-                    android:padding="9dp"
+                    android:contentDescription="Menu"
+                    android:padding="10dp"
                     android:scaleType="fitCenter"
-                    android:src="@drawable/ic_library" />
+                    android:src="@drawable/ic_menu" />
+
+                <TextView
+                    android:id="@+id/tv_project_name"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="10dp"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:textColor="@color/sl_txt"
+                    android:textSize="15sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="SoundLab"
+                    android:textColor="@color/sl_dim"
+                    android:textSize="12sp" />
             </LinearLayout>
-
-            <!-- Pick button: visible until a file is picked -->
-            <Button
-                android:id="@+id/btn_pick"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:background="@drawable/bg_apply"
-                android:text="Pick audio (WAV)"
-                android:textColor="@color/sl_white"
-                android:textSize="15sp"
-                android:textStyle="bold"
-                android:padding="14dp" />
-
-            <!-- Open library: visible until a file is picked or an entry adopted -->
-            <Button
-                android:id="@+id/btn_open_library"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:background="@drawable/bg_ghost"
-                android:text="Open library"
-                android:textColor="@color/sl_teal2"
-                android:textSize="14sp"
-                android:padding="12dp" />
 
             <!-- Track card -->
             <LinearLayout
@@ -356,8 +330,48 @@
                     android:textSize="11.5sp" />
             </LinearLayout>
 
-            <!-- Microphone card -->
+            <!-- Effect history card -->
             <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:background="@drawable/bg_card"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="EFFECT HISTORY"
+                        android:textColor="@color/sl_mut"
+                        android:textSize="13sp"
+                        android:textStyle="bold"
+                        android:letterSpacing="0.08" />
+
+                    <TextView
+                        android:id="@+id/tv_hist_count"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="@color/sl_dim"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/hist_list"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:orientation="vertical" />
+            </LinearLayout>
+
+            <!-- Microphone card -->            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="14dp"
@@ -1014,19 +1028,6 @@
                         android:textSize="11sp"
                         android:textStyle="bold" />
                 </FrameLayout>
-
-                <Button
-                    android:id="@+id/btn_save"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:layout_marginStart="5dp"
-                    android:background="@drawable/bg_ghost"
-                    android:enabled="false"
-                    android:text="Save as MP3"
-                    android:textColor="@color/sl_txt"
-                    android:textSize="14sp"
-                    android:padding="13dp" />
             </LinearLayout>
 
             <ProgressBar

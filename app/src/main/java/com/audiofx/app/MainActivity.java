@@ -45,6 +45,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.Deque;
 import java.util.HashMap;
@@ -67,10 +68,9 @@ public class MainActivity extends Activity {
     private LinearLayout trackCard;
     private TextView tvTrackName;
     private TextView tvTrackMeta;
-    private Button btnPick;
+    private TextView tvProjectName;
+    private ImageButton btnMenu;
     private Button btnChange;
-    private ImageButton btnLibrary;
-    private Button btnOpenLibrary;
     private TextView toastView;
     private final Runnable hideToast = () -> {
         toastView.animate().alpha(0f).setDuration(250)
@@ -104,8 +104,9 @@ public class MainActivity extends Activity {
     private LinearLayout advMicPanel;
     private LinearLayout advMicHeader;
     private ImageView advMicChevron;
-    private Button btnSave;
     private ProgressBar progressBar;
+    private LinearLayout histList;
+    private TextView tvHistCount;
     private WaveformView waveformView;
     private LinearLayout selChipRow;
     private TextView selChipText;
@@ -242,6 +243,12 @@ public class MainActivity extends Activity {
             return stack != null && !stack.isEmpty();
         }
 
+        /** All rows for the file, oldest first (for the history panel). */
+        List<Row> list(String fileHash) {
+            Deque<Row> stack = rows.get(fileHash);
+            return stack == null ? new ArrayList<>() : new ArrayList<>(stack);
+        }
+
         int depth(String fileHash) {
             Deque<Row> stack = rows.get(fileHash);
             return stack == null ? 0 : stack.size();
@@ -287,12 +294,10 @@ public class MainActivity extends Activity {
         trackCard = findViewById(R.id.track_card);
         tvTrackName = findViewById(R.id.tv_track_name);
         tvTrackMeta = findViewById(R.id.tv_track_meta);
-        btnPick = findViewById(R.id.btn_pick);
+        tvProjectName = findViewById(R.id.tv_project_name);
+        btnMenu = findViewById(R.id.btn_menu);
+        btnMenu.setOnClickListener(v -> showMainMenu());
         btnChange = findViewById(R.id.btn_change);
-        btnLibrary = findViewById(R.id.btn_library);
-        btnOpenLibrary = findViewById(R.id.btn_open_library);
-        btnLibrary.setOnClickListener(v -> openLibrary());
-        btnOpenLibrary.setOnClickListener(v -> openLibrary());
         btnNormalize = findViewById(R.id.btn_normalize);
         btnNormalize.setOnClickListener(v -> normalizeAudio());
         toastView = findViewById(R.id.toast_view);
@@ -337,8 +342,9 @@ public class MainActivity extends Activity {
         btnPlayPause = findViewById(R.id.btn_play_pause);
         btnRecord = findViewById(R.id.btn_record);
         btnStop = findViewById(R.id.btn_stop);
-        btnSave = findViewById(R.id.btn_save);
         progressBar = findViewById(R.id.progress_bar);
+        histList = findViewById(R.id.hist_list);
+        tvHistCount = findViewById(R.id.tv_hist_count);
         waveformView = findViewById(R.id.waveform);
         selChipRow = findViewById(R.id.sel_chip_row);
         selChipText = findViewById(R.id.sel_chip_text);
@@ -357,8 +363,6 @@ public class MainActivity extends Activity {
         seekWarmth.setOnSeekBarChangeListener(sliderListener());
         seekEcho.setOnSeekBarChangeListener(sliderListener());
         updateSliderLabels();
-
-        btnPick.setOnClickListener(v -> pickAudio());
         btnChange.setOnClickListener(v -> pickAudio());
         findViewById(R.id.btn_zoom_in).setOnClickListener(v -> waveformView.zoomBy(1.4f));
         findViewById(R.id.btn_zoom_out).setOnClickListener(v -> waveformView.zoomBy(1f / 1.4f));
@@ -385,17 +389,130 @@ public class MainActivity extends Activity {
         btnPlayPause.setOnClickListener(v -> togglePlayPause());
         btnRecord.setOnClickListener(v -> onRecordClicked());
         btnStop.setOnClickListener(v -> stopPlayback());
-        btnSave.setOnClickListener(v -> onSaveClicked());
 
         libraryDb = new LibraryDb(this);
         restoreSaveFolderUri(prefs);
+        updateProjectName();
+        refreshHistoryPanel();
 
         String launchEntryId = getIntent().getStringExtra(LibraryActivity.EXTRA_ENTRY_ID);
         if (launchEntryId != null) {
             adoptLibraryEntry(launchEntryId);
         } else {
-            setStatus("Pick a WAV file to begin.");
+            setStatus("Tap the menu to open audio or your library.");
         }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // The entry may have been renamed or edited in the library.
+        if (currentEntryId != null) {
+            updateProjectName();
+            refreshHistoryPanel();
+        }
+    }
+
+    /** Hamburger menu: Open, Library, Save as MP3. */
+    private void showMainMenu() {
+        boolean canSave = inputPath != null && new File(inputPath).exists();
+        final String[] items = canSave
+                ? new String[]{"Open audio file", "Recordings library", "Save as MP3"}
+                : new String[]{"Open audio file", "Recordings library"};
+        new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+                .setItems(items, (d, which) -> {
+                    String sel = items[which];
+                    if (sel.startsWith("Open")) {
+                        pickAudio();
+                    } else if (sel.startsWith("Recordings")) {
+                        openLibrary();
+                    } else {
+                        onSaveClicked();
+                    }
+                })
+                .show();
+    }
+
+    /** Project status bar: entry/file name, or an untitled placeholder. */
+    private void updateProjectName() {
+        String name;
+        boolean untitled = false;
+        if (currentEntryId != null) {
+            String entryName = null;
+            try {
+                LibraryDb.LibraryEntry e = libraryDb.getEntry(currentEntryId);
+                if (e != null) {
+                    entryName = e.name;
+                }
+            } catch (Exception ignored) {
+            }
+            name = entryName != null ? entryName : inputFileName;
+        } else if (inputPath != null) {
+            name = inputFileName;
+        } else {
+            untitled = true;
+            name = "<untitled project - "
+                    + new SimpleDateFormat("yyyy-MM-dd - HH:mm", Locale.US)
+                            .format(new Date())
+                    + ">";
+        }
+        tvProjectName.setText(name);
+        tvProjectName.setTextColor(getColor(
+                untitled ? R.color.sl_dim : R.color.sl_txt));
+    }
+
+    /** Effect history panel: library ops or legacy picked-file history. */
+    private void refreshHistoryPanel() {
+        histList.removeAllViews();
+        List<String[]> rows = new ArrayList<>();
+        if (currentEntryId != null) {
+            try {
+                for (LibraryDb.Op op : libraryDb.listOps(currentEntryId)) {
+                    rows.add(new String[]{op.label, fmtDateTime(op.createdAt)});
+                }
+            } catch (Exception ignored) {
+            }
+        } else if (inputPath != null) {
+            for (EffectHistoryDb.Row r : historyDb.list(fileHash(inputFileName))) {
+                rows.add(new String[]{r.effects, fmtDateTime(r.timestamp)});
+            }
+        }
+        tvHistCount.setText(rows.size()
+                + (rows.size() == 1 ? " effect" : " effects"));
+        if (rows.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("No effects yet — Apply, Normalize, Trim or Join to build history.");
+            empty.setTextColor(getColor(R.color.sl_dim));
+            empty.setTextSize(12.5f);
+            histList.addView(empty);
+            return;
+        }
+        float density = getResources().getDisplayMetrics().density;
+        int n = 1;
+        for (String[] row : rows) {
+            LinearLayout r = new LinearLayout(this);
+            r.setOrientation(LinearLayout.HORIZONTAL);
+            int vpad = (int) (4 * density);
+            r.setPadding(0, vpad, 0, vpad);
+            TextView label = new TextView(this);
+            label.setText(n + ". " + row[0]);
+            label.setTextColor(getColor(R.color.sl_txt));
+            label.setTextSize(13f);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            r.addView(label, lp);
+            TextView when = new TextView(this);
+            when.setText(row[1]);
+            when.setTextColor(getColor(R.color.sl_dim));
+            when.setTextSize(11.5f);
+            r.addView(when);
+            histList.addView(r);
+            n++;
+        }
+    }
+
+    private static String fmtDateTime(long ms) {
+        return new SimpleDateFormat("MMM d, h:mm a", Locale.US).format(new Date(ms));
     }
 
     private void openLibrary() {
@@ -532,6 +649,7 @@ public class MainActivity extends Activity {
         undoBadge.setTextColor(getColor(
                 depth > 0 ? android.R.color.white : R.color.sl_mut));
         btnUndo.setEnabled(depth > 0);
+        refreshHistoryPanel();
     }
 
     private static String fmtTime(double s) {
@@ -730,19 +848,17 @@ public class MainActivity extends Activity {
             currentOutputPath = null;
             audioDurationSec = 0;
             setPlayPauseEnabled(false);
-            refreshPlayPause();
-            btnSave.setEnabled(true); // input is savable as-is, no Apply needed
+            refreshPlayPause(); // input is savable as-is, no Apply needed
             updateUndoBadge();
             waveformView.setPeaks(new float[0]);
             waveformView.setDuration(0);
             tvTimeCur.setText("0:00");
             tvTimeTot.setText("0:00");
             tvSource.setVisibility(View.GONE);
-            btnPick.setVisibility(View.GONE);
-            btnOpenLibrary.setVisibility(View.GONE);
             trackCard.setVisibility(View.VISIBLE);
             tvTrackName.setText(inputFileName);
             tvTrackMeta.setText("Loading…");
+            updateProjectName();
             setStatus("Ready. Adjust the effects and tap Apply.");
             loadWaveform();
         } catch (Exception e) {
@@ -793,18 +909,16 @@ public class MainActivity extends Activity {
         selStartSec = null;
         selEndSec = null;
         setPlayPauseEnabled(false);
-        refreshPlayPause();
-        btnSave.setEnabled(true); // the take is savable as-is, no Apply needed
+        refreshPlayPause(); // the take is savable as-is, no Apply needed
         waveformView.setPeaks(new float[0]);
         waveformView.setDuration(0);
         tvTimeCur.setText("0:00");
         tvTimeTot.setText("0:00");
         tvSource.setVisibility(View.GONE);
-        btnPick.setVisibility(View.GONE);
-        btnOpenLibrary.setVisibility(View.GONE);
         trackCard.setVisibility(View.VISIBLE);
         tvTrackName.setText(e.name);
         tvTrackMeta.setText("Loading…");
+        updateProjectName();
         int depth = undoDepth();
         setStatus(depth > 0
                 ? "Loaded from library — " + depth + " effects in history."
@@ -938,7 +1052,6 @@ public class MainActivity extends Activity {
                     btnStop.setEnabled(false);
                     loadWaveformForPath(currentOutputPath);
                     setPlayPauseEnabled(true);
-                    btnSave.setEnabled(true);
                     setBusy(false);
                     waveformView.finishProgressAnimation();
                     updateUndoBadge();
@@ -996,7 +1109,6 @@ public class MainActivity extends Activity {
                     }
                     setStatus(doneMsg);
                     setPlayPauseEnabled(true);
-                    btnSave.setEnabled(true);
                     setBusy(false);
                     waveformView.finishProgressAnimation();
                     updateUndoBadge();
@@ -1077,7 +1189,6 @@ public class MainActivity extends Activity {
                     setStatus("Undone: " + last.label + (depth > 0
                             ? " — " + depth + " op(s) left."
                             : " — back to the original audio."));
-                    btnSave.setEnabled(true);
                     setBusy(false);
                     waveformView.finishProgressAnimation();
                     updateUndoBadge();
@@ -1497,7 +1608,6 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     setStatus(msg);
                     setPlayPauseEnabled(true);
-                    btnSave.setEnabled(true);
                     updateUndoBadge();
                     showProgress(false);
                     waveformView.finishProgressAnimation();
@@ -1571,7 +1681,6 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     setStatus(msg);
                     setPlayPauseEnabled(true);
-                    btnSave.setEnabled(true);
                     updateUndoBadge();
                     showProgress(false);
                     waveformView.finishProgressAnimation();
@@ -1688,7 +1797,6 @@ public class MainActivity extends Activity {
                     }
                     setStatus(msg);
                     setPlayPauseEnabled(true);
-                    btnSave.setEnabled(true);
                     updateUndoBadge();
                     showProgress(false);
                     waveformView.finishProgressAnimation();
@@ -1757,7 +1865,6 @@ public class MainActivity extends Activity {
         if (currentOutputPath == null || !(new File(currentOutputPath).exists())) {
             setPlayPauseEnabled(inputPath != null && new File(inputPath).exists());
         }
-        btnSave.setEnabled(inputPath != null && new File(inputPath).exists());
         // Structural edits (trim/join) change the audio itself: reload the
         // waveform so peaks and duration match the restored file.
         String refreshPath = (currentOutputPath != null
@@ -2212,7 +2319,6 @@ public class MainActivity extends Activity {
         final String srcPath = (currentOutputPath != null
                 && new File(currentOutputPath).exists()) ? currentOutputPath : inputPath;
         final boolean raw = srcPath.equals(inputPath);
-        btnSave.setEnabled(false);
         showProgress(true);
         setStatus(raw ? "Encoding MP3 (no effects)..." : "Encoding MP3...");
         new Thread(() -> {
@@ -2234,6 +2340,7 @@ public class MainActivity extends Activity {
                         try {
                             libraryDb.logExport(currentEntryId, savedAs,
                                     saveFolderName(), undoDepth());
+                            maybeAdoptExportName(currentEntryId, savedAs);
                         } catch (Exception ignored) {
                         }
                     }
@@ -2242,11 +2349,46 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> setStatus("Save failed: " + e.getMessage()));
             } finally {
                 runOnUiThread(() -> {
-                    btnSave.setEnabled(true);
                     showProgress(false);
                 });
             }
         }).start();
+    }
+
+    /**
+     * Default the project name to the user's export filename: when the
+     * entry still has its auto-generated "Recording ..." name, adopt the
+     * filename the user chose in the save dialog. Manual renames are
+     * never overridden.
+     */
+    private void maybeAdoptExportName(String entryId, String mp3Name) {
+        LibraryDb.LibraryEntry e;
+        try {
+            e = libraryDb.getEntry(entryId);
+        } catch (Exception ex) {
+            return;
+        }
+        if (e == null || e.name == null
+                || !e.name.matches("Recording \\d{4}-\\d{2}-\\d{2} \\d{2}-\\d{2}")) {
+            return;
+        }
+        String stem = mp3Name;
+        if (stem.toLowerCase(Locale.US).endsWith(".mp3")) {
+            stem = stem.substring(0, stem.length() - 4);
+        }
+        stem = stem.trim();
+        if (stem.isEmpty() || stem.equals(e.name)) {
+            return;
+        }
+        try {
+            libraryDb.renameEntry(entryId, stem);
+        } catch (Exception ignored) {
+            return;
+        }
+        inputFileName = stem;
+        tvTrackName.setText(stem);
+        updateProjectName();
+        setStatus("Saved: " + mp3Name + " — project renamed to " + stem + ".");
     }
 
     private String copyToSaveFolder(File src, String baseName, boolean overwrite)
