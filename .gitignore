@@ -34,3 +34,7 @@ venv/
 
 # OS
 .DS_Store
+
+# Local-only Gradle config (e.g. org.gradle.java.home pointing at a
+# machine-specific JDK). Never commit this; every machine differs.
+gradle.properties

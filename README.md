@@ -59,7 +59,9 @@ gradle testPython
 
 Prerequisites: **JDK 17** (AGP 8.7 will not run on Java 8/11 — if Gradle
 reports "Dependency requires at least JVM runtime version 11", point it at
-17 via `JAVA_HOME` or `org.gradle.java.home` in `~/.gradle/gradle.properties`),
+17 via `JAVA_HOME`, `~/.gradle/gradle.properties`, or a local (uncommitted)
+`gradle.properties` in the project root containing
+`org.gradle.java.home=<absolute path to JDK 17>`),
 plus the Android SDK (platform 34, build-tools).
 
 ```bash
