@@ -6,6 +6,8 @@ import android.database.Cursor;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.OpenableColumns;
 import android.view.View;
 import android.widget.ArrayAdapter;
@@ -65,8 +67,12 @@ public class MainActivity extends Activity {
     private String playerOutputPath;   // file the live player was built for
     private double audioDurationSec;
     private int outputSeq;  // disambiguates output files within the same millisecond
+    private Double selStartSec;  // waveform selection window, null = none
+    private Double selEndSec;    // null = from start point to end of file
     private Uri saveFolderUri;  // session-only; never persisted
     private MediaPlayer player;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private Runnable scheduledStop;
 
     // In-memory session state for Undo.
     private final Map<String, String> originalInputPath = new HashMap<>(); // fileHash -> pristine WAV
@@ -126,6 +132,29 @@ public class MainActivity extends Activity {
         return Integer.toHexString(fileName.hashCode());
     }
 
+    private static String fmtSec(double s) {
+        return ((int) Math.round(s)) + "s";
+    }
+
+    private void onSelectionChanged(Float startFrac, Float endFrac) {
+        if (startFrac == null || audioDurationSec <= 0) {
+            selStartSec = null;
+            selEndSec = null;
+            setStatus("Selection cleared — full file.");
+            return;
+        }
+        selStartSec = (double) startFrac * audioDurationSec;
+        if (endFrac != null) {
+            selEndSec = (double) endFrac * audioDurationSec;
+            setStatus("Window: " + fmtSec(selStartSec) + "–" + fmtSec(selEndSec)
+                    + " — tap for a new start, double-tap to clear.");
+        } else {
+            selEndSec = null;
+            setStatus("Start: " + fmtSec(selStartSec)
+                    + " — tap again to set the end, double-tap to clear.");
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -145,7 +174,7 @@ public class MainActivity extends Activity {
         btnSave = findViewById(R.id.btn_save);
         progressBar = findViewById(R.id.progress_bar);
         waveformView = findViewById(R.id.waveform);
-        waveformView.setOnSeekListener(this::onWaveformSeek);
+        waveformView.setOnSelectionListener(this::onSelectionChanged);
 
         ArrayAdapter<CharSequence> adapter = ArrayAdapter.createFromResource(
                 this, R.array.reverb_presets, android.R.layout.simple_spinner_item);
@@ -261,7 +290,7 @@ public class MainActivity extends Activity {
                     Python.start(new AndroidPlatform(this));
                 }
                 PyObject result = Python.getInstance().getModule("audiofx.android_bridge")
-                        .callAttr("waveform_peaks", path, 240);
+                        .callAttr("waveform_peaks", path, 1200);
                 // peaks_json is a Python str; PyObject.toString() gives str().
                 JSONArray arr = new JSONArray(result.callAttr("get", "peaks_json").toString());
                 final float[] peaks = new float[arr.length()];
@@ -305,13 +334,20 @@ public class MainActivity extends Activity {
         final String preset = spinnerReverb.getSelectedItem().toString();
         final double echo = seekEcho.getProgress() / 100.0;
         final String hash = fileHash(inputFileName);
+        final String windowDesc = selStartSec != null
+                ? " [" + fmtSec(selStartSec) + "–"
+                        + (selEndSec != null ? fmtSec(selEndSec) : "end") + "]"
+                : "";
         final String effectsDesc = "Warmth " + seekWarmth.getProgress() + "%, Reverb "
-                + preset + ", Echo " + seekEcho.getProgress() + "%";
+                + preset + ", Echo " + seekEcho.getProgress() + "%" + windowDesc;
         // Every application writes its own file so Undo can restore earlier ones.
         final String outPath = new File(getCacheDir(),
                 "output_" + System.currentTimeMillis() + "_" + (outputSeq++) + ".wav")
                 .getAbsolutePath();
         final long timestamp = System.currentTimeMillis();
+        // Window bounds for the Python side; null becomes None (whole file).
+        final Double startSec = selStartSec;
+        final Double endSec = selEndSec;
         btnProcess.setEnabled(false);
         btnUndo.setEnabled(false); // no racing an undo mid-apply
         showProgress(true);
@@ -324,7 +360,8 @@ public class MainActivity extends Activity {
                 }
                 Python py = Python.getInstance();
                 PyObject result = py.getModule("audiofx.android_bridge").callAttr(
-                        "process_file", inputPath, outPath, warmth, preset, echo);
+                        "process_file", inputPath, outPath, warmth, preset, echo,
+                        startSec, endSec);
                 // process_file returns a Python dict. PyObject.get(String) does
                 // getattr(), which returns null for dict keys, so read values
                 // via dict.get() instead.
@@ -382,6 +419,7 @@ public class MainActivity extends Activity {
     }
 
     private void releasePlayer() {
+        cancelScheduledStop();
         if (player != null) {
             try {
                 player.stop();
@@ -393,14 +431,53 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void playOutput() {
-        playOutputAt(0f);
+    private void cancelScheduledStop() {
+        if (scheduledStop != null) {
+            mainHandler.removeCallbacks(scheduledStop);
+            scheduledStop = null;
+        }
     }
 
-    private void onWaveformSeek(float fraction) {
-        if (currentOutputPath == null) {
-            Toast.makeText(this, "Apply effects first", Toast.LENGTH_SHORT).show();
-            return;
+    /** End of the playback window in ms, or null for end-of-file. */
+    private Integer computeStopMs(int startMs) {
+        if (selEndSec != null && audioDurationSec > 0) {
+            int endMs = (int) (selEndSec * 1000);
+            if (endMs > startMs) {
+                return endMs;
+            }
+        }
+        return null;
+    }
+
+    private void scheduleStopAt(Integer stopMs, int startMs, MediaPlayer mp) {
+        cancelScheduledStop();
+        if (stopMs != null) {
+            scheduledStop = () -> {
+                if (player == mp) {
+                    try {
+                        if (mp.isPlaying()) {
+                            stopPlayback();
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+            };
+            mainHandler.postDelayed(scheduledStop, Math.max(0, stopMs - startMs));
+        }
+    }
+
+    private String playbackStatus(int startMs, Integer stopMs) {
+        if (stopMs != null) {
+            return "Playing " + (startMs / 1000) + "s–" + (stopMs / 1000) + "s...";
+        }
+        return startMs > 0 ? "Playing from " + (startMs / 1000) + "s..."
+                : "Playing processed audio...";
+    }
+
+    private void playOutput() {
+        float fraction = 0f;
+        if (selStartSec != null && audioDurationSec > 0) {
+            fraction = (float) (selStartSec / audioDurationSec);
         }
         playOutputAt(fraction);
     }
@@ -425,12 +502,17 @@ public class MainActivity extends Activity {
         }
         // If the live player is already on this exact file, just seek in place.
         if (player != null && currentOutputPath.equals(playerOutputPath)) {
-            int ms = seekMs(fraction);
+            int startMs = seekMs(fraction);
+            Integer stopMs = computeStopMs(startMs);
             try {
-                player.seekTo(ms);
+                player.seekTo(startMs);
+                if (!player.isPlaying()) {
+                    player.start();
+                }
             } catch (Exception ignored) {
             }
-            setStatus("Playing from " + (ms / 1000) + "s...");
+            scheduleStopAt(stopMs, startMs, player);
+            setStatus(playbackStatus(startMs, stopMs));
             btnStop.setEnabled(true);
             return;
         }
@@ -445,17 +527,18 @@ public class MainActivity extends Activity {
             final boolean[] prepared = {false};
             player.setOnPreparedListener(mp -> {
                 prepared[0] = true;
-                int ms = seekMs(fraction);
-                if (ms > 0) {
+                int startMs = seekMs(fraction);
+                Integer stopMs = computeStopMs(startMs);
+                if (startMs > 0) {
                     try {
-                        mp.seekTo(ms);
+                        mp.seekTo(startMs);
                     } catch (Exception ignored) {
                     }
                 }
                 mp.start();
                 playerOutputPath = currentOutputPath;
-                setStatus(ms > 0 ? "Playing from " + (ms / 1000) + "s..."
-                        : "Playing processed audio...");
+                scheduleStopAt(stopMs, startMs, mp);
+                setStatus(playbackStatus(startMs, stopMs));
                 btnStop.setEnabled(true);
             });
             player.setOnCompletionListener(mp -> {

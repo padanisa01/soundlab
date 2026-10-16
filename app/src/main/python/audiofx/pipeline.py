@@ -98,6 +98,24 @@ def waveform_peaks(samples, n_buckets=240):
     return [p / top for p in peaks]
 
 
+def splice_with_crossfade(original, replacement, start, end, sample_rate,
+                          fade_sec=0.01):
+    """Splice ``replacement`` (which must cover ``[start, end)``) into a copy
+    of ``original``, with a short linear crossfade at both splice points to
+    avoid clicks. Returns the new sample list."""
+    n = len(original)
+    out = list(original)
+    out[start:end] = replacement
+    fade_n = int(fade_sec * sample_rate)
+    fade_n = min(fade_n, (end - start) // 2, start, n - end)
+    for i in range(fade_n):
+        t = (i + 1) / (fade_n + 1)
+        out[start + i] = original[start + i] * (1 - t) + replacement[i] * t
+        j = end - fade_n + i
+        out[j] = replacement[j - start] * (1 - t) + original[j] * t
+    return out
+
+
 def encode_mp3(samples, sample_rate, bitrate_kbps=192, quality=2):
     """Encode mono float samples as MP3 (CBR) via the ``lameenc`` package.
 

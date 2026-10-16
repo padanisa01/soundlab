@@ -11,6 +11,7 @@ from .pipeline import (
     EffectChain,
     encode_mp3,
     read_wav_mono,
+    splice_with_crossfade,
     waveform_peaks as _waveform_peaks,
     write_wav,
 )
@@ -21,25 +22,47 @@ def list_reverb_presets():
     return sorted(Reverb.PRESETS)
 
 
-def process_file(input_path, output_path, warmth=0.5, reverb_preset="studio", echo=0.3):
+def process_file(input_path, output_path, warmth=0.5, reverb_preset="studio", echo=0.3,
+                 start_sec=None, end_sec=None):
     """Apply the effect chain to a WAV file.
 
-    Returns a dict with ok/output_path/sample_rate/duration_s.
+    When ``start_sec``/``end_sec`` select a window, only that window is
+    processed (spliced back with a short crossfade); otherwise the whole
+    file is processed.
+
+    Returns a dict with ok/output_path/sample_rate/duration_s/start_s/end_s.
     Raises ValueError on a missing input or unknown preset.
     """
     if not os.path.isfile(input_path):
         raise ValueError("input file not found: %s" % input_path)
     samples, sample_rate = read_wav_mono(input_path)
+    n = len(samples)
+    s = 0 if start_sec is None else int(start_sec * sample_rate)
+    e = n if end_sec is None else int(end_sec * sample_rate)
+    s = max(0, min(n, s))
+    e = max(0, min(n, e))
+    if e <= s:
+        s, e = 0, n
     chain = EffectChain(
         [Warmth(warmth), Reverb(reverb_preset), Echo(echo)]
     )
-    processed = chain.process(samples, sample_rate)
+    if s == 0 and e == n:
+        processed = chain.process(samples, sample_rate)
+    else:
+        window_out = chain.process(samples[s:e], sample_rate)
+        # Effects like reverb extend the signal with a tail; a windowed
+        # application is confined to the selected window, so truncate.
+        # (Full-file applies keep the natural tail extension.)
+        window_out = window_out[: e - s]
+        processed = splice_with_crossfade(samples, window_out, s, e, sample_rate)
     write_wav(output_path, processed, sample_rate)
     return {
         "ok": True,
         "output_path": output_path,
         "sample_rate": sample_rate,
         "duration_s": round(len(processed) / sample_rate, 2),
+        "start_s": round(s / sample_rate, 2),
+        "end_s": round(e / sample_rate, 2),
     }
 
 

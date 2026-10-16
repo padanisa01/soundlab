@@ -181,5 +181,75 @@ class TestWaveformPeaks(unittest.TestCase):
             android_bridge.waveform_peaks("/nonexistent/in.wav")
 
 
+class TestWindowedProcess(unittest.TestCase):
+    SR = 22050
+
+    def _impulse_wav(self, d):
+        # 2 s file with a single impulse at 0.6 s.
+        n = 2 * self.SR
+        samples = [0.0] * n
+        samples[int(0.6 * self.SR)] = 1.0
+        path = os.path.join(d, "in.wav")
+        write_wav(path, samples, self.SR)
+        return path
+
+    def test_explicit_full_window_matches_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._impulse_wav(d)
+            dst1 = os.path.join(d, "o1.wav")
+            dst2 = os.path.join(d, "o2.wav")
+            android_bridge.process_file(src, dst1, warmth=0.5,
+                                        reverb_preset="studio", echo=0.3)
+            android_bridge.process_file(src, dst2, warmth=0.5,
+                                        reverb_preset="studio", echo=0.3,
+                                        start_sec=0, end_sec=2.0)
+            out1, _ = read_wav_mono(dst1)
+            out2, _ = read_wav_mono(dst2)
+            self.assertEqual(out1, out2)
+
+    def test_outside_window_untouched(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._impulse_wav(d)
+            dst = os.path.join(d, "o.wav")
+            # Echo of the 0.6 s impulse lands at 0.92 s, inside [0.5, 1.5].
+            android_bridge.process_file(src, dst, warmth=0.5,
+                                        reverb_preset="studio", echo=1.0,
+                                        start_sec=0.5, end_sec=1.5)
+            out, _ = read_wav_mono(dst)
+            orig, _ = read_wav_mono(src)
+            s = int(0.5 * self.SR)
+            e = int(1.5 * self.SR)
+            fade = int(0.01 * self.SR)
+            # Outside the window (beyond the crossfade zones) bit-exact.
+            self.assertEqual(out[: s - fade], orig[: s - fade])
+            self.assertEqual(out[e + fade :], orig[e + fade :])
+            # ... but something changed inside the window.
+            self.assertTrue(any(a != b for a, b in zip(out, orig)))
+
+    def test_degenerate_window_falls_back_to_full(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._impulse_wav(d)
+            dst = os.path.join(d, "o.wav")
+            result = android_bridge.process_file(src, dst, start_sec=1.5, end_sec=0.5)
+            self.assertEqual(result["start_s"], 0)
+            self.assertEqual(result["end_s"], 2.0)
+
+    def test_splice_crossfade_blends(self):
+        from audiofx.pipeline import splice_with_crossfade
+
+        orig = [0.0] * 1000
+        repl = [1.0] * 400
+        out = splice_with_crossfade(orig, repl, 300, 700, 22050, fade_sec=0.01)
+        self.assertEqual(len(out), 1000)
+        # fade_n = min(220, 200, 300, 300) = 200
+        self.assertEqual(out[: 300 - 200], orig[: 300 - 200])
+        self.assertEqual(out[700 + 200 :], orig[700 + 200 :])
+        # Crossfade ramps 0 -> 1 into the window and 1 -> 0 out of it.
+        self.assertTrue(0.0 < out[300] < 1.0)
+        self.assertTrue(out[300] < out[310])
+        self.assertTrue(0.0 < out[699] < 1.0)
+        self.assertTrue(out[699] < out[689])
+
+
 if __name__ == "__main__":
     unittest.main()

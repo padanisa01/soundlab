@@ -7,20 +7,33 @@ import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Shader;
 import android.util.AttributeSet;
+import android.view.GestureDetector;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.animation.DecelerateInterpolator;
 
 /**
- * Draws the picked audio's waveform as vertical bars with a seconds timeline
- * underneath. Can overlay a translucent left-to-right gradient fill to
- * indicate background progress, and reports taps as seek requests.
+ * Waveform display with a seconds timeline, pinch-to-zoom, pan, and a
+ * tap-driven selection:
+ *
+ * <ul>
+ *   <li>Tap: place the start marker. A second tap after the start places
+ *       the end marker (a tap at/before the start moves the start instead).
+ *   <li>Double-tap: clear the selection.
+ *   <li>Pinch: zoom 1x-8x around the focal point.
+ *   <li>One-finger drag while zoomed: pan.
+ * </ul>
+ *
+ * A translucent left-to-right gradient fill can overlay the bars to
+ * indicate background progress (e.g. while Apply effects is running).
  */
 public class WaveformView extends View {
 
-    /** Called when the user taps the waveform; fraction is 0..1 across the width. */
-    public interface OnSeekListener {
-        void onSeek(float fraction);
+    /** Fractions are 0..1 across the whole audio; null clears. */
+    public interface OnSelectionListener {
+        void onSelectionChanged(Float startFraction, Float endFraction);
     }
 
     private static final int BAR_COLOR = 0xFF4DB6AC;
@@ -30,11 +43,28 @@ public class WaveformView extends View {
     private static final int EDGE_COLOR = 0xFF26A69A;
     private static final int TICK_COLOR = 0xFF90A4AE;
     private static final int LABEL_COLOR = 0xFF78909C;
+    private static final int SELECTION_FILL = 0x4026A69A;
+    private static final int SELECTION_EDGE = 0xFF00897B;
+    private static final float MAX_ZOOM = 8f;
 
     private float[] peaks = new float[0];
     private float progress; // 0..1; 0 means no fill
     private double durationSec;
-    private OnSeekListener seekListener;
+
+    private float zoom = 1f;
+    private float viewStart; // audio fraction at the left edge
+
+    private Float selStartFrac;
+    private Float selEndFrac;
+    private OnSelectionListener selectionListener;
+
+    private final ScaleGestureDetector scaleDetector;
+    private final GestureDetector gestureDetector;
+    private final int touchSlop;
+    private float downX;
+    private float lastX;
+    private boolean panning;
+
     private ValueAnimator progressAnimator;
     private final Runnable clearFillRunnable = () -> setProgress(0f);
 
@@ -44,6 +74,8 @@ public class WaveformView extends View {
     private final Paint edgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint tickPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint selectionFillPaint = new Paint();
+    private final Paint selectionEdgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     public WaveformView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -56,13 +88,22 @@ public class WaveformView extends View {
         tickPaint.setColor(TICK_COLOR);
         tickPaint.setStrokeWidth(2f);
         textPaint.setColor(LABEL_COLOR);
+        selectionFillPaint.setColor(SELECTION_FILL);
+        selectionEdgePaint.setColor(SELECTION_EDGE);
+        selectionEdgePaint.setStrokeWidth(3f);
+        touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
+        scaleDetector = new ScaleGestureDetector(context, new ScaleListener());
+        gestureDetector = new GestureDetector(context, new GestureListener());
     }
 
-    /** Replace the displayed waveform. Clears any progress fill. */
+    /** Replace the displayed waveform. Resets zoom, pan, progress, selection. */
     public void setPeaks(float[] peaks) {
         this.peaks = peaks != null ? peaks : new float[0];
+        this.zoom = 1f;
+        this.viewStart = 0f;
         cancelProgressAnimation();
         this.progress = 0f;
+        clearSelection();
         invalidate();
     }
 
@@ -78,19 +119,144 @@ public class WaveformView extends View {
         invalidate();
     }
 
-    public void setOnSeekListener(OnSeekListener listener) {
-        this.seekListener = listener;
+    public void setOnSelectionListener(OnSelectionListener listener) {
+        this.selectionListener = listener;
+    }
+
+    /** Current selection as audio fractions, or nulls when unset. */
+    public Float getSelectionStart() {
+        return selStartFrac;
+    }
+
+    public Float getSelectionEnd() {
+        return selEndFrac;
+    }
+
+    public void clearSelection() {
+        if (selStartFrac != null || selEndFrac != null) {
+            selStartFrac = null;
+            selEndFrac = null;
+            invalidate();
+            notifySelection();
+        }
+    }
+
+    private void placeMarkerTap(float frac) {
+        if (selStartFrac == null || selEndFrac != null) {
+            // Fresh start (or replace a completed window).
+            selStartFrac = frac;
+            selEndFrac = null;
+        } else if (frac > selStartFrac) {
+            selEndFrac = frac;
+        } else {
+            // Tapped at/before the start: move the start earlier.
+            selStartFrac = frac;
+        }
+        invalidate();
+        notifySelection();
+    }
+
+    private void notifySelection() {
+        if (selectionListener != null) {
+            selectionListener.onSelectionChanged(selStartFrac, selEndFrac);
+        }
+    }
+
+    /** Audio fraction (0..1) under view x-coordinate. */
+    private float xToFraction(float x) {
+        float frac = viewStart + (x / getWidth()) / zoom;
+        return Math.max(0f, Math.min(1f, frac));
+    }
+
+    /** View x-coordinate for an audio fraction. */
+    private float fractionToX(float frac) {
+        return (frac - viewStart) * zoom * getWidth();
+    }
+
+    private void clampViewStart() {
+        float maxStart = 1f - 1f / zoom;
+        viewStart = Math.max(0f, Math.min(maxStart, viewStart));
     }
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
-        if (event.getAction() == MotionEvent.ACTION_DOWN
-                && seekListener != null && getWidth() > 0) {
-            float fraction = Math.max(0f, Math.min(1f, event.getX() / getWidth()));
-            seekListener.onSeek(fraction);
+        scaleDetector.onTouchEvent(event);
+        gestureDetector.onTouchEvent(event);
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                downX = event.getX();
+                lastX = downX;
+                panning = false;
+                break;
+            case MotionEvent.ACTION_MOVE:
+                if (!scaleDetector.isInProgress() && zoom > 1f
+                        && event.getPointerCount() == 1) {
+                    if (!panning && Math.abs(event.getX() - downX) < touchSlop) {
+                        break;
+                    }
+                    panning = true;
+                    float dx = event.getX() - lastX;
+                    lastX = event.getX();
+                    if (getWidth() > 0) {
+                        viewStart -= dx / getWidth() / zoom;
+                        clampViewStart();
+                        invalidate();
+                    }
+                }
+                break;
+            case MotionEvent.ACTION_POINTER_DOWN:
+            case MotionEvent.ACTION_POINTER_UP:
+                // Avoid a pan jump when the second finger lands/lifts.
+                lastX = event.getX();
+                break;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                panning = false;
+                break;
+        }
+        return true;
+    }
+
+    private class ScaleListener extends ScaleGestureDetector.SimpleOnScaleGestureListener {
+        @Override
+        public boolean onScale(ScaleGestureDetector detector) {
+            float oldZoom = zoom;
+            float newZoom = Math.max(1f, Math.min(MAX_ZOOM, oldZoom * detector.getScaleFactor()));
+            if (newZoom != oldZoom && getWidth() > 0) {
+                float focusX = detector.getFocusX();
+                float focusFrac = viewStart + (focusX / getWidth()) / oldZoom;
+                zoom = newZoom;
+                if (zoom == 1f) {
+                    viewStart = 0f;
+                } else {
+                    viewStart = focusFrac - (focusX / getWidth()) / zoom;
+                    clampViewStart();
+                }
+                invalidate();
+            }
             return true;
         }
-        return super.onTouchEvent(event);
+    }
+
+    private class GestureListener extends GestureDetector.SimpleOnGestureListener {
+        @Override
+        public boolean onDown(MotionEvent e) {
+            return true;
+        }
+
+        @Override
+        public boolean onSingleTapConfirmed(MotionEvent e) {
+            if (getWidth() > 0) {
+                placeMarkerTap(xToFraction(e.getX()));
+            }
+            return true;
+        }
+
+        @Override
+        public boolean onDoubleTap(MotionEvent e) {
+            clearSelection();
+            return true;
+        }
     }
 
     /**
@@ -146,22 +312,37 @@ public class WaveformView extends View {
         float density = getResources().getDisplayMetrics().density;
         float labelH = 20 * density;
         float barH = h - labelH;
+        float midY = barH / 2f;
 
         if (peaks.length == 0) {
             // Empty placeholder: faint center line until audio is picked.
-            float midY = barH / 2f;
             canvas.drawLine(0, midY, w, midY, placeholderPaint);
         } else {
-            float barW = (float) w / peaks.length;
-            float drawnW = Math.max(1f, barW * 0.7f);
-            float midY = barH / 2f;
-            float maxAmp = (barH / 2f) * 0.95f;
-            for (int i = 0; i < peaks.length; i++) {
+            float maxAmp = midY * 0.95f;
+            float startF = viewStart;
+            int i0 = (int) (startF * peaks.length);
+            int i1 = Math.min(peaks.length,
+                    (int) Math.ceil((viewStart + 1f / zoom) * peaks.length) + 1);
+            float pxPerBucket = zoom * w / peaks.length;
+            float drawnW = Math.max(1f, pxPerBucket * 0.7f);
+            for (int i = Math.max(0, i0); i < i1; i++) {
+                float left = (i / (float) peaks.length - startF) * zoom * w;
                 float amp = peaks[i] * maxAmp;
-                float left = i * barW;
                 canvas.drawRect(left, midY - amp, left + drawnW, midY + amp, barPaint);
             }
         }
+
+        // Selection window shading + marker lines.
+        if (selStartFrac != null) {
+            float x0 = fractionToX(selStartFrac);
+            if (selEndFrac != null) {
+                float x1 = fractionToX(selEndFrac);
+                canvas.drawRect(x0, 0, x1, barH, selectionFillPaint);
+                canvas.drawLine(x1, 0, x1, barH, selectionEdgePaint);
+            }
+            canvas.drawLine(x0, 0, x0, barH, selectionEdgePaint);
+        }
+
         if (progress > 0f) {
             float fillW = w * progress;
             overlayPaint.setShader(new LinearGradient(
@@ -171,13 +352,17 @@ public class WaveformView extends View {
             overlayPaint.setShader(null);
             canvas.drawLine(fillW, 0, fillW, barH, edgePaint);
         }
-        // Time axis in seconds.
+
+        // Time axis in seconds, over the visible range.
         if (durationSec > 0) {
+            double visStartSec = viewStart * durationSec;
+            double visEndSec = Math.min(durationSec, (viewStart + 1f / zoom) * durationSec);
             textPaint.setTextSize(11 * density);
             textPaint.setTextAlign(Paint.Align.CENTER);
-            double interval = niceInterval(durationSec);
-            for (double t = 0; t <= durationSec + 1e-6; t += interval) {
-                float x = (float) (w * t / durationSec);
+            double interval = niceInterval(visEndSec - visStartSec);
+            double t0 = Math.ceil(visStartSec / interval) * interval;
+            for (double t = t0; t <= visEndSec + 1e-6; t += interval) {
+                float x = (float) ((t / durationSec - viewStart) * zoom * w);
                 canvas.drawLine(x, barH, x, barH + 5 * density, tickPaint);
                 String label = formatSeconds(t);
                 float half = textPaint.measureText(label) / 2f;

@@ -11,8 +11,14 @@ or the plan changes.
 - The input file name is remembered and reused for the MP3 save name.
 - A waveform display below the picker shows the picked audio
   (peak amplitudes computed in the Python module), with a seconds
-  timeline on the x-axis. Tapping the waveform starts playback from
-  that point (seeks in place if already playing the same file).
+  timeline on the x-axis.
+- Tap the waveform to place a start marker; tap again to place the end
+  marker (a tap at/before the start moves it). Double-tap clears.
+  Pinch to zoom (1x-8x), drag to pan while zoomed.
+- Playback and Apply effects honor the selection: a start point alone
+  plays/processes from there to the end of the file; a full window
+  plays/processes only inside it (processed audio is spliced back with
+  a short crossfade).
 
 ### Effects (applied in fixed order: Warmth -> Reverb -> Echo)
 - **Warmth** slider (0-100%): saturated low-end; 0% is an exact bypass.
