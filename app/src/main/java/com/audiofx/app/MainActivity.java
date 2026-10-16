@@ -91,6 +91,7 @@ public class MainActivity extends Activity {
     private Button btnNormalize;
     private Switch switchAgc;
     private Switch switchNs;
+    private Switch switchLiveFx;
     private Button btnSave;
     private ProgressBar progressBar;
     private WaveformView waveformView;
@@ -113,6 +114,7 @@ public class MainActivity extends Activity {
     private MediaPlayer player;
     private boolean isPaused;
     private final AudioRecorder recorder = new AudioRecorder();
+    private final LiveFxMonitor liveMonitor = new LiveFxMonitor();
     private String pendingRecName;
     private ObjectAnimator recPulse;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -124,6 +126,9 @@ public class MainActivity extends Activity {
         public void run() {
             if (recorder.isRecording()) {
                 tvTimeCur.setText(fmtTime(recorder.elapsedSec()));
+                mainHandler.postDelayed(this, 200);
+            } else if (liveMonitor.isRecording()) {
+                tvTimeCur.setText(fmtTime(liveMonitor.elapsedSec()));
                 mainHandler.postDelayed(this, 200);
             }
         }
@@ -263,13 +268,17 @@ public class MainActivity extends Activity {
         seekEcho = findViewById(R.id.seek_echo);
         switchAgc = findViewById(R.id.switch_agc);
         switchNs = findViewById(R.id.switch_ns);
+        switchLiveFx = findViewById(R.id.switch_livefx);
         SharedPreferences prefs = getSharedPreferences("soundlab", MODE_PRIVATE);
         switchAgc.setChecked(prefs.getBoolean("mic_agc", false));
         switchNs.setChecked(prefs.getBoolean("mic_ns", false));
+        switchLiveFx.setChecked(prefs.getBoolean("mic_livefx", false));
         switchAgc.setOnCheckedChangeListener((b, on) ->
                 prefs.edit().putBoolean("mic_agc", on).apply());
         switchNs.setOnCheckedChangeListener((b, on) ->
                 prefs.edit().putBoolean("mic_ns", on).apply());
+        switchLiveFx.setOnCheckedChangeListener((b, on) ->
+                prefs.edit().putBoolean("mic_livefx", on).apply());
         chipStudio = findViewById(R.id.chip_studio);
         chipHall = findViewById(R.id.chip_hall);
         chipBath = findViewById(R.id.chip_bath);
@@ -610,7 +619,7 @@ public class MainActivity extends Activity {
     // ---- Microphone recording ----
 
     private void onRecordClicked() {
-        if (recorder.isRecording()) {
+        if (recorder.isRecording() || liveMonitor.isRecording()) {
             stopRecording();
             return;
         }
@@ -641,6 +650,10 @@ public class MainActivity extends Activity {
         if (player != null && player.isPlaying()) {
             stopPlayback();
         }
+        if (switchLiveFx.isChecked()) {
+            startLiveRecording();
+            return;
+        }
         recorder.setPreprocessing(switchAgc.isChecked(), switchNs.isChecked());
         File take = new File(getCacheDir(), "rec_take.wav");
         if (!recorder.start(take)) {
@@ -650,23 +663,7 @@ public class MainActivity extends Activity {
         pendingRecName = "Recording "
                 + new SimpleDateFormat("yyyy-MM-dd HH-mm", Locale.US).format(new Date())
                 + ".wav";
-        // Recording UI state.
-        btnRecord.setImageResource(R.drawable.ic_stop_white);
-        recPulse = ObjectAnimator.ofFloat(btnRecord, "alpha", 1f, 0.35f);
-        recPulse.setDuration(600);
-        recPulse.setRepeatMode(ValueAnimator.REVERSE);
-        recPulse.setRepeatCount(ValueAnimator.INFINITE);
-        recPulse.start();
-        setPlayPauseEnabled(false);
-        btnStop.setEnabled(false);
-        btnProcess.setEnabled(false);
-        btnProcess.setAlpha(0.55f);
-        tvSource.setVisibility(View.VISIBLE);
-        tvSource.setText("REC");
-        tvSource.setTextColor(getColor(R.color.sl_red));
-        tvTimeCur.setText("0:00");
-        tvTimeTot.setText("--:--");
-        mainHandler.post(recTick);
+        enterRecordingUi(false);
         StringBuilder fx = new StringBuilder();
         if (recorder.agcActive()) {
             fx.append(" + AGC");
@@ -682,8 +679,76 @@ public class MainActivity extends Activity {
                 + " — tap the red button to stop.");
     }
 
-    private void stopRecording() {
-        File take = recorder.stop();
+    /**
+     * Live effect mode: the current Warmth/Reverb/Echo settings are
+     * snapshotted into a Python LiveChain, the mic feeds it in blocks,
+     * the wet signal plays back live and is baked into the take.
+     */
+    private void startLiveRecording() {
+        try {
+            if (!Python.isStarted()) {
+                Python.start(new AndroidPlatform(this));
+            }
+        } catch (Exception e) {
+            setStatus("Could not start the audio engine.");
+            return;
+        }
+        double warmth = seekWarmth.getProgress() / 100.0;
+        double echo = seekEcho.getProgress() / 100.0;
+        File take = new File(getCacheDir(), "rec_take.wav");
+        if (!liveMonitor.start(take, warmth, reverbPreset, echo,
+                switchAgc.isChecked(), switchNs.isChecked())) {
+            setStatus("Live FX unavailable on this device.");
+            return;
+        }
+        pendingRecName = "Recording "
+                + new SimpleDateFormat("yyyy-MM-dd HH-mm", Locale.US).format(new Date())
+                + ".wav";
+        enterRecordingUi(true);
+        String fxDesc = "Warmth " + seekWarmth.getProgress() + "%, Reverb "
+                + reverbDisplayName(reverbPreset) + ", Echo " + seekEcho.getProgress() + "%";
+        StringBuilder fx = new StringBuilder();
+        if (liveMonitor.agcActive()) {
+            fx.append(" + AGC");
+        }
+        if (liveMonitor.nsActive()) {
+            fx.append(" + noise suppression");
+        }
+        setStatus("LIVE FX " + liveMonitor.activeLabel() + " (" + fxDesc + fx
+                + ") — use headphones. Tap the red button to stop.");
+    }
+
+    /** Shared recording UI: pulsing red button, REC pill, elapsed timer. */
+    private void enterRecordingUi(boolean live) {
+        btnRecord.setImageResource(R.drawable.ic_stop_white);
+        recPulse = ObjectAnimator.ofFloat(btnRecord, "alpha", 1f, 0.35f);
+        recPulse.setDuration(600);
+        recPulse.setRepeatMode(ValueAnimator.REVERSE);
+        recPulse.setRepeatCount(ValueAnimator.INFINITE);
+        recPulse.start();
+        setPlayPauseEnabled(false);
+        btnStop.setEnabled(false);
+        btnProcess.setEnabled(false);
+        btnProcess.setAlpha(0.55f);
+        if (live) {
+            // Effect params are snapshotted at record start; moving
+            // sliders mid-take would do nothing, so lock them.
+            seekWarmth.setEnabled(false);
+            seekEcho.setEnabled(false);
+            chipStudio.setEnabled(false);
+            chipHall.setEnabled(false);
+            chipBath.setEnabled(false);
+            chipCave.setEnabled(false);
+        }
+        tvSource.setVisibility(View.VISIBLE);
+        tvSource.setText("REC");
+        tvSource.setTextColor(getColor(R.color.sl_red));
+        tvTimeCur.setText("0:00");
+        tvTimeTot.setText("--:--");
+        mainHandler.post(recTick);
+    }
+
+    private void exitRecordingUi() {
         mainHandler.removeCallbacks(recTick);
         if (recPulse != null) {
             recPulse.cancel();
@@ -695,6 +760,22 @@ public class MainActivity extends Activity {
         tvSource.setTextColor(getColor(R.color.sl_org));
         btnProcess.setEnabled(true);
         btnProcess.setAlpha(1f);
+        seekWarmth.setEnabled(true);
+        seekEcho.setEnabled(true);
+        chipStudio.setEnabled(true);
+        chipHall.setEnabled(true);
+        chipBath.setEnabled(true);
+        chipCave.setEnabled(true);
+    }
+
+    private void stopRecording() {
+        final File take;
+        if (liveMonitor.isRecording()) {
+            take = liveMonitor.stop();
+        } else {
+            take = recorder.stop();
+        }
+        exitRecordingUi();
         if (take == null) {
             setStatus("Recording failed — nothing captured.");
             return;
@@ -1242,6 +1323,9 @@ public class MainActivity extends Activity {
         super.onDestroy();
         if (recorder.isRecording()) {
             recorder.stop();
+        }
+        if (liveMonitor.isRecording()) {
+            liveMonitor.stop();
         }
         if (player != null) {
             player.release();

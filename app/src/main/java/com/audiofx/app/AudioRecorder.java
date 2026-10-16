@@ -1,38 +1,18 @@
 package com.audiofx.app;
 
-import android.media.AudioFormat;
 import android.media.AudioRecord;
-import android.media.MediaRecorder;
-import android.media.audiofx.AutomaticGainControl;
-import android.media.audiofx.NoiseSuppressor;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.RandomAccessFile;
 
 /**
- * Microphone capture to 16-bit PCM WAV.
- *
- * Tries capture configs in order, highest fidelity first:
- * UNPROCESSED @ 48 kHz stereo (raw — no AGC, noise suppression or
- * other preprocessing), then VOICE_RECOGNITION @ 48 kHz stereo, then
- * MIC @ 44.1 kHz stereo, finally MIC @ 44.1 kHz mono.
- *
- * Stereo is how Android engages multiple built-in microphones; the
- * framework does not let apps address individual mics.
+ * Microphone capture to 16-bit PCM WAV, with optional AGC / noise
+ * suppression attached to the capture session.
  */
 public class AudioRecorder {
 
-    private static final int[][] CONFIGS = {
-            // {audioSource, sampleRate, channelConfig}
-            {MediaRecorder.AudioSource.UNPROCESSED, 48000, AudioFormat.CHANNEL_IN_STEREO},
-            {MediaRecorder.AudioSource.VOICE_RECOGNITION, 48000, AudioFormat.CHANNEL_IN_STEREO},
-            {MediaRecorder.AudioSource.MIC, 44100, AudioFormat.CHANNEL_IN_STEREO},
-            {MediaRecorder.AudioSource.MIC, 44100, AudioFormat.CHANNEL_IN_MONO},
-    };
-
-    private AudioRecord recorder;
+    private MicCapture.Handle cap;
     private Thread worker;
     private volatile boolean running;
     private File outFile;
@@ -41,8 +21,7 @@ public class AudioRecorder {
     private String activeLabel = "";
     private boolean wantAgc;
     private boolean wantNs;
-    private AutomaticGainControl agc;
-    private NoiseSuppressor ns;
+    private final CaptureFx fx = new CaptureFx();
 
     public synchronized boolean isRecording() {
         return running;
@@ -68,12 +47,12 @@ public class AudioRecorder {
 
     /** True when the AGC effect actually attached to the capture session. */
     public synchronized boolean agcActive() {
-        return agc != null && agc.getEnabled();
+        return fx.agcActive();
     }
 
     /** True when the noise suppressor actually attached to the capture session. */
     public synchronized boolean nsActive() {
-        return ns != null && ns.getEnabled();
+        return fx.nsActive();
     }
 
     /**
@@ -84,70 +63,42 @@ public class AudioRecorder {
         if (running) {
             return true;
         }
-        for (int[] c : CONFIGS) {
-            if (tryStart(c[0], c[1], c[2], outFile)) {
-                return true;
-            }
+        MicCapture.Handle h = MicCapture.open();
+        if (h == null) {
+            return false;
         }
-        return false;
-    }
-
-    private boolean tryStart(int source, int sampleRate, int channelConfig, File outFile) {
-        int minBuf;
         try {
-            minBuf = AudioRecord.getMinBufferSize(sampleRate, channelConfig,
-                    AudioFormat.ENCODING_PCM_16BIT);
-        } catch (Exception e) {
-            return false;
-        }
-        if (minBuf <= 0) {
-            return false;
-        }
-        final AudioRecord rec;
-        try {
-            rec = new AudioRecord(source, sampleRate, channelConfig,
-                    AudioFormat.ENCODING_PCM_16BIT, minBuf * 4);
-        } catch (Exception e) {
-            return false;
-        }
-        if (rec.getState() != AudioRecord.STATE_INITIALIZED) {
-            rec.release();
-            return false;
-        }
-        final int channels = channelConfig == AudioFormat.CHANNEL_IN_STEREO ? 2 : 1;
-        try {
-            writeWavHeader(outFile, sampleRate, channels);
+            WavWriter.writeHeader(outFile, h.sampleRate, h.channels);
         } catch (IOException e) {
-            rec.release();
+            h.rec.release();
             return false;
         }
         try {
-            rec.startRecording();
+            h.rec.startRecording();
         } catch (Exception e) {
-            rec.release();
+            h.rec.release();
             outFile.delete();
             return false;
         }
-        if (rec.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
+        if (h.rec.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
             try {
-                rec.stop();
+                h.rec.stop();
             } catch (Exception ignored) {
             }
-            rec.release();
+            h.rec.release();
             outFile.delete();
             return false;
         }
-        attachEffects(rec.getAudioSessionId());
-        recorder = rec;
+        fx.attach(h.rec.getAudioSessionId(), wantAgc, wantNs);
+        cap = h;
         this.outFile = outFile;
         dataBytes = 0;
         startMs = System.currentTimeMillis();
-        activeLabel = (channels == 2 ? "stereo" : "mono") + " "
-                + (sampleRate / 1000) + " kHz " + sourceName(source);
+        activeLabel = h.label;
         running = true;
-        final int bufSize = minBuf * 2;
+        final AudioRecord rec = h.rec;
         worker = new Thread(() -> {
-            byte[] buf = new byte[bufSize];
+            byte[] buf = new byte[8192];
             try (FileOutputStream fos = new FileOutputStream(outFile, true)) {
                 while (running) {
                     int n = rec.read(buf, 0, buf.length);
@@ -163,58 +114,6 @@ public class AudioRecorder {
         }, "AudioRecorder");
         worker.start();
         return true;
-    }
-
-    private static String sourceName(int source) {
-        if (source == MediaRecorder.AudioSource.UNPROCESSED) {
-            return "UNPROCESSED";
-        }
-        if (source == MediaRecorder.AudioSource.VOICE_RECOGNITION) {
-            return "VOICE_RECOGNITION";
-        }
-        return "MIC";
-    }
-
-    /** Attach the requested preprocessing effects to the capture session. */
-    private void attachEffects(int sessionId) {
-        releaseEffects();
-        if (wantNs && NoiseSuppressor.isAvailable()) {
-            try {
-                ns = NoiseSuppressor.create(sessionId);
-                if (ns != null) {
-                    ns.setEnabled(true);
-                }
-            } catch (Exception ignored) {
-                ns = null;
-            }
-        }
-        if (wantAgc && AutomaticGainControl.isAvailable()) {
-            try {
-                agc = AutomaticGainControl.create(sessionId);
-                if (agc != null) {
-                    agc.setEnabled(true);
-                }
-            } catch (Exception ignored) {
-                agc = null;
-            }
-        }
-    }
-
-    private void releaseEffects() {
-        if (ns != null) {
-            try {
-                ns.release();
-            } catch (Exception ignored) {
-            }
-            ns = null;
-        }
-        if (agc != null) {
-            try {
-                agc.release();
-            } catch (Exception ignored) {
-            }
-            agc = null;
-        }
     }
 
     /**
@@ -234,15 +133,15 @@ public class AudioRecorder {
             } catch (InterruptedException ignored) {
             }
         }
-        if (recorder != null) {
+        if (cap != null) {
             try {
-                recorder.stop();
+                cap.rec.stop();
             } catch (Exception ignored) {
             }
-            recorder.release();
-            recorder = null;
+            cap.rec.release();
+            cap = null;
         }
-        releaseEffects();
+        fx.release();
         File f = outFile;
         outFile = null;
         activeLabel = "";
@@ -253,41 +152,11 @@ public class AudioRecorder {
             return null;
         }
         try {
-            finalizeWavHeader(f, dataBytes);
+            WavWriter.finalizeHeader(f, dataBytes);
         } catch (IOException e) {
             f.delete();
             return null;
         }
         return f;
-    }
-
-    // ---- 16-bit PCM WAV ----
-
-    private static void writeWavHeader(File f, int sampleRate, int channels) throws IOException {
-        try (RandomAccessFile raf = new RandomAccessFile(f, "rw")) {
-            raf.setLength(0);
-            raf.writeBytes("RIFF");
-            raf.writeInt(Integer.reverseBytes(36)); // chunk size placeholder
-            raf.writeBytes("WAVE");
-            raf.writeBytes("fmt ");
-            raf.writeInt(Integer.reverseBytes(16));
-            raf.writeShort(Short.reverseBytes((short) 1)); // PCM
-            raf.writeShort(Short.reverseBytes((short) channels));
-            raf.writeInt(Integer.reverseBytes(sampleRate));
-            raf.writeInt(Integer.reverseBytes(sampleRate * channels * 2)); // byte rate
-            raf.writeShort(Short.reverseBytes((short) (channels * 2))); // block align
-            raf.writeShort(Short.reverseBytes((short) 16)); // bits per sample
-            raf.writeBytes("data");
-            raf.writeInt(Integer.reverseBytes(0)); // data size placeholder
-        }
-    }
-
-    private static void finalizeWavHeader(File f, long dataBytes) throws IOException {
-        try (RandomAccessFile raf = new RandomAccessFile(f, "rw")) {
-            raf.seek(4);
-            raf.writeInt(Integer.reverseBytes((int) (36 + dataBytes)));
-            raf.seek(40);
-            raf.writeInt(Integer.reverseBytes((int) dataBytes));
-        }
     }
 }

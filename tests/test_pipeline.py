@@ -12,8 +12,9 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(__file__), "..", "app", "src", "main", "python")
 )
 
-from audiofx import Echo, EffectChain, Warmth, read_wav_mono, write_wav
+from audiofx import Echo, EffectChain, Reverb, Warmth, read_wav_mono, write_wav
 from audiofx import android_bridge
+from audiofx.live import LiveChain
 
 
 def sine(freq_hz, seconds, sample_rate, amplitude=0.5):
@@ -294,6 +295,57 @@ class TestWindowedProcess(unittest.TestCase):
         self.assertTrue(out[300] < out[310])
         self.assertTrue(0.0 < out[699] < 1.0)
         self.assertTrue(out[699] < out[689])
+
+
+class TestLiveChain(unittest.TestCase):
+    SR = 48000
+    BLOCK = 2048
+
+    def _offline(self, samples, warmth, preset, echo):
+        chain = EffectChain([Warmth(warmth), Reverb(preset), Echo(echo)])
+        return chain.process(samples, self.SR)
+
+    def test_blocks_match_offline(self):
+        # Stateful block processing must equal the offline whole-signal
+        # chain (offline reverb extends with a tail; compare the signal part).
+        sig = sine(440, 0.5, self.SR, amplitude=0.3)
+        for preset in ("studio", "bathroom", "cave"):
+            live = LiveChain(0.6, preset, 0.4, self.SR,
+                             block_size=self.BLOCK, channels=1)
+            out = []
+            for i in range(0, len(sig), self.BLOCK):
+                out.extend(live.process_block(sig[i:i + self.BLOCK]))
+            ref = self._offline(sig, 0.6, preset, 0.4)
+            self.assertEqual(len(out), len(sig))
+            for a, b in zip(out, ref[:len(sig)]):
+                self.assertAlmostEqual(a, b, places=5)
+
+    def test_bypass_params_match_offline(self):
+        sig = sine(440, 0.25, self.SR, amplitude=0.3)
+        live = LiveChain(0.0, "studio", 0.0, self.SR,
+                         block_size=self.BLOCK, channels=1)
+        out = []
+        for i in range(0, len(sig), self.BLOCK):
+            out.extend(live.process_block(sig[i:i + self.BLOCK]))
+        ref = self._offline(sig, 0.0, "studio", 0.0)
+        for a, b in zip(out, ref[:len(sig)]):
+            self.assertAlmostEqual(a, b, places=5)
+
+    def test_pcm_block_round_trip(self):
+        live = LiveChain(0.5, "studio", 0.3, self.SR,
+                         block_size=1024, channels=2)
+        n = 1024
+        pcm = struct.pack("<%dh" % (n * 2), *[1000] * (n * 2))
+        wet = live.process_pcm_block(pcm)
+        self.assertEqual(len(wet), n * 2)  # mono 16-bit
+        vals = struct.unpack("<%dh" % n, wet)
+        self.assertTrue(any(v != 0 for v in vals))
+
+    def test_bridge_factory(self):
+        chain = android_bridge.live_chain_create(0.5, "studio", 0.3, self.SR)
+        self.assertIsInstance(chain, LiveChain)
+        with self.assertRaises(ValueError):
+            android_bridge.live_chain_create(0.5, "arena", 0.3, self.SR)
 
 
 if __name__ == "__main__":

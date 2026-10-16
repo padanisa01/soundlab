@@ -97,6 +97,19 @@ def normalize_file(input_path, output_path, target_db=-1.0):
     }
 
 
+def live_chain_create(warmth, reverb_preset, echo, sample_rate,
+                      block_size=2048, channels=2):
+    """Create a stateful LiveChain for real-time block processing.
+
+    The chain snapshots the effect params; feed it consecutive PCM16
+    blocks via process_pcm_block.
+    """
+    from .live import LiveChain
+    return LiveChain(warmth=warmth, reverb_preset=reverb_preset, echo=echo,
+                     sample_rate=sample_rate, block_size=block_size,
+                     channels=channels)
+
+
 def encode_wav_to_mp3(input_wav_path, output_mp3_path, bitrate_kbps=192):
     """Encode a WAV file (e.g. the processed output) as MP3.
 

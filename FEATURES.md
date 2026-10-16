@@ -22,6 +22,14 @@ or the plan changes.
   AutomaticGainControl / NoiseSuppressor effects (both off by
   default, choices persist). The record-start toast reports which
   effects actually engaged, or that the device doesn't support them.
+- **Live effects** toggle: while recording, the mic feeds a Python
+  LiveChain (Warmth -> Reverb -> Echo, params snapshotted from the
+  sliders at record start) in 2048-sample blocks. The wet signal
+  plays back live for monitoring and is baked into the take (mono
+  16-bit WAV). Monitoring latency is roughly 0.1-0.3 s; use
+  headphones, the mic hears the speaker (a best-effort echo
+  canceler is attached when the device offers one). Effect sliders
+  lock during a live take.
 - 8-bit and 16-bit PCM supported; stereo is mixed down to mono.
 - The input file name is remembered and reused for the MP3 save name.
 - **Normalize** button (track card): peak-normalizes the current audio
