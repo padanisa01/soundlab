@@ -72,8 +72,10 @@ or the plan changes.
   window Python actually applied, e.g. `(applied 10.0s–20.0s)`.
 
 ### Save
-- **Save as MP3**: encodes the processed audio with `lameenc`
-  (CBR 192 kbps), in the Python module so it stays unit-testable.
+- **Save as MP3**: encodes with `lameenc` (CBR 192 kbps), in the Python
+  module so it stays unit-testable. Works with no Apply: saves the
+  processed output when there is one, otherwise the input as-is
+  (status says "no effects").
 - The output keeps the input's file name with an `.mp3` extension;
   name collisions get a ` (n)` suffix.
 - The destination folder is chosen once via the system folder picker

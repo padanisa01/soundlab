@@ -586,7 +586,7 @@ public class MainActivity extends Activity {
             audioDurationSec = 0;
             setPlayPauseEnabled(false);
             refreshPlayPause();
-            btnSave.setEnabled(false);
+            btnSave.setEnabled(true); // input is savable as-is, no Apply needed
             updateUndoBadge();
             waveformView.setPeaks(new float[0]);
             waveformView.setDuration(0);
@@ -809,8 +809,8 @@ public class MainActivity extends Activity {
         }
         if (currentOutputPath == null || !(new File(currentOutputPath).exists())) {
             setPlayPauseEnabled(inputPath != null && new File(inputPath).exists());
-            btnSave.setEnabled(false);
         }
+        btnSave.setEnabled(inputPath != null && new File(inputPath).exists());
         updateUndoBadge();
     }
 
@@ -1094,8 +1094,8 @@ public class MainActivity extends Activity {
     }
 
     private void onSaveClicked() {
-        if (currentOutputPath == null || !(new File(currentOutputPath).exists())) {
-            Toast.makeText(this, "Apply effects first", Toast.LENGTH_SHORT).show();
+        if (inputPath == null || !(new File(inputPath).exists())) {
+            Toast.makeText(this, "Pick an audio file or record first", Toast.LENGTH_SHORT).show();
             return;
         }
         if (saveFolderUri == null) {
@@ -1108,9 +1108,13 @@ public class MainActivity extends Activity {
 
     private void doSaveMp3() {
         final String mp3Name = toMp3Name(inputFileName);
+        // Save the processed output when there is one, else the input as-is.
+        final String srcPath = (currentOutputPath != null
+                && new File(currentOutputPath).exists()) ? currentOutputPath : inputPath;
+        final boolean raw = srcPath.equals(inputPath);
         btnSave.setEnabled(false);
         showProgress(true);
-        setStatus("Encoding MP3...");
+        setStatus(raw ? "Encoding MP3 (no effects)..." : "Encoding MP3...");
         new Thread(() -> {
             try {
                 if (!Python.isStarted()) {
@@ -1120,9 +1124,11 @@ public class MainActivity extends Activity {
                 // via Chaquopy pip), so it is unit-tested like the effects.
                 File tmpMp3 = new File(getCacheDir(), "output.mp3");
                 Python.getInstance().getModule("audiofx.android_bridge").callAttr(
-                        "encode_wav_to_mp3", currentOutputPath, tmpMp3.getAbsolutePath());
+                        "encode_wav_to_mp3", srcPath, tmpMp3.getAbsolutePath());
                 String savedAs = copyToSaveFolder(tmpMp3, mp3Name);
-                runOnUiThread(() -> setStatus("Saved: " + savedAs));
+                final String doneMsg = raw ? "Saved (no effects): " + savedAs
+                        : "Saved: " + savedAs;
+                runOnUiThread(() -> setStatus(doneMsg));
             } catch (Exception e) {
                 runOnUiThread(() -> setStatus("Save failed: " + e.getMessage()));
             } finally {
