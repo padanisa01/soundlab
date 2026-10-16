@@ -57,7 +57,10 @@ gradle testPython
 
 ## Build the APK
 
-Prerequisites: JDK 17, Android SDK (platform 34, build-tools).
+Prerequisites: **JDK 17** (AGP 8.7 will not run on Java 8/11 — if Gradle
+reports "Dependency requires at least JVM runtime version 11", point it at
+17 via `JAVA_HOME` or `org.gradle.java.home` in `~/.gradle/gradle.properties`),
+plus the Android SDK (platform 34, build-tools).
 
 ```bash
 ./gradlew assembleDebug
