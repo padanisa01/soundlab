@@ -41,13 +41,13 @@ chaquopy {
             // NumPy gives the reverb an FFT convolution fast path on device.
             // The module also runs without it via a pure-Python fallback.
             install "numpy"
+            // lameenc provides the MP3 encoder used by the Save-as-MP3
+            // feature (audiofx.pipeline.encode_mp3).
+            install "lameenc"
         }
     }
 }
 
 dependencies {
-    // FFmpeg with MP3 (libmp3lame) encoding for the Save-as-MP3 feature.
-    // The 'audio' package is the smallest one that includes libmp3lame.
-    implementation 'com.arthenica:ffmpeg-kit-audio:6.0'
     implementation 'androidx.documentfile:documentfile:1.0.1'
 }

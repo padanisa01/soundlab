@@ -16,9 +16,6 @@ import android.widget.Toast;
 
 import androidx.documentfile.provider.DocumentFile;
 
-import com.arthenica.ffmpegkit.FFmpegKit;
-import com.arthenica.ffmpegkit.FFmpegSession;
-import com.arthenica.ffmpegkit.ReturnCode;
 import com.chaquo.python.PyObject;
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
@@ -267,15 +264,14 @@ public class MainActivity extends Activity {
         setStatus("Encoding MP3...");
         new Thread(() -> {
             try {
-                File tmpMp3 = new File(getCacheDir(), "output.mp3");
-                FFmpegSession session = FFmpegKit.executeWithArguments(new String[]{
-                        "-y", "-i", outputPath,
-                        "-codec:a", "libmp3lame", "-q:a", "2",
-                        tmpMp3.getAbsolutePath()
-                });
-                if (!ReturnCode.isSuccess(session.getReturnCode())) {
-                    throw new Exception("MP3 encode failed: " + session.getFailStackTrace());
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
                 }
+                // MP3 encoding lives in the Python module (lameenc, installed
+                // via Chaquopy pip), so it is unit-tested like the effects.
+                File tmpMp3 = new File(getCacheDir(), "output.mp3");
+                Python.getInstance().getModule("audiofx.android_bridge").callAttr(
+                        "encode_wav_to_mp3", outputPath, tmpMp3.getAbsolutePath());
                 String savedAs = copyToSaveFolder(tmpMp3, mp3Name);
                 runOnUiThread(() -> setStatus("Saved: " + savedAs));
             } catch (Exception e) {

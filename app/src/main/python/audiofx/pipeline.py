@@ -55,14 +55,43 @@ def read_wav_mono(path):
     )
 
 
-def write_wav(path, samples, sample_rate):
-    """Write mono float samples as 16-bit PCM WAV."""
-    frames = struct.pack(
+def _pack_int16(samples):
+    """Clamp float samples to [-1, 1] and pack as little-endian int16."""
+    return struct.pack(
         "<%dh" % len(samples),
         *[int(round(max(-1.0, min(1.0, s)) * 32767)) for s in samples],
     )
+
+
+def write_wav(path, samples, sample_rate):
+    """Write mono float samples as 16-bit PCM WAV."""
+    frames = _pack_int16(samples)
     with wave.open(path, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(int(sample_rate))
         w.writeframes(frames)
+
+
+def encode_mp3(samples, sample_rate, bitrate_kbps=192, quality=2):
+    """Encode mono float samples as MP3 (CBR) via the ``lameenc`` package.
+
+    Returns the MP3 file bytes. Raises RuntimeError if lameenc is missing.
+    Samples are fed to the encoder in chunks so long recordings do not need
+    a second full-size buffer.
+    """
+    try:
+        import lameenc
+    except ImportError:
+        raise RuntimeError("lameenc is not installed (pip install lameenc)")
+    enc = lameenc.Encoder()
+    enc.set_bit_rate(int(bitrate_kbps))
+    enc.set_in_sample_rate(int(sample_rate))
+    enc.set_channels(1)
+    enc.set_quality(int(quality))
+    out = []
+    chunk = 1 << 20  # ~1M samples per encoder call
+    for i in range(0, len(samples), chunk):
+        out.append(enc.encode(_pack_int16(samples[i : i + chunk])))
+    out.append(enc.flush())
+    return b"".join(out)
