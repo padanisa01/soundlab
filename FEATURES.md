@@ -39,6 +39,14 @@ or the plan changes.
   preserved). Applies to the processed output when there is one,
   else the input; undoable like any effect; the status reports the
   before/after peak.
+- **Trim** (selection row): replaces the selected window with silence
+  (5 ms soft edges, no clicks); the selection stays put so you can
+  audition or re-trim it. Undoable.
+- **Join** (selection row): cuts the selected window out and glues
+  the remaining parts together with a 5 ms crossfade at the junction
+  (no silence in between, no click). The waveform, duration, and
+  track meta reload; the selection clears. Undo restores the removed
+  audio and reloads the waveform too.
 - A waveform display below the picker shows the picked audio
   (peak amplitudes computed in the Python module), with a seconds
   timeline on the x-axis.

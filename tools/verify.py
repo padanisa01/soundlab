@@ -63,6 +63,8 @@ SCAFFOLD_CHECKS = [
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "btn_record"),
     ("app/src/main/res/layout/activity_main.xml", "btn_record"),
     ("app/src/main/python/audiofx/android_bridge.py", "def normalize_file"),
+    ("app/src/main/python/audiofx/android_bridge.py", "def trim_to_silence"),
+    ("app/src/main/python/audiofx/android_bridge.py", "def join_remove"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "btn_normalize"),
     ("app/src/main/res/layout/activity_main.xml", "btn_normalize"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "progress_bar"),

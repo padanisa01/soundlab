@@ -194,6 +194,32 @@
                         android:textSize="13sp" />
 
                     <Button
+                        android:id="@+id/btn_trim"
+                        android:layout_width="wrap_content"
+                        android:layout_height="32dp"
+                        android:layout_marginEnd="4dp"
+                        android:background="@drawable/bg_ghost"
+                        android:paddingStart="10dp"
+                        android:paddingEnd="10dp"
+                        android:text="Trim"
+                        android:textColor="@color/sl_teal2"
+                        android:textSize="12sp"
+                        android:visibility="gone" />
+
+                    <Button
+                        android:id="@+id/btn_join"
+                        android:layout_width="wrap_content"
+                        android:layout_height="32dp"
+                        android:layout_marginEnd="4dp"
+                        android:background="@drawable/bg_ghost"
+                        android:paddingStart="10dp"
+                        android:paddingEnd="10dp"
+                        android:text="Join"
+                        android:textColor="@color/sl_teal2"
+                        android:textSize="12sp"
+                        android:visibility="gone" />
+
+                    <Button
                         android:id="@+id/btn_sel_clear"
                         android:layout_width="32dp"
                         android:layout_height="32dp"

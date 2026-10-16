@@ -130,6 +130,17 @@ public class WaveformView extends View {
         invalidate();
     }
 
+    /** Replace the displayed peaks without touching selection or zoom. */
+    public void updatePeaks(float[] peaks) {
+        this.peaks = peaks != null ? peaks : new float[0];
+        invalidate();
+    }
+
+    /** Defensive copy of the currently displayed peaks. */
+    public float[] getPeaks() {
+        return peaks.clone();
+    }
+
     /**
      * Show the playback range as a horizontal bar. Fractions are 0..1
      * across the whole audio; pass a null start to hide the indicator.

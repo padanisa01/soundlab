@@ -391,6 +391,87 @@ class TestLiveChain(unittest.TestCase):
         # Decorrelated reverb seeds: channels must differ.
         self.assertTrue(any(a != b for a, b in zip(vals[0::2], vals[1::2])))
 
+    def test_trim_to_silence(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.wav")
+            sig = sine(440, 1.0, self.SR, amplitude=0.5)
+            write_wav(src, sig, self.SR)
+            dst = os.path.join(d, "out.wav")
+            res = android_bridge.trim_to_silence(src, dst, 0.2, 0.5)
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["duration_s"], 1.0)
+            out, _ = read_wav_mono(dst)
+            self.assertEqual(len(out), len(sig))
+            s, e = int(0.2 * self.SR), int(0.5 * self.SR)
+            fade_n = int(0.005 * self.SR)
+            # Deep inside the window: digital silence.
+            self.assertTrue(all(v == 0.0 for v in out[s + fade_n + 100:e - fade_n - 100]))
+            # Outside the window: untouched.
+            for a, b in zip(out[:s - 100], sig[:s - 100]):
+                self.assertAlmostEqual(a, b, places=4)
+            for a, b in zip(out[e + 100:], sig[e + 100:]):
+                self.assertAlmostEqual(a, b, places=4)
+
+    def test_trim_open_end_means_to_end(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.wav")
+            write_wav(src, sine(440, 1.0, self.SR), self.SR)
+            dst = os.path.join(d, "out.wav")
+            res = android_bridge.trim_to_silence(src, dst, 0.8, None)
+            self.assertTrue(res["ok"])
+            out, _ = read_wav_mono(dst)
+            n = len(out)
+            fade_n = int(0.005 * self.SR)
+            # Past the fade: digital silence.
+            self.assertTrue(all(v == 0.0 for v in out[int(0.85 * self.SR):n - fade_n]))
+            # The edge fade ramps inward: boundary keeps the original value
+            # (continuous), fading toward silence inside the window.
+            sig_end, _ = read_wav_mono(src)
+            self.assertAlmostEqual(out[n - 1], sig_end[n - 1], places=2)
+            self.assertLess(abs(out[n - 1 - fade_n]), 0.02)
+
+    def test_trim_bad_window_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.wav")
+            write_wav(src, sine(440, 0.5, self.SR), self.SR)
+            with self.assertRaises(ValueError):
+                android_bridge.trim_to_silence(src, os.path.join(d, "o.wav"),
+                                              None, 0.3)
+            with self.assertRaises(ValueError):
+                android_bridge.trim_to_silence(src, os.path.join(d, "o.wav"),
+                                              0.3, 0.2)
+
+    def test_join_remove(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.wav")
+            sig = sine(440, 1.0, self.SR, amplitude=0.5)
+            write_wav(src, sig, self.SR)
+            dst = os.path.join(d, "out.wav")
+            res = android_bridge.join_remove(src, dst, 0.2, 0.5)
+            self.assertTrue(res["ok"])
+            self.assertAlmostEqual(res["removed_s"], 0.3, places=2)
+            out, _ = read_wav_mono(dst)
+            s, e = int(0.2 * self.SR), int(0.5 * self.SR)
+            fade_n = int(0.005 * self.SR)
+            # Length: removed window plus the crossfade overlap.
+            self.assertEqual(len(out), len(sig) - (e - s) - fade_n)
+            self.assertEqual(res["duration_s"],
+                             round((len(sig) - (e - s) - fade_n) / self.SR, 2))
+            # Head and tail survive (away from the junction crossfade).
+            for a, b in zip(out[:s - fade_n - 500], sig[:s - fade_n - 500]):
+                self.assertAlmostEqual(a, b, places=4)
+            # out[j] for j >= s - fade_n + fade_n maps to sig[e + fade_n + (j - s)].
+            for a, b in zip(out[s + 500:], sig[e + fade_n + 500:]):
+                self.assertAlmostEqual(a, b, places=4)
+
+    def test_join_whole_file_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.wav")
+            write_wav(src, sine(440, 0.5, self.SR), self.SR)
+            with self.assertRaises(ValueError):
+                android_bridge.join_remove(src, os.path.join(d, "o.wav"),
+                                          0.0, None)
+
 
 if __name__ == "__main__":
     unittest.main()

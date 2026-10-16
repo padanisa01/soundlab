@@ -98,6 +98,8 @@ public class MainActivity extends Activity {
     private LinearLayout selChipRow;
     private TextView selChipText;
     private Button btnSelClear;
+    private Button btnTrim;
+    private Button btnJoin;
     private TextView tvTimeCur;
     private TextView tvTimeTot;
     private TextView tvSource;
@@ -299,6 +301,10 @@ public class MainActivity extends Activity {
         selChipRow = findViewById(R.id.sel_chip_row);
         selChipText = findViewById(R.id.sel_chip_text);
         btnSelClear = findViewById(R.id.btn_sel_clear);
+        btnTrim = findViewById(R.id.btn_trim);
+        btnJoin = findViewById(R.id.btn_join);
+        btnTrim.setOnClickListener(v -> trimSelection());
+        btnJoin.setOnClickListener(v -> joinSelection());
         tvTimeCur = findViewById(R.id.tv_time_cur);
         tvTimeTot = findViewById(R.id.tv_time_tot);
         tvSource = findViewById(R.id.tv_source);
@@ -443,6 +449,8 @@ public class MainActivity extends Activity {
             selChipText.setTextColor(getColor(R.color.sl_mut));
             selChipText.setTypeface(null, Typeface.NORMAL);
             btnSelClear.setVisibility(View.GONE);
+            btnTrim.setVisibility(View.GONE);
+            btnJoin.setVisibility(View.GONE);
         } else {
             selChipRow.setBackgroundResource(R.drawable.bg_sel_chip);
             selChipText.setText(endSec != null
@@ -451,6 +459,8 @@ public class MainActivity extends Activity {
             selChipText.setTextColor(getColor(R.color.sl_teal2));
             selChipText.setTypeface(null, Typeface.BOLD);
             btnSelClear.setVisibility(View.VISIBLE);
+            btnTrim.setVisibility(View.VISIBLE);
+            btnJoin.setVisibility(View.VISIBLE);
         }
     }
 
@@ -512,7 +522,11 @@ public class MainActivity extends Activity {
     }
 
     private void loadWaveform() {
-        final String path = inputPath;
+        loadWaveformForPath(inputPath);
+    }
+
+    /** Reload peaks/duration for any file: the input or an edited output. */
+    private void loadWaveformForPath(String path) {
         new Thread(() -> {
             try {
                 if (!Python.isStarted()) {
@@ -730,6 +744,9 @@ public class MainActivity extends Activity {
         btnStop.setEnabled(false);
         btnProcess.setEnabled(false);
         btnProcess.setAlpha(0.55f);
+        btnTrim.setEnabled(false);
+        btnJoin.setEnabled(false);
+        btnNormalize.setEnabled(false);
         if (live) {
             // Effect params are snapshotted at record start; moving
             // sliders mid-take would do nothing, so lock them.
@@ -760,6 +777,9 @@ public class MainActivity extends Activity {
         tvSource.setTextColor(getColor(R.color.sl_org));
         btnProcess.setEnabled(true);
         btnProcess.setAlpha(1f);
+        btnTrim.setEnabled(true);
+        btnJoin.setEnabled(true);
+        btnNormalize.setEnabled(true);
         seekWarmth.setEnabled(true);
         seekEcho.setEnabled(true);
         chipStudio.setEnabled(true);
@@ -940,6 +960,135 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    private void trimSelection() {
+        if (selStartSec == null) {
+            Toast.makeText(this, "Select a range on the waveform first",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        editSelection("trim", selStartSec, selEndSec);
+    }
+
+    private void joinSelection() {
+        if (selStartSec == null) {
+            Toast.makeText(this, "Select a range on the waveform first",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        double s = selStartSec;
+        Double e = selEndSec;
+        // The joined region disappears; drop the selection first so the
+        // later waveform reload has nothing stale to clear.
+        waveformView.clearSelection();
+        editSelection("join", s, e);
+    }
+
+    /**
+     * Structural edit of the current audio (processed output when there
+     * is one, else the input), undoable like any other step.
+     * op = "trim": the window becomes silence (selection kept);
+     * op = "join": the window is cut out and the parts glued together.
+     * endSec null = to the end of the file.
+     */
+    private void editSelection(String op, double startSec, Double endSec) {
+        final String srcPath = (currentOutputPath != null
+                && new File(currentOutputPath).exists()) ? currentOutputPath : inputPath;
+        if (srcPath == null || !(new File(srcPath).exists())) {
+            Toast.makeText(this, "Pick an audio file or record first",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final String hash = fileHash(inputFileName);
+        final String rangeDesc = fmtSec(startSec) + "–"
+                + (endSec != null ? fmtSec(endSec) : "end");
+        final String effectsDesc = op.equals("trim")
+                ? "Trim " + rangeDesc + " to silence"
+                : "Join (removed " + rangeDesc + ")";
+        // Every application writes its own file so Undo can restore earlier ones.
+        final String outPath = new File(getCacheDir(),
+                "output_" + System.currentTimeMillis() + "_" + (outputSeq++) + ".wav")
+                .getAbsolutePath();
+        final long timestamp = System.currentTimeMillis();
+        releasePlayer();
+        btnStop.setEnabled(false);
+        setEditButtonsEnabled(false);
+        btnUndo.setEnabled(false); // no racing an undo mid-edit
+        showProgress(true);
+        waveformView.startProgressAnimation();
+        setStatus(op.equals("trim") ? "Trimming to silence..." : "Joining...");
+        new Thread(() -> {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                PyObject result = Python.getInstance().getModule("audiofx.android_bridge")
+                        .callAttr(op.equals("trim") ? "trim_to_silence" : "join_remove",
+                                srcPath, outPath, startSec, endSec);
+                final double dur = Double.parseDouble(
+                        result.callAttr("get", "duration_s").toString());
+                historyDb.log(hash, effectsDesc, timestamp, outPath);
+                currentOutputPath = outPath;
+                audioDurationSec = dur;
+                final String msg;
+                if (op.equals("trim")) {
+                    msg = "Trimmed " + rangeDesc + " to silence — selection kept.";
+                } else {
+                    msg = "Joined: removed "
+                            + result.callAttr("get", "removed_s").toString()
+                            + "s, new duration " + fmtSec1(dur) + ".";
+                }
+                runOnUiThread(() -> {
+                    if (op.equals("trim")) {
+                        // Duration unchanged: zero the affected peak buckets
+                        // locally; the selection stays exactly as it was.
+                        zeroPeakRange(startSec, endSec != null ? endSec : dur);
+                    } else {
+                        loadWaveformForPath(outPath);
+                    }
+                    setStatus(msg);
+                    setPlayPauseEnabled(true);
+                    btnSave.setEnabled(true);
+                    updateUndoBadge();
+                    showProgress(false);
+                    waveformView.finishProgressAnimation();
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setStatus("Error: " + e.getMessage());
+                    showProgress(false);
+                    waveformView.clearProgress();
+                    updateUndoBadge();
+                });
+            } finally {
+                runOnUiThread(() -> setEditButtonsEnabled(true));
+            }
+        }).start();
+    }
+
+    /** Zero the displayed peak buckets overlapping the startSec/endSec window. */
+    private void zeroPeakRange(double startSec, double endSec) {
+        float[] peaks = waveformView.getPeaks();
+        int n = peaks.length;
+        if (n == 0 || audioDurationSec <= 0) {
+            return;
+        }
+        int from = Math.max(0, (int) (startSec / audioDurationSec * n));
+        int to = Math.min(n, (int) Math.ceil(endSec / audioDurationSec * n));
+        for (int i = from; i < to; i++) {
+            peaks[i] = 0f;
+        }
+        waveformView.updatePeaks(peaks);
+    }
+
+    /** Enable/disable the buttons that must not run during an edit. */
+    private void setEditButtonsEnabled(boolean enabled) {
+        btnTrim.setEnabled(enabled);
+        btnJoin.setEnabled(enabled);
+        btnProcess.setEnabled(enabled);
+        btnProcess.setAlpha(enabled ? 1f : 0.55f);
+        btnNormalize.setEnabled(enabled);
+    }
+
     private void undoLastEffect() {
         final String hash = fileHash(inputFileName);
         EffectHistoryDb.Row removed = historyDb.undo(hash);
@@ -962,6 +1111,13 @@ public class MainActivity extends Activity {
             setPlayPauseEnabled(inputPath != null && new File(inputPath).exists());
         }
         btnSave.setEnabled(inputPath != null && new File(inputPath).exists());
+        // Structural edits (trim/join) change the audio itself: reload the
+        // waveform so peaks and duration match the restored file.
+        String refreshPath = (currentOutputPath != null
+                && new File(currentOutputPath).exists()) ? currentOutputPath : inputPath;
+        if (refreshPath != null) {
+            loadWaveformForPath(refreshPath);
+        }
         updateUndoBadge();
     }
 

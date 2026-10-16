@@ -97,6 +97,85 @@ def normalize_file(input_path, output_path, target_db=-1.0):
     }
 
 
+def _clamp_window(input_path, start_sec, end_sec):
+    """Validate a selection window; returns (samples, sample_rate, s, e).
+
+    ``end_sec`` may be None, meaning to the end of the file. Raises
+    ValueError on a missing input, missing/empty selection.
+    """
+    if not os.path.isfile(input_path):
+        raise ValueError("input file not found: %s" % input_path)
+    if start_sec is None:
+        raise ValueError("no selection: select a range first")
+    samples, sample_rate = read_wav_mono(input_path)
+    n = len(samples)
+    s = max(0, min(n, int(start_sec * sample_rate)))
+    e = n if end_sec is None else max(0, min(n, int(end_sec * sample_rate)))
+    if e <= s:
+        raise ValueError("empty selection")
+    return samples, sample_rate, s, e
+
+
+def trim_to_silence(input_path, output_path, start_sec, end_sec,
+                    edge_fade_sec=0.005):
+    """Replace the selected window with silence (5 ms soft edges to
+    avoid clicks). The selection stays valid: duration is unchanged.
+
+    Returns a dict with ok/output_path/sample_rate/duration_s/
+    start_s/end_s. Raises ValueError on a missing input or bad window.
+    """
+    samples, sample_rate, s, e = _clamp_window(input_path, start_sec, end_sec)
+    out = list(samples)
+    for i in range(s, e):
+        out[i] = 0.0
+    fade_n = min(int(edge_fade_sec * sample_rate), (e - s) // 2)
+    for i in range(fade_n):
+        t = 1.0 - (i + 1) / (fade_n + 1)
+        out[s + i] = samples[s + i] * t
+        out[e - 1 - i] = samples[e - 1 - i] * t
+    write_wav(output_path, out, sample_rate)
+    return {
+        "ok": True,
+        "output_path": output_path,
+        "sample_rate": sample_rate,
+        "duration_s": round(len(out) / sample_rate, 2),
+        "start_s": round(s / sample_rate, 2),
+        "end_s": round(e / sample_rate, 2),
+    }
+
+
+def join_remove(input_path, output_path, start_sec, end_sec, fade_sec=0.005):
+    """Cut the selected window out and glue the remaining parts together.
+
+    A 5 ms crossfade at the junction avoids clicks; there is no silence
+    in between. Returns a dict with ok/output_path/sample_rate/
+    duration_s/removed_s. Raises ValueError on a missing input, a bad
+    window, or a window covering the whole file.
+    """
+    samples, sample_rate, s, e = _clamp_window(input_path, start_sec, end_sec)
+    n = len(samples)
+    if s <= 0 and e >= n:
+        raise ValueError("selection covers the whole file: nothing to join")
+    fade_n = min(int(fade_sec * sample_rate), s, n - e)
+    head, tail = samples[:s], samples[e:]
+    if fade_n > 0:
+        out = head[:s - fade_n]
+        for i in range(fade_n):
+            t = (i + 1) / (fade_n + 1)
+            out.append(head[s - fade_n + i] * (1 - t) + tail[i] * t)
+        out.extend(tail[fade_n:])
+    else:
+        out = head + tail
+    write_wav(output_path, out, sample_rate)
+    return {
+        "ok": True,
+        "output_path": output_path,
+        "sample_rate": sample_rate,
+        "duration_s": round(len(out) / sample_rate, 2),
+        "removed_s": round((e - s) / sample_rate, 2),
+    }
+
+
 def live_chain_create(warmth, reverb_preset, echo, sample_rate,
                       block_size=2048, channels=2, stereo=False):
     """Create a stateful live chain for real-time block processing.
