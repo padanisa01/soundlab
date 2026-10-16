@@ -64,6 +64,11 @@ reports "Dependency requires at least JVM runtime version 11", point it at
 `org.gradle.java.home=<absolute path to JDK 17>`),
 plus the Android SDK (platform 34, build-tools).
 
+The local `gradle.properties` must also contain `android.useAndroidX=true`
+(required as soon as AndroidX dependencies such as `androidx.documentfile`
+are on the classpath). This file is git-ignored; never commit
+machine-specific paths from it.
+
 ```bash
 ./gradlew assembleDebug
 # APK at app/build/outputs/apk/debug/app-debug.apk
