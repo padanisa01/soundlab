@@ -17,6 +17,11 @@ or the plan changes.
   input (stereo is mixed down to mono like any other input).
   RECORD_AUDIO is requested at runtime; a pulsing red button, a REC
   pill, and a live elapsed timer show while recording.
+- **Microphone card**: toggles for automatic gain control and noise
+  suppression, attached to the capture session via Android's
+  AutomaticGainControl / NoiseSuppressor effects (both off by
+  default, choices persist). The record-start toast reports which
+  effects actually engaged, or that the device doesn't support them.
 - 8-bit and 16-bit PCM supported; stereo is mixed down to mono.
 - The input file name is remembered and reused for the MP3 save name.
 - A waveform display below the picker shows the picked audio

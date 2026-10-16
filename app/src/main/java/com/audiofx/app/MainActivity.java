@@ -5,6 +5,7 @@ import android.Manifest;
 import android.animation.ObjectAnimator;
 import android.animation.ValueAnimator;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Typeface;
@@ -21,6 +22,7 @@ import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.SeekBar;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -86,6 +88,8 @@ public class MainActivity extends Activity {
     private ImageButton btnPlayPause;
     private ImageButton btnRecord;
     private ImageButton btnStop;
+    private Switch switchAgc;
+    private Switch switchNs;
     private Button btnSave;
     private ProgressBar progressBar;
     private WaveformView waveformView;
@@ -254,6 +258,15 @@ public class MainActivity extends Activity {
         tvReverbVal = findViewById(R.id.tv_reverb_val);
         seekWarmth = findViewById(R.id.seek_warmth);
         seekEcho = findViewById(R.id.seek_echo);
+        switchAgc = findViewById(R.id.switch_agc);
+        switchNs = findViewById(R.id.switch_ns);
+        SharedPreferences prefs = getSharedPreferences("soundlab", MODE_PRIVATE);
+        switchAgc.setChecked(prefs.getBoolean("mic_agc", false));
+        switchNs.setChecked(prefs.getBoolean("mic_ns", false));
+        switchAgc.setOnCheckedChangeListener((b, on) ->
+                prefs.edit().putBoolean("mic_agc", on).apply());
+        switchNs.setOnCheckedChangeListener((b, on) ->
+                prefs.edit().putBoolean("mic_ns", on).apply());
         chipStudio = findViewById(R.id.chip_studio);
         chipHall = findViewById(R.id.chip_hall);
         chipBath = findViewById(R.id.chip_bath);
@@ -623,6 +636,7 @@ public class MainActivity extends Activity {
         if (player != null && player.isPlaying()) {
             stopPlayback();
         }
+        recorder.setPreprocessing(switchAgc.isChecked(), switchNs.isChecked());
         File take = new File(getCacheDir(), "rec_take.wav");
         if (!recorder.start(take)) {
             setStatus("Microphone unavailable on this device.");
@@ -648,7 +662,19 @@ public class MainActivity extends Activity {
         tvTimeCur.setText("0:00");
         tvTimeTot.setText("--:--");
         mainHandler.post(recTick);
-        setStatus("Recording " + recorder.activeLabel() + " — tap the red button to stop.");
+        StringBuilder fx = new StringBuilder();
+        if (recorder.agcActive()) {
+            fx.append(" + AGC");
+        } else if (switchAgc.isChecked()) {
+            fx.append(" (AGC unavailable on this device)");
+        }
+        if (recorder.nsActive()) {
+            fx.append(" + noise suppression");
+        } else if (switchNs.isChecked()) {
+            fx.append(" (noise suppression unavailable on this device)");
+        }
+        setStatus("Recording " + recorder.activeLabel() + fx
+                + " — tap the red button to stop.");
     }
 
     private void stopRecording() {

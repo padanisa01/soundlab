@@ -3,6 +3,8 @@ package com.audiofx.app;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
+import android.media.audiofx.AutomaticGainControl;
+import android.media.audiofx.NoiseSuppressor;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -37,6 +39,10 @@ public class AudioRecorder {
     private long dataBytes;
     private long startMs;
     private String activeLabel = "";
+    private boolean wantAgc;
+    private boolean wantNs;
+    private AutomaticGainControl agc;
+    private NoiseSuppressor ns;
 
     public synchronized boolean isRecording() {
         return running;
@@ -52,6 +58,22 @@ public class AudioRecorder {
             return 0;
         }
         return (System.currentTimeMillis() - startMs) / 1000.0;
+    }
+
+    /** Set before start(): whether to enable AGC / noise suppression. */
+    public synchronized void setPreprocessing(boolean agcOn, boolean nsOn) {
+        wantAgc = agcOn;
+        wantNs = nsOn;
+    }
+
+    /** True when the AGC effect actually attached to the capture session. */
+    public synchronized boolean agcActive() {
+        return agc != null && agc.getEnabled();
+    }
+
+    /** True when the noise suppressor actually attached to the capture session. */
+    public synchronized boolean nsActive() {
+        return ns != null && ns.getEnabled();
     }
 
     /**
@@ -115,6 +137,7 @@ public class AudioRecorder {
             outFile.delete();
             return false;
         }
+        attachEffects(rec.getAudioSessionId());
         recorder = rec;
         this.outFile = outFile;
         dataBytes = 0;
@@ -152,6 +175,48 @@ public class AudioRecorder {
         return "MIC";
     }
 
+    /** Attach the requested preprocessing effects to the capture session. */
+    private void attachEffects(int sessionId) {
+        releaseEffects();
+        if (wantNs && NoiseSuppressor.isAvailable()) {
+            try {
+                ns = NoiseSuppressor.create(sessionId);
+                if (ns != null) {
+                    ns.setEnabled(true);
+                }
+            } catch (Exception ignored) {
+                ns = null;
+            }
+        }
+        if (wantAgc && AutomaticGainControl.isAvailable()) {
+            try {
+                agc = AutomaticGainControl.create(sessionId);
+                if (agc != null) {
+                    agc.setEnabled(true);
+                }
+            } catch (Exception ignored) {
+                agc = null;
+            }
+        }
+    }
+
+    private void releaseEffects() {
+        if (ns != null) {
+            try {
+                ns.release();
+            } catch (Exception ignored) {
+            }
+            ns = null;
+        }
+        if (agc != null) {
+            try {
+                agc.release();
+            } catch (Exception ignored) {
+            }
+            agc = null;
+        }
+    }
+
     /**
      * Stop capturing and finalize the WAV header. Returns the finished
      * file, or null when nothing usable was recorded.
@@ -177,6 +242,7 @@ public class AudioRecorder {
             recorder.release();
             recorder = null;
         }
+        releaseEffects();
         File f = outFile;
         outFile = null;
         activeLabel = "";
