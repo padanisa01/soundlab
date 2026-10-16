@@ -163,14 +163,25 @@ public class MainActivity extends Activity {
     }
 
     private void playOutput() {
+        File f = new File(outputPath);
+        if (!f.exists() || f.length() < 44) {
+            setStatus("No output to play (file missing or empty).");
+            return;
+        }
+        setStatus("Creating player...");
         try {
             if (player != null) {
                 player.release();
                 player = null;
             }
             player = new MediaPlayer();
+            // If the UI freezes on one of these status lines, the blocking
+            // call is the one AFTER the last line shown.
+            setStatus("Opening " + (f.length() / 1024) + " KB audio...");
             player.setDataSource(outputPath);
+            final boolean[] prepared = {false};
             player.setOnPreparedListener(mp -> {
+                prepared[0] = true;
                 mp.start();
                 setStatus("Playing processed audio...");
             });
@@ -179,12 +190,16 @@ public class MainActivity extends Activity {
                 setStatus("Playback error: " + what + "/" + extra);
                 return true;
             });
-            // prepareAsync(): prepare() on the UI thread can block (ANR) on
-            // large files or slow storage.
             player.prepareAsync();
             setStatus("Preparing audio...");
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                if (!prepared[0]) {
+                    setStatus("Still preparing after 15s (" + (f.length() / 1024)
+                            + " KB file) - prepareAsync never called back.");
+                }
+            }, 15000);
         } catch (Exception e) {
-            setStatus("Playback error: " + e.getMessage());
+            setStatus("Playback failed: " + e);
         }
     }
 
