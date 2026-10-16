@@ -92,6 +92,7 @@ public class MainActivity extends Activity {
     private Switch switchAgc;
     private Switch switchNs;
     private Switch switchLiveFx;
+    private Switch switchAutoNorm;
     private Button btnSave;
     private ProgressBar progressBar;
     private WaveformView waveformView;
@@ -271,16 +272,20 @@ public class MainActivity extends Activity {
         switchAgc = findViewById(R.id.switch_agc);
         switchNs = findViewById(R.id.switch_ns);
         switchLiveFx = findViewById(R.id.switch_livefx);
+        switchAutoNorm = findViewById(R.id.switch_autonorm);
         SharedPreferences prefs = getSharedPreferences("soundlab", MODE_PRIVATE);
         switchAgc.setChecked(prefs.getBoolean("mic_agc", false));
         switchNs.setChecked(prefs.getBoolean("mic_ns", false));
         switchLiveFx.setChecked(prefs.getBoolean("mic_livefx", false));
+        switchAutoNorm.setChecked(prefs.getBoolean("mic_autonorm", true));
         switchAgc.setOnCheckedChangeListener((b, on) ->
                 prefs.edit().putBoolean("mic_agc", on).apply());
         switchNs.setOnCheckedChangeListener((b, on) ->
                 prefs.edit().putBoolean("mic_ns", on).apply());
         switchLiveFx.setOnCheckedChangeListener((b, on) ->
                 prefs.edit().putBoolean("mic_livefx", on).apply());
+        switchAutoNorm.setOnCheckedChangeListener((b, on) ->
+                prefs.edit().putBoolean("mic_autonorm", on).apply());
         chipStudio = findViewById(R.id.chip_studio);
         chipHall = findViewById(R.id.chip_hall);
         chipBath = findViewById(R.id.chip_bath);
@@ -805,6 +810,11 @@ public class MainActivity extends Activity {
             named = take; // rename failed; use the take file directly
         }
         adoptAudioFile(named, pendingRecName);
+        // Auto-normalize takes (not picked files): runs as an undoable
+        // history step, so the raw mic capture stays recoverable.
+        if (switchAutoNorm.isChecked()) {
+            normalizeAudio();
+        }
     }
 
     private void processAudio() {

@@ -60,6 +60,8 @@ SCAFFOLD_CHECKS = [
     ("app/src/main/java/com/audiofx/app/LiveFxMonitor.java", "class LiveFxMonitor"),
     ("app/src/main/res/layout/activity_main.xml", "switch_livefx"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "switch_livefx"),
+    ("app/src/main/res/layout/activity_main.xml", "switch_autonorm"),
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", "switch_autonorm"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "btn_record"),
     ("app/src/main/res/layout/activity_main.xml", "btn_record"),
     ("app/src/main/python/audiofx/android_bridge.py", "def normalize_file"),

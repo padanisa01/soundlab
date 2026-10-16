@@ -39,6 +39,10 @@ or the plan changes.
   preserved). Applies to the processed output when there is one,
   else the input; undoable like any effect; the status reports the
   before/after peak.
+- **Auto-normalize takes** toggle (on by default): recordings are
+  peak-normalized to -1 dBFS right after the take, as an undoable
+  history step — the raw mic capture stays recoverable via Undo.
+  Picked files are never touched.
 - **Trim** (selection row): replaces the selected window with silence
   (5 ms soft edges, no clicks); the selection stays put so you can
   audition or re-trim it. Undoable.
