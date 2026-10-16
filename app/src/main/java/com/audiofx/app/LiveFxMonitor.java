@@ -40,6 +40,7 @@ public class LiveFxMonitor {
     private long startMs;
     private String activeLabel = "";
     private PyObject chain;
+    private volatile MicCapture.BlockListener blockListener;
 
     public synchronized boolean isRecording() {
         return running;
@@ -62,6 +63,11 @@ public class LiveFxMonitor {
 
     public synchronized boolean nsActive() {
         return fx.nsActive();
+    }
+
+    /** Set before start(): live peak feed for the recording waveform. */
+    public void setBlockListener(MicCapture.BlockListener listener) {
+        blockListener = listener;
     }
 
     /**
@@ -215,6 +221,10 @@ public class LiveFxMonitor {
                     }
                     rw.write(wet);
                     dataBytes += wet.length;
+                    MicCapture.BlockListener bl = blockListener;
+                    if (bl != null) {
+                        bl.onBlockPeak(MicCapture.blockPeak(wet, wet.length, outChannels));
+                    }
                     newTrack.write(wet, 0, wet.length);
                 }
             } catch (IOException ignored) {

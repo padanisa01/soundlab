@@ -39,6 +39,8 @@ public class WaveformView extends View {
 
     private static final int BAR_COLOR = 0xFF4DB6AC;
     private static final int PLACEHOLDER_COLOR = 0xFFB0BEC5;
+    private static final int LIVE_HEAD_COLOR = 0xFFE53935; // record-head line
+    private static final int LIVE_MAX_BUCKETS = 600; // 2 min at 5 buckets/s
     private static final int GRADIENT_START = 0x3326A69A; // translucent teal
     private static final int GRADIENT_END = 0xCC26A69A;   // more opaque teal
     private static final int EDGE_COLOR = 0xFF26A69A;
@@ -56,6 +58,12 @@ public class WaveformView extends View {
     private float progressFromFrac; // window the apply-progress fill sweeps
     private float progressToFrac;
     private double durationSec;
+
+    // Live recording mode: bars grow as capture blocks arrive, with a
+    // red record-head line at the frontier. Taps are ignored while live.
+    private boolean liveMode;
+    private final java.util.ArrayList<Float> livePeaks = new java.util.ArrayList<>();
+    private float[] liveArr = new float[0];
 
     private float zoom = 1f;
     private float viewStart; // audio fraction at the left edge
@@ -91,6 +99,7 @@ public class WaveformView extends View {
     private final Paint pbTrackPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pbFillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pbHeadPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint liveHeadPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF pbRect = new RectF();
 
     public WaveformView(Context context, AttributeSet attrs) {
@@ -111,6 +120,8 @@ public class WaveformView extends View {
         pbFillPaint.setColor(PB_FILL);
         pbHeadPaint.setColor(PB_HEAD);
         pbHeadPaint.setStrokeWidth(3f);
+        liveHeadPaint.setColor(LIVE_HEAD_COLOR);
+        liveHeadPaint.setStrokeWidth(3f);
         touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
         scaleDetector = new ScaleGestureDetector(context, new ScaleListener());
         gestureDetector = new GestureDetector(context, new GestureListener());
@@ -139,6 +150,57 @@ public class WaveformView extends View {
     /** Defensive copy of the currently displayed peaks. */
     public float[] getPeaks() {
         return peaks.clone();
+    }
+
+    /** Enter live recording mode: clears the view and grows bars as
+     *  {@link #addLivePeak(float)} is called (UI thread only). */
+    public void startLive() {
+        liveMode = true;
+        livePeaks.clear();
+        liveArr = new float[0];
+        zoom = 1f;
+        viewStart = 0f;
+        durationSec = 0;
+        cancelProgressAnimation();
+        progress = 0f;
+        clearPlayback();
+        clearSelection();
+        invalidate();
+    }
+
+    /** Append one peak bucket (0..1) to the live waveform. */
+    public void addLivePeak(float peak) {
+        if (!liveMode) {
+            return;
+        }
+        if (livePeaks.size() >= LIVE_MAX_BUCKETS) {
+            // Decimate pairs so the whole take stays visible.
+            for (int i = 0; i + 1 < livePeaks.size(); i++) {
+                livePeaks.set(i / 2, Math.max(livePeaks.get(i), livePeaks.get(i + 1)));
+            }
+            int keep = livePeaks.size() / 2;
+            while (livePeaks.size() > keep) {
+                livePeaks.remove(livePeaks.size() - 1);
+            }
+        }
+        livePeaks.add(Math.max(0f, Math.min(1f, peak)));
+        liveArr = new float[livePeaks.size()];
+        for (int i = 0; i < livePeaks.size(); i++) {
+            liveArr[i] = livePeaks.get(i);
+        }
+        invalidate();
+    }
+
+    /** Leave live recording mode and discard the live bars. */
+    public void endLive() {
+        liveMode = false;
+        livePeaks.clear();
+        liveArr = new float[0];
+        invalidate();
+    }
+
+    public boolean isLive() {
+        return liveMode;
     }
 
     /**
@@ -320,15 +382,18 @@ public class WaveformView extends View {
 
         @Override
         public boolean onSingleTapConfirmed(MotionEvent e) {
-            if (getWidth() > 0) {
-                placeMarkerTap(xToFraction(e.getX()));
+            if (liveMode || getWidth() <= 0) {
+                return true; // no selection markers while recording
             }
+            placeMarkerTap(xToFraction(e.getX()));
             return true;
         }
 
         @Override
         public boolean onDoubleTap(MotionEvent e) {
-            clearSelection();
+            if (!liveMode) {
+                clearSelection();
+            }
             return true;
         }
     }
@@ -402,22 +467,28 @@ public class WaveformView extends View {
         float barH = h - labelH;
         float midY = barH / 2f;
 
-        if (peaks.length == 0) {
+        float[] drawPeaks = liveMode ? liveArr : peaks;
+        if (drawPeaks.length == 0) {
             // Empty placeholder: faint center line until audio is picked.
             canvas.drawLine(0, midY, w, midY, placeholderPaint);
         } else {
             float maxAmp = midY * 0.95f;
             float startF = viewStart;
-            int i0 = (int) (startF * peaks.length);
-            int i1 = Math.min(peaks.length,
-                    (int) Math.ceil((viewStart + 1f / zoom) * peaks.length) + 1);
-            float pxPerBucket = zoom * w / peaks.length;
+            int i0 = (int) (startF * drawPeaks.length);
+            int i1 = Math.min(drawPeaks.length,
+                    (int) Math.ceil((viewStart + 1f / zoom) * drawPeaks.length) + 1);
+            float pxPerBucket = zoom * w / drawPeaks.length;
             float drawnW = Math.max(1f, pxPerBucket * 0.7f);
             for (int i = Math.max(0, i0); i < i1; i++) {
-                float left = (i / (float) peaks.length - startF) * zoom * w;
-                float amp = peaks[i] * maxAmp;
+                float left = (i / (float) drawPeaks.length - startF) * zoom * w;
+                float amp = drawPeaks[i] * maxAmp;
                 canvas.drawRect(left, midY - amp, left + drawnW, midY + amp, barPaint);
             }
+        }
+
+        // Live recording: red record-head line at the frontier.
+        if (liveMode && liveArr.length > 0) {
+            canvas.drawLine(w - 2f, 0, w - 2f, barH, liveHeadPaint);
         }
 
         // Selection window shading + marker lines.

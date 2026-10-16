@@ -80,6 +80,34 @@ final class MicCapture {
         return "MIC";
     }
 
+    /**
+     * Receives the peak amplitude (0..1) of each captured PCM block, for
+     * live UI (e.g. a growing waveform while recording). Called on the
+     * capture thread; implementations must be cheap and thread-safe.
+     */
+    interface BlockListener {
+        void onBlockPeak(float peak);
+    }
+
+    /** Max |sample| of a little-endian PCM-16 block, mixed to mono. */
+    static float blockPeak(byte[] buf, int n, int channels) {
+        int frames = n / (2 * channels);
+        float peak = 0f;
+        for (int f = 0; f < frames; f++) {
+            float sum = 0f;
+            for (int c = 0; c < channels; c++) {
+                int i = (f * channels + c) * 2;
+                int s = (buf[i] & 0xff) | (buf[i + 1] << 8);
+                sum += s / 32768f;
+            }
+            float m = Math.abs(sum / channels);
+            if (m > peak) {
+                peak = m;
+            }
+        }
+        return peak;
+    }
+
     private MicCapture() {
     }
 }

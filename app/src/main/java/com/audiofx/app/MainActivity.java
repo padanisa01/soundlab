@@ -1,6 +1,7 @@
 package com.audiofx.app;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.Manifest;
 import android.animation.ObjectAnimator;
 import android.animation.ValueAnimator;
@@ -18,7 +19,9 @@ import android.provider.OpenableColumns;
 import android.view.MotionEvent;
 import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.SeekBar;
@@ -88,11 +91,14 @@ public class MainActivity extends Activity {
     private ImageButton btnPlayPause;
     private ImageButton btnRecord;
     private ImageButton btnStop;
-    private Button btnNormalize;
+    private ImageButton btnNormalize;
     private Switch switchAgc;
     private Switch switchNs;
     private Switch switchLiveFx;
     private Switch switchAutoNorm;
+    private LinearLayout advMicPanel;
+    private LinearLayout advMicHeader;
+    private ImageView advMicChevron;
     private Button btnSave;
     private ProgressBar progressBar;
     private WaveformView waveformView;
@@ -120,22 +126,37 @@ public class MainActivity extends Activity {
     private final LiveFxMonitor liveMonitor = new LiveFxMonitor();
     private String pendingRecName;
     private ObjectAnimator recPulse;
+    /** Peak accumulator fed by the capture threads; drained by recTick. */
+    private volatile float livePeakAcc;
+    private android.app.AlertDialog saveDialog;
+    private TextView saveFolderLabel;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Runnable scheduledStop;
 
-    /** Ticks the elapsed-time readout while the mic is recording. */
+    /** Ticks the elapsed-time readout and the live waveform while recording. */
     private final Runnable recTick = new Runnable() {
         @Override
         public void run() {
-            if (recorder.isRecording()) {
-                tvTimeCur.setText(fmtTime(recorder.elapsedSec()));
-                mainHandler.postDelayed(this, 200);
-            } else if (liveMonitor.isRecording()) {
-                tvTimeCur.setText(fmtTime(liveMonitor.elapsedSec()));
+            boolean dry = recorder.isRecording();
+            boolean live = liveMonitor.isRecording();
+            if (dry || live) {
+                double elapsed = dry ? recorder.elapsedSec() : liveMonitor.elapsedSec();
+                tvTimeCur.setText(fmtTime(elapsed));
+                float peak = livePeakAcc;
+                livePeakAcc = 0f;
+                waveformView.addLivePeak(peak);
+                waveformView.setDuration(elapsed);
                 mainHandler.postDelayed(this, 200);
             }
         }
     };
+
+    /** Cheap, thread-safe peak feed from the capture threads. */
+    private void onCaptureBlock(float peak) {
+        if (peak > livePeakAcc) {
+            livePeakAcc = peak;
+        }
+    }
 
     /** Polls getCurrentPosition() and moves the waveform progress fill. */
     private final Runnable positionUpdater = new Runnable() {
@@ -286,6 +307,11 @@ public class MainActivity extends Activity {
                 prefs.edit().putBoolean("mic_livefx", on).apply());
         switchAutoNorm.setOnCheckedChangeListener((b, on) ->
                 prefs.edit().putBoolean("mic_autonorm", on).apply());
+        advMicPanel = findViewById(R.id.adv_mic_panel);
+        advMicHeader = findViewById(R.id.adv_mic_header);
+        advMicChevron = findViewById(R.id.adv_mic_chevron);
+        setAdvMicExpanded(prefs.getBoolean("mic_adv_expanded", false), false);
+        advMicHeader.setOnClickListener(v -> toggleAdvMic());
         chipStudio = findViewById(R.id.chip_studio);
         chipHall = findViewById(R.id.chip_hall);
         chipBath = findViewById(R.id.chip_bath);
@@ -373,8 +399,27 @@ public class MainActivity extends Activity {
         mainHandler.postDelayed(hideToast, 2600);
     }
 
-    private void togglePlayPause() {
-        if (isPlayerPlaying()) {
+    /** Expand/collapse the Advanced mic settings panel, persisted. */
+    private void toggleAdvMic() {
+        boolean expanded = advMicPanel.getVisibility() != View.VISIBLE;
+        setAdvMicExpanded(expanded, true);
+        getSharedPreferences("soundlab", MODE_PRIVATE).edit()
+                .putBoolean("mic_adv_expanded", expanded).apply();
+    }
+
+    private void setAdvMicExpanded(boolean expanded, boolean animate) {
+        advMicPanel.setVisibility(expanded ? View.VISIBLE : View.GONE);
+        float target = expanded ? 180f : 0f;
+        if (animate) {
+            advMicChevron.animate().rotation(target).setDuration(200).start();
+        } else {
+            advMicChevron.setRotation(target);
+        }
+        advMicChevron.setContentDescription(expanded
+                ? "Collapse advanced mic settings" : "Expand advanced mic settings");
+    }
+
+    private void togglePlayPause() {        if (isPlayerPlaying()) {
             pausePlayback();
             return;
         }
@@ -498,10 +543,12 @@ public class MainActivity extends Activity {
         if (requestCode == PICK_FOLDER && resultCode == RESULT_OK
                 && data != null && data.getData() != null) {
             saveFolderUri = data.getData();
-            DocumentFile dir = DocumentFile.fromTreeUri(this, saveFolderUri);
-            String label = (dir != null && dir.getName() != null) ? dir.getName() : "chosen folder";
-            setStatus("Save folder: " + label);
-            doSaveMp3();
+            if (saveDialog != null && saveDialog.isShowing()
+                    && saveFolderLabel != null) {
+                saveFolderLabel.setText(saveFolderName());
+            } else {
+                showSaveDialog();
+            }
         }
     }
 
@@ -752,6 +799,12 @@ public class MainActivity extends Activity {
         btnTrim.setEnabled(false);
         btnJoin.setEnabled(false);
         btnNormalize.setEnabled(false);
+        btnNormalize.setAlpha(0.4f);
+        // Live waveform: capture threads feed block peaks via the listener.
+        livePeakAcc = 0f;
+        recorder.setBlockListener(this::onCaptureBlock);
+        liveMonitor.setBlockListener(this::onCaptureBlock);
+        waveformView.startLive();
         if (live) {
             // Effect params are snapshotted at record start; moving
             // sliders mid-take would do nothing, so lock them.
@@ -785,6 +838,10 @@ public class MainActivity extends Activity {
         btnTrim.setEnabled(true);
         btnJoin.setEnabled(true);
         btnNormalize.setEnabled(true);
+        btnNormalize.setAlpha(1f);
+        waveformView.endLive();
+        recorder.setBlockListener(null);
+        liveMonitor.setBlockListener(null);
         seekWarmth.setEnabled(true);
         seekEcho.setEnabled(true);
         chipStudio.setEnabled(true);
@@ -924,6 +981,7 @@ public class MainActivity extends Activity {
         final long timestamp = System.currentTimeMillis();
         final String effectsDesc = "Normalize to -1 dBFS";
         btnNormalize.setEnabled(false);
+        btnNormalize.setAlpha(0.4f);
         btnProcess.setEnabled(false);
         btnProcess.setAlpha(0.55f);
         btnUndo.setEnabled(false); // no racing an undo mid-normalize
@@ -964,6 +1022,7 @@ public class MainActivity extends Activity {
             } finally {
                 runOnUiThread(() -> {
                     btnNormalize.setEnabled(true);
+                    btnNormalize.setAlpha(1f);
                     btnProcess.setEnabled(true);
                     btnProcess.setAlpha(1f);
                 });
@@ -1416,16 +1475,114 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "Pick an audio file or record first", Toast.LENGTH_SHORT).show();
             return;
         }
-        if (saveFolderUri == null) {
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-            startActivityForResult(intent, PICK_FOLDER);
-        } else {
-            doSaveMp3();
-        }
+        showSaveDialog();
     }
 
-    private void doSaveMp3() {
-        final String mp3Name = toMp3Name(inputFileName);
+    /**
+     * Save dialog: the user names the MP3 and sees/picks the destination
+     * folder, whether or not one was chosen before.
+     */
+    private void showSaveDialog() {
+        if (saveDialog != null && saveDialog.isShowing()) {
+            return;
+        }
+        final float density = getResources().getDisplayMetrics().density;
+        int pad = (int) (20 * density);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(pad, (int) (8 * density), pad, (int) (8 * density));
+
+        TextView nameLabel = new TextView(this);
+        nameLabel.setText("File name");
+        nameLabel.setTextColor(getColor(R.color.sl_mut));
+        nameLabel.setTextSize(12);
+        root.addView(nameLabel);
+
+        final EditText nameInput = new EditText(this);
+        String stem = toMp3Name(inputFileName);
+        if (stem.toLowerCase(Locale.US).endsWith(".mp3")) {
+            stem = stem.substring(0, stem.length() - 4);
+        }
+        nameInput.setText(stem);
+        nameInput.setTextColor(getColor(R.color.sl_txt));
+        nameInput.setHintTextColor(getColor(R.color.sl_dim));
+        nameInput.setSelectAllOnFocus(true);
+        LinearLayout.LayoutParams nameLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        nameLp.bottomMargin = (int) (16 * density);
+        root.addView(nameInput, nameLp);
+
+        TextView folderLabel = new TextView(this);
+        folderLabel.setText("Save folder");
+        folderLabel.setTextColor(getColor(R.color.sl_mut));
+        folderLabel.setTextSize(12);
+        root.addView(folderLabel);
+
+        LinearLayout folderRow = new LinearLayout(this);
+        folderRow.setOrientation(LinearLayout.HORIZONTAL);
+        folderRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        saveFolderLabel = new TextView(this);
+        saveFolderLabel.setText(saveFolderName());
+        saveFolderLabel.setTextColor(getColor(R.color.sl_txt));
+        saveFolderLabel.setTextSize(14);
+        LinearLayout.LayoutParams folderLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        folderRow.addView(saveFolderLabel, folderLp);
+        Button chooseBtn = new Button(this);
+        chooseBtn.setText("Choose…");
+        chooseBtn.setTextColor(getColor(R.color.sl_teal2));
+        chooseBtn.setBackgroundResource(R.drawable.bg_ghost);
+        chooseBtn.setOnClickListener(v -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            startActivityForResult(intent, PICK_FOLDER);
+        });
+        folderRow.addView(chooseBtn);
+        root.addView(folderRow);
+
+        saveDialog = new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+                .setTitle("Save as MP3")
+                .setView(root)
+                .setPositiveButton("Save",
+                        (d, w) -> doSaveMp3(sanitizeMp3Name(
+                                nameInput.getText().toString())))
+                .setNegativeButton("Cancel", null)
+                .setOnDismissListener(d -> saveDialog = null)
+                .show();
+        // The dialog theme inherits light Material buttons; re-tint them.
+        saveDialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setTextColor(getColor(R.color.sl_teal2));
+        saveDialog.getButton(AlertDialog.BUTTON_NEGATIVE)
+                .setTextColor(getColor(R.color.sl_mut));
+    }
+
+    private String saveFolderName() {
+        if (saveFolderUri == null) {
+            return "No folder chosen yet";
+        }
+        try {
+            DocumentFile dir = DocumentFile.fromTreeUri(this, saveFolderUri);
+            if (dir != null && dir.getName() != null) {
+                return dir.getName();
+            }
+        } catch (Exception ignored) {
+        }
+        return "Chosen folder";
+    }
+
+    private static String sanitizeMp3Name(String raw) {
+        String name = raw.trim().replaceAll("[/\\\\]", "_");
+        if (name.isEmpty()) {
+            name = "soundlab";
+        }
+        if (!name.toLowerCase(Locale.US).endsWith(".mp3")) {
+            name += ".mp3";
+        }
+        return name;
+    }
+
+    private void doSaveMp3(String mp3Name) {
         // Save the processed output when there is one, else the input as-is.
         final String srcPath = (currentOutputPath != null
                 && new File(currentOutputPath).exists()) ? currentOutputPath : inputPath;

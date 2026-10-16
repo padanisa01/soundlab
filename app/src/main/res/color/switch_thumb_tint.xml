@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Mic switch thumb: bright teal when on, gray when off, so the state
+     reads at a glance instead of relying on thumb position alone. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_checked="true" android:color="@color/sl_teal2" />
+    <item android:color="@color/sl_mut" />
+</selector>

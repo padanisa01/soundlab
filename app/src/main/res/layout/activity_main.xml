@@ -97,17 +97,6 @@
                 </LinearLayout>
 
                 <Button
-                    android:id="@+id/btn_normalize"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginEnd="8dp"
-                    android:background="@drawable/bg_ghost"
-                    android:text="Normalize"
-                    android:textColor="@color/sl_teal2"
-                    android:textSize="12.5sp"
-                    android:padding="8dp" />
-
-                <Button
                     android:id="@+id/btn_change"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
@@ -270,6 +259,17 @@
                         android:scaleType="fitCenter"
                         android:src="@drawable/ic_stop" />
 
+                    <ImageButton
+                        android:id="@+id/btn_normalize"
+                        android:layout_width="44dp"
+                        android:layout_height="44dp"
+                        android:layout_marginStart="14dp"
+                        android:background="@drawable/bg_chip"
+                        android:contentDescription="Normalize volume"
+                        android:padding="11dp"
+                        android:scaleType="fitCenter"
+                        android:src="@drawable/ic_normalize" />
+
                     <LinearLayout
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
@@ -375,6 +375,40 @@
                     </LinearLayout>
                 </LinearLayout>
 
+                <!-- Collapsible advanced mic settings (collapsed by default) -->
+                <LinearLayout
+                    android:id="@+id/adv_mic_header"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingTop="8dp"
+                    android:paddingBottom="8dp">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Advanced mic settings"
+                        android:textColor="@color/sl_mut"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+
+                    <ImageView
+                        android:id="@+id/adv_mic_chevron"
+                        android:layout_width="22dp"
+                        android:layout_height="22dp"
+                        android:contentDescription="Expand advanced mic settings"
+                        android:src="@drawable/ic_chevron" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/adv_mic_panel"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -408,8 +442,8 @@
                         android:id="@+id/switch_agc"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:thumbTint="@color/sl_teal"
-                        android:trackTint="@color/sl_card2" />
+                        android:thumbTint="@color/switch_thumb_tint"
+                        android:trackTint="@color/switch_track_tint" />
                 </LinearLayout>
 
                 <View
@@ -450,8 +484,8 @@
                         android:id="@+id/switch_ns"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:thumbTint="@color/sl_teal"
-                        android:trackTint="@color/sl_card2" />
+                        android:thumbTint="@color/switch_thumb_tint"
+                        android:trackTint="@color/switch_track_tint" />
                 </LinearLayout>
 
                 <View
@@ -492,8 +526,8 @@
                         android:id="@+id/switch_livefx"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:thumbTint="@color/sl_teal"
-                        android:trackTint="@color/sl_card2" />
+                        android:thumbTint="@color/switch_thumb_tint"
+                        android:trackTint="@color/switch_track_tint" />
                 </LinearLayout>
 
                 <View
@@ -534,8 +568,9 @@
                         android:id="@+id/switch_autonorm"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:thumbTint="@color/sl_teal"
-                        android:trackTint="@color/sl_card2" />
+                        android:thumbTint="@color/switch_thumb_tint"
+                        android:trackTint="@color/switch_track_tint" />
+                </LinearLayout>
                 </LinearLayout>
             </LinearLayout>
 

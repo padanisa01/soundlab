@@ -34,16 +34,28 @@ or the plan changes.
   lock during a live take.
 - 8-bit and 16-bit PCM supported; stereo is mixed down to mono.
 - The input file name is remembered and reused for the MP3 save name.
-- **Normalize** button (track card): normalizes the current audio so
-  its 99th-percentile peak reaches -1 dBFS. Using the 99th percentile
-  (not the absolute max) keeps pops and bursts from misleading the
-  gain; the gain is one whole-file constant (dynamics preserved) and
-  anything that would exceed the target is hard-held at -1 dBFS, so
-  transients are limited, never boosted into clipping. The percentile
-  is a code-level parameter (`percentile=99.0`), not user-facing.
-  Applies to the processed output when there is one, else the input;
-  undoable like any effect; the status reports the percentile
-  reference and the target.
+- **Normalize** normalizes the current audio so its 99th-percentile
+  peak reaches -1 dBFS. Using the 99th percentile (not the absolute
+  max) keeps pops and bursts from misleading the gain; the gain is one
+  whole-file constant (dynamics preserved) and anything that would
+  exceed the target is hard-held at -1 dBFS, so transients are limited,
+  never boosted into clipping. The percentile is a code-level
+  parameter (`percentile=99.0`), not user-facing. Applies to the
+  processed output when there is one, else the input; undoable like any
+  effect; the status reports the percentile reference and the target.
+- **Normalize** button (transport row): smart-volume icon (level bars
+  rising to a target line); same 99th-percentile normalize as before.
+- **Live recording waveform**: while recording, the waveform grows bar
+  by bar from the mic's live block peaks, with a red record-head line
+  at the frontier; selection taps are ignored until the take ends.
+- **Save dialog**: Save as MP3 now opens a dialog where you type the
+  file name (prefilled from the track name) and see or change the
+  destination folder, whether or not one was chosen before.
+- **High-contrast mic switches**: on = bright teal thumb on a teal
+  track, off = gray thumb on a dark track.
+- **Advanced mic settings**: AGC, noise suppression, live effects and
+  auto-normalize live in a collapsible panel, collapsed by default
+  (expansion persisted).
 - **Auto-normalize takes** toggle (on by default): recordings are
   peak-normalized to -1 dBFS right after the take, as an undoable
   history step — the raw mic capture stays recoverable via Undo.

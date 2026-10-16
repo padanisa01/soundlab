@@ -8,4 +8,9 @@
         <item name="android:textColorPrimary">@color/sl_txt</item>
         <item name="android:textColorSecondary">@color/sl_mut</item>
     </style>
+    <style name="Theme.SoundLab.Dialog" parent="android:Theme.Material.Dialog.NoActionBar">
+        <item name="android:windowBackground">@drawable/bg_card</item>
+        <item name="android:textColorPrimary">@color/sl_txt</item>
+        <item name="android:textColorSecondary">@color/sl_mut</item>
+    </style>
 </resources>

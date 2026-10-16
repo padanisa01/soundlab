@@ -21,6 +21,7 @@ public class AudioRecorder {
     private String activeLabel = "";
     private boolean wantAgc;
     private boolean wantNs;
+    private volatile MicCapture.BlockListener blockListener;
     private final CaptureFx fx = new CaptureFx();
 
     public synchronized boolean isRecording() {
@@ -37,6 +38,11 @@ public class AudioRecorder {
             return 0;
         }
         return (System.currentTimeMillis() - startMs) / 1000.0;
+    }
+
+    /** Set before start(): live peak feed for the recording waveform. */
+    public void setBlockListener(MicCapture.BlockListener listener) {
+        blockListener = listener;
     }
 
     /** Set before start(): whether to enable AGC / noise suppression. */
@@ -105,6 +111,10 @@ public class AudioRecorder {
                     if (n > 0) {
                         fos.write(buf, 0, n);
                         dataBytes += n;
+                        MicCapture.BlockListener bl = blockListener;
+                        if (bl != null) {
+                            bl.onBlockPeak(MicCapture.blockPeak(buf, n, h.channels));
+                        }
                     } else if (n < 0) {
                         break;
                     }

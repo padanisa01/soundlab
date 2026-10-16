@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Mic switch track: teal-tinted when on, dark neutral when off. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_checked="true" android:color="#3a6b66" />
+    <item android:color="@color/sl_track_rest" />
+</selector>
