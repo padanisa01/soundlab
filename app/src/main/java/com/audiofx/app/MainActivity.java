@@ -942,8 +942,9 @@ public class MainActivity extends Activity {
                 historyDb.log(hash, effectsDesc, timestamp, outPath);
                 currentOutputPath = outPath;
                 audioDurationSec = dur;
-                final String msg = "Normalized: peak "
-                        + result.callAttr("get", "peak_before_db").toString() + " dB to "
+                final String msg = "Normalized: p"
+                        + result.callAttr("get", "percentile").toString() + " "
+                        + result.callAttr("get", "ref_percentile_db").toString() + " dB to "
                         + result.callAttr("get", "peak_after_db").toString() + " dBFS";
                 runOnUiThread(() -> {
                     setStatus(msg);

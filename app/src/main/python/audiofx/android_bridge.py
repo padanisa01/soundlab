@@ -67,33 +67,51 @@ def process_file(input_path, output_path, warmth=0.5, reverb_preset="studio", ec
     }
 
 
-def normalize_file(input_path, output_path, target_db=-1.0):
-    """Peak-normalize a WAV file so its peak reaches target_db dBFS.
+def normalize_file(input_path, output_path, target_db=-1.0, percentile=99.0):
+    """Peak-normalize a WAV file so its ``percentile``-th percentile peak
+    reaches target_db dBFS.
 
-    A whole-file gain change: every sample is scaled by the same factor,
-    so dynamics are preserved. Target defaults to -1 dBFS, leaving
-    headroom for MP3 encoding. Returns a dict with ok/output_path/
-    sample_rate/duration_s/peak_before_db/peak_after_db/applied_gain_db.
-    Raises ValueError on a missing input or on silent input (no peak to
-    normalize to).
+    The reference level is the given percentile of |samples| (default
+    the 99th), not the absolute max, so a few pops or bursts cannot
+    mislead the gain computation. Gain is a single whole-file constant
+    (dynamics preserved); samples that would exceed the target after
+    gain are hard-held at target_db dBFS, so loud transients are
+    limited, never boosted into clipping. (A literal "no gain above
+    the percentile" would put an amplitude discontinuity at the
+    percentile level and glitch any normal signal crossing it.)
+
+    Target defaults to -1 dBFS, leaving headroom for MP3 encoding.
+    Returns a dict with ok/output_path/sample_rate/duration_s/
+    peak_before_db/ref_percentile_db/peak_after_db/applied_gain_db/
+    percentile. Raises ValueError on a missing input, a silent input,
+    or an out-of-range percentile.
     """
     if not os.path.isfile(input_path):
         raise ValueError("input file not found: %s" % input_path)
+    if not 0.0 < percentile <= 100.0:
+        raise ValueError("percentile must be in (0, 100]: %r" % (percentile,))
     samples, sample_rate = read_wav_mono(input_path)
     peak = max(abs(s) for s in samples)
     if peak <= 0:
         raise ValueError("input is silent: nothing to normalize")
+    mag = sorted(abs(s) for s in samples)
+    ref = mag[min(len(mag) - 1, int(math.ceil(percentile / 100.0 * len(mag))) - 1)]
+    if ref <= 0:
+        raise ValueError("input is silent below the percentile: nothing to normalize")
     target_peak = 10.0 ** (target_db / 20.0)
-    gain = target_peak / peak
-    write_wav(output_path, [s * gain for s in samples], sample_rate)
+    gain = target_peak / ref
+    out = [min(max(s * gain, -target_peak), target_peak) for s in samples]
+    write_wav(output_path, out, sample_rate)
     return {
         "ok": True,
         "output_path": output_path,
         "sample_rate": sample_rate,
-        "duration_s": round(len(samples) / sample_rate, 2),
+        "duration_s": round(len(out) / sample_rate, 2),
         "peak_before_db": round(20 * math.log10(peak), 2),
+        "ref_percentile_db": round(20 * math.log10(ref), 2),
         "peak_after_db": round(target_db, 2),
         "applied_gain_db": round(20 * math.log10(gain), 2),
+        "percentile": percentile,
     }
 
 

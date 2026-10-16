@@ -187,6 +187,69 @@ class TestAndroidBridge(unittest.TestCase):
                     os.path.join(d, "nope.wav"), os.path.join(d, "o.wav")
                 )
 
+    def test_normalize_ignores_pops(self):
+        # A few loud pops (< 1% of samples) must not mislead the gain
+        # computation, and must be limited rather than boosted.
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.wav")
+            body = sine(440, 0.3, self.SR, amplitude=0.07)
+            pops = list(body)
+            for i in range(0, len(pops), 200):
+                pops[i] = 0.9 if i % 400 == 0 else -0.9
+            write_wav(src, pops, self.SR)
+            dst = os.path.join(d, "out.wav")
+            res = android_bridge.normalize_file(src, dst)
+            self.assertEqual(res["percentile"], 99.0)
+            # Reference is the body level, not the 0.9 pops.
+            self.assertAlmostEqual(res["ref_percentile_db"],
+                                   20 * math.log10(0.07), places=0)
+            self.assertGreater(res["applied_gain_db"], 20)
+            out, _ = read_wav_mono(dst)
+            target = 10.0 ** (-1.0 / 20.0)
+            # Nothing exceeds the target: pops are limited, not boosted.
+            self.assertLessEqual(max(abs(s) for s in out), target + 2 / 32768)
+            # The body itself reaches the target.
+            self.assertAlmostEqual(20 * math.log10(max(abs(s) for s in out)),
+                                   -1.0, places=2)
+
+    def test_normalize_percentile_param(self):
+        # percentile is a code-level parameter; p50 uses the median.
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.wav")
+            write_wav(src, sine(440, 0.3, self.SR, amplitude=0.07), self.SR)
+            dst = os.path.join(d, "out.wav")
+            res = android_bridge.normalize_file(src, dst, percentile=50.0)
+            self.assertEqual(res["percentile"], 50.0)
+            # Median of |sine| ~ 0.707 * amplitude -> higher gain than p99.
+            median_ref = 0.707 * 0.07
+            self.assertAlmostEqual(
+                res["applied_gain_db"],
+                20 * math.log10(10.0 ** (-1.0 / 20.0) / median_ref), places=0)
+            out, _ = read_wav_mono(dst)
+            # Limiter holds the sine crests at the target.
+            self.assertLessEqual(max(abs(s) for s in out),
+                                 10.0 ** (-1.0 / 20.0) + 2 / 32768)
+
+    def test_normalize_percentile_100_matches_peak(self):
+        # percentile=100 recovers classic absolute-peak normalization.
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.wav")
+            write_wav(src, sine(440, 0.3, self.SR, amplitude=0.07), self.SR)
+            dst = os.path.join(d, "out.wav")
+            res = android_bridge.normalize_file(src, dst, percentile=100.0)
+            self.assertAlmostEqual(
+                res["applied_gain_db"],
+                20 * math.log10(10.0 ** (-1.0 / 20.0) / 0.07), places=1)
+
+    def test_normalize_bad_percentile_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.wav")
+            write_wav(src, sine(440, 0.3, self.SR, amplitude=0.07), self.SR)
+            for bad in (0.0, -5.0, 100.5):
+                with self.assertRaises(ValueError):
+                    android_bridge.normalize_file(
+                        src, os.path.join(d, "o.wav"), percentile=bad)
+
 
 class TestWaveformPeaks(unittest.TestCase):
     def test_bucket_count_and_range(self):

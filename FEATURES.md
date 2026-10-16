@@ -34,11 +34,16 @@ or the plan changes.
   lock during a live take.
 - 8-bit and 16-bit PCM supported; stereo is mixed down to mono.
 - The input file name is remembered and reused for the MP3 save name.
-- **Normalize** button (track card): peak-normalizes the current audio
-  to -1 dBFS with a single whole-file gain change (dynamics
-  preserved). Applies to the processed output when there is one,
-  else the input; undoable like any effect; the status reports the
-  before/after peak.
+- **Normalize** button (track card): normalizes the current audio so
+  its 99th-percentile peak reaches -1 dBFS. Using the 99th percentile
+  (not the absolute max) keeps pops and bursts from misleading the
+  gain; the gain is one whole-file constant (dynamics preserved) and
+  anything that would exceed the target is hard-held at -1 dBFS, so
+  transients are limited, never boosted into clipping. The percentile
+  is a code-level parameter (`percentile=99.0`), not user-facing.
+  Applies to the processed output when there is one, else the input;
+  undoable like any effect; the status reports the percentile
+  reference and the target.
 - **Auto-normalize takes** toggle (on by default): recordings are
   peak-normalized to -1 dBFS right after the take, as an undoable
   history step — the raw mic capture stays recoverable via Undo.
