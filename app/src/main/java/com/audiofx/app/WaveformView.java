@@ -5,6 +5,7 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
+import android.graphics.RectF;
 import android.graphics.Shader;
 import android.util.AttributeSet;
 import android.view.GestureDetector;
@@ -45,6 +46,9 @@ public class WaveformView extends View {
     private static final int LABEL_COLOR = 0xFF78909C;
     private static final int SELECTION_FILL = 0x4026A69A;
     private static final int SELECTION_EDGE = 0xFF00897B;
+    private static final int PB_TRACK = 0xFFB0BEC5;
+    private static final int PB_FILL = 0xFFFF8F00;
+    private static final int PB_HEAD = 0xFFE65100;
     private static final float MAX_ZOOM = 8f;
 
     private float[] peaks = new float[0];
@@ -57,6 +61,12 @@ public class WaveformView extends View {
     private Float selStartFrac;
     private Float selEndFrac;
     private OnSelectionListener selectionListener;
+
+    // Playback progress: a track spanning [pbStartFrac, pbEndFrac] that
+    // fills up to pbPositionFrac. Null start hides the indicator.
+    private Float pbStartFrac;
+    private Float pbEndFrac;
+    private float pbPositionFrac;
 
     private final ScaleGestureDetector scaleDetector;
     private final GestureDetector gestureDetector;
@@ -76,6 +86,10 @@ public class WaveformView extends View {
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint selectionFillPaint = new Paint();
     private final Paint selectionEdgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pbTrackPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pbFillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pbHeadPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF pbRect = new RectF();
 
     public WaveformView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -91,6 +105,10 @@ public class WaveformView extends View {
         selectionFillPaint.setColor(SELECTION_FILL);
         selectionEdgePaint.setColor(SELECTION_EDGE);
         selectionEdgePaint.setStrokeWidth(3f);
+        pbTrackPaint.setColor(PB_TRACK);
+        pbFillPaint.setColor(PB_FILL);
+        pbHeadPaint.setColor(PB_HEAD);
+        pbHeadPaint.setStrokeWidth(3f);
         touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
         scaleDetector = new ScaleGestureDetector(context, new ScaleListener());
         gestureDetector = new GestureDetector(context, new GestureListener());
@@ -103,7 +121,31 @@ public class WaveformView extends View {
         this.viewStart = 0f;
         cancelProgressAnimation();
         this.progress = 0f;
+        clearPlayback();
         clearSelection();
+        invalidate();
+    }
+
+    /**
+     * Show the playback range as a horizontal bar. Fractions are 0..1
+     * across the whole audio; pass a null start to hide the indicator.
+     */
+    public void setPlaybackRange(Float startFraction, Float endFraction) {
+        this.pbStartFrac = startFraction;
+        this.pbEndFrac = endFraction;
+        invalidate();
+    }
+
+    /** Move the playback fill/playhead to an absolute audio fraction. */
+    public void setPlaybackPosition(float fraction) {
+        this.pbPositionFrac = Math.max(0f, Math.min(1f, fraction));
+        invalidate();
+    }
+
+    /** Hide the playback indicator. */
+    public void clearPlayback() {
+        this.pbStartFrac = null;
+        this.pbEndFrac = null;
         invalidate();
     }
 
@@ -351,6 +393,26 @@ public class WaveformView extends View {
             canvas.drawRect(0, 0, fillW, barH, overlayPaint);
             overlayPaint.setShader(null);
             canvas.drawLine(fillW, 0, fillW, barH, edgePaint);
+        }
+
+        // Playback progress: track across the played range, filled up to
+        // the current position, plus a playhead line through the bars.
+        if (pbStartFrac != null && pbEndFrac != null) {
+            float density = getResources().getDisplayMetrics().density;
+            float stripH = 6 * density;
+            float stripY = barH - stripH - 4 * density;
+            float rx0 = Math.max(0f, fractionToX(pbStartFrac));
+            float rx1 = Math.min(w, fractionToX(pbEndFrac));
+            if (rx1 > rx0) {
+                pbRect.set(rx0, stripY, rx1, stripY + stripH);
+                canvas.drawRoundRect(pbRect, stripH / 2f, stripH / 2f, pbTrackPaint);
+                float px = Math.max(rx0, Math.min(rx1, fractionToX(pbPositionFrac)));
+                if (px > rx0) {
+                    pbRect.set(rx0, stripY, px, stripY + stripH);
+                    canvas.drawRoundRect(pbRect, stripH / 2f, stripH / 2f, pbFillPaint);
+                }
+                canvas.drawLine(px, 0, px, barH, pbHeadPaint);
+            }
         }
 
         // Time axis in seconds, over the visible range.

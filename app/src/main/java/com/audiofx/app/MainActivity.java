@@ -56,6 +56,7 @@ public class MainActivity extends Activity {
     private Button btnProcess;
     private Button btnUndo;
     private Button btnPlay;
+    private Button btnPause;
     private Button btnStop;
     private Button btnSave;
     private ProgressBar progressBar;
@@ -71,8 +72,33 @@ public class MainActivity extends Activity {
     private Double selEndSec;    // null = from start point to end of file
     private Uri saveFolderUri;  // session-only; never persisted
     private MediaPlayer player;
+    private boolean isPaused;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Runnable scheduledStop;
+
+    /** Polls getCurrentPosition() and moves the waveform progress fill. */
+    private final Runnable positionUpdater = new Runnable() {
+        @Override
+        public void run() {
+            if (player != null && audioDurationSec > 0) {
+                try {
+                    int ms = player.getCurrentPosition();
+                    waveformView.setPlaybackPosition((float) (ms / 1000.0 / audioDurationSec));
+                } catch (Exception ignored) {
+                }
+                mainHandler.postDelayed(this, 200);
+            }
+        }
+    };
+
+    private void startPositionUpdates() {
+        stopPositionUpdates();
+        mainHandler.post(positionUpdater);
+    }
+
+    private void stopPositionUpdates() {
+        mainHandler.removeCallbacks(positionUpdater);
+    }
 
     // In-memory session state for Undo.
     private final Map<String, String> originalInputPath = new HashMap<>(); // fileHash -> pristine WAV
@@ -170,6 +196,7 @@ public class MainActivity extends Activity {
         btnProcess = findViewById(R.id.btn_process);
         btnUndo = findViewById(R.id.btn_undo);
         btnPlay = findViewById(R.id.btn_play);
+        btnPause = findViewById(R.id.btn_pause);
         btnStop = findViewById(R.id.btn_stop);
         btnSave = findViewById(R.id.btn_save);
         progressBar = findViewById(R.id.progress_bar);
@@ -189,6 +216,7 @@ public class MainActivity extends Activity {
         btnProcess.setOnClickListener(v -> processAudio());
         btnUndo.setOnClickListener(v -> undoLastEffect());
         btnPlay.setOnClickListener(v -> playOutput());
+        btnPause.setOnClickListener(v -> pausePlayback());
         btnStop.setOnClickListener(v -> stopPlayback());
         btnSave.setOnClickListener(v -> onSaveClicked());
 
@@ -420,6 +448,8 @@ public class MainActivity extends Activity {
 
     private void releasePlayer() {
         cancelScheduledStop();
+        stopPositionUpdates();
+        waveformView.clearPlayback();
         if (player != null) {
             try {
                 player.stop();
@@ -429,6 +459,80 @@ public class MainActivity extends Activity {
             player = null;
             playerOutputPath = null;
         }
+        isPaused = false;
+    }
+
+    private void pausePlayback() {
+        if (player == null || isPaused) {
+            return;
+        }
+        try {
+            if (!player.isPlaying()) {
+                return;
+            }
+            player.pause();
+        } catch (Exception ignored) {
+            return;
+        }
+        isPaused = true;
+        cancelScheduledStop();
+        stopPositionUpdates();
+        btnPlay.setEnabled(true);
+        btnPause.setEnabled(false);
+        int sec = 0;
+        try {
+            sec = player.getCurrentPosition() / 1000;
+        } catch (Exception ignored) {
+        }
+        setStatus("Paused at " + sec + "s — tap Play to resume.");
+    }
+
+    private void resumePlayback() {
+        if (player == null) {
+            isPaused = false;
+            return;
+        }
+        try {
+            player.start();
+        } catch (Exception e) {
+            setStatus("Playback failed: " + e);
+            return;
+        }
+        isPaused = false;
+        int startMs = 0;
+        try {
+            startMs = player.getCurrentPosition();
+        } catch (Exception ignored) {
+        }
+        Integer stopMs = computeStopMs(startMs);
+        scheduleStopAt(stopMs, startMs, player);
+        showPlaybackRange(startMs);
+        startPositionUpdates();
+        btnPlay.setEnabled(false);
+        btnPause.setEnabled(true);
+        setStatus(playbackStatus(startMs, stopMs));
+    }
+
+    /**
+     * Show the playback range on the waveform: the selection window (or the
+     * whole file), with the fill at the given playback position.
+     * No-op until durations are known.
+     */
+    private void showPlaybackRange(int positionMs) {
+        if (audioDurationSec <= 0) {
+            return;
+        }
+        float dur = (float) audioDurationSec;
+        float s = selStartSec != null ? (float) (selStartSec / audioDurationSec) : 0f;
+        float e = 1f;
+        if (selEndSec != null) {
+            float se = (float) (selEndSec / audioDurationSec);
+            if (se > s) {
+                e = Math.min(1f, se);
+            }
+        }
+        waveformView.setPlaybackRange(s, e);
+        waveformView.setPlaybackPosition(positionMs / 1000f / dur);
     }
 
     private void cancelScheduledStop() {
@@ -475,6 +579,11 @@ public class MainActivity extends Activity {
     }
 
     private void playOutput() {
+        // Resume a paused playback from the pause point.
+        if (isPaused && player != null) {
+            resumePlayback();
+            return;
+        }
         float fraction = 0f;
         if (selStartSec != null && audioDurationSec > 0) {
             fraction = (float) (selStartSec / audioDurationSec);
@@ -511,8 +620,13 @@ public class MainActivity extends Activity {
                 }
             } catch (Exception ignored) {
             }
+            isPaused = false;
             scheduleStopAt(stopMs, startMs, player);
+            showPlaybackRange(startMs);
+            startPositionUpdates();
             setStatus(playbackStatus(startMs, stopMs));
+            btnPlay.setEnabled(false);
+            btnPause.setEnabled(true);
             btnStop.setEnabled(true);
             return;
         }
@@ -537,16 +651,29 @@ public class MainActivity extends Activity {
                 }
                 mp.start();
                 playerOutputPath = currentOutputPath;
+                isPaused = false;
                 scheduleStopAt(stopMs, startMs, mp);
+                showPlaybackRange(startMs);
+                startPositionUpdates();
                 setStatus(playbackStatus(startMs, stopMs));
+                btnPlay.setEnabled(false);
+                btnPause.setEnabled(true);
                 btnStop.setEnabled(true);
             });
             player.setOnCompletionListener(mp -> {
+                isPaused = false;
+                stopPositionUpdates();
+                waveformView.clearPlayback();
                 setStatus("Playback finished.");
+                btnPlay.setEnabled(true);
+                btnPause.setEnabled(false);
                 btnStop.setEnabled(false);
             });
             player.setOnErrorListener((mp, what, extra) -> {
                 setStatus("Playback error: " + what + "/" + extra);
+                releasePlayer();
+                btnPlay.setEnabled(true);
+                btnPause.setEnabled(false);
                 btnStop.setEnabled(false);
                 return true;
             });
@@ -568,6 +695,7 @@ public class MainActivity extends Activity {
 
     private void stopPlayback() {
         releasePlayer();
+        btnPause.setEnabled(false);
         btnStop.setEnabled(false);
         setStatus("Playback stopped.");
     }

@@ -35,8 +35,13 @@ or the plan changes.
 
 ### Playback
 - **Play result** plays the processed WAV through MediaPlayer
-  (async prepare, so the UI never blocks).
-- **Stop** halts playback; enabled only while audio is playing.
+  (async prepare, so the UI never blocks). Starts at the selection
+  start when one is set, and stops at the selection end.
+- **Pause** freezes playback; **Play** resumes from the pause point.
+- **Stop** halts playback; enabled only while audio is playing or paused.
+- While playing, the waveform shows a horizontal progress bar across
+  the played range, filling up to the current position, with a
+  playhead line.
 
 ### Progress indication
 - A horizontal progress bar is shown while Apply effects or Save as MP3
