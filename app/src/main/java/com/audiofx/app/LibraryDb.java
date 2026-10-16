@@ -129,7 +129,30 @@ public class LibraryDb extends SQLiteOpenHelper {
             double durationS, int sampleRate, int channels,
             String source, String captureLabel, String dspVersion,
             String pristinePath) {
-        String id = UUID.randomUUID().toString();
+        return createEntryWithId(UUID.randomUUID().toString(), name, createdAt,
+                durationS, sampleRate, channels, source, captureLabel,
+                dspVersion, pristinePath);
+    }
+
+    /**
+     * Creates an entry with a caller-supplied id (lets MainActivity know the
+     * UUID before copying the take into takeFile(id)). Otherwise identical to
+     * {@link #createEntry}: updated_at is set to createdAt, returns the id.
+     *
+     * @throws IllegalArgumentException if id is null/empty or an entry with
+     *         that id already exists
+     */
+    public synchronized String createEntryWithId(String id, String name,
+            long createdAt, double durationS, int sampleRate, int channels,
+            String source, String captureLabel, String dspVersion,
+            String pristinePath) {
+        if (id == null || id.isEmpty()) {
+            throw new IllegalArgumentException("id must not be null or empty");
+        }
+        if (getEntry(id) != null) {
+            throw new IllegalArgumentException(
+                    "Library entry already exists: " + id);
+        }
         SQLiteDatabase db = getWritableDatabase();
         ContentValues cv = new ContentValues();
         cv.put("id", id);
