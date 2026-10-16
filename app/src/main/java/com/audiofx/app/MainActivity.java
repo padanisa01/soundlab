@@ -145,8 +145,11 @@ public class MainActivity extends Activity {
                 Python py = Python.getInstance();
                 PyObject result = py.getModule("audiofx.android_bridge").callAttr(
                         "process_file", inputPath, outputPath, warmth, preset, echo);
-                final String msg = "Done: " + result.get("duration_s") + "s @ "
-                        + result.get("sample_rate") + " Hz";
+                // process_file returns a Python dict. PyObject.get(String) does
+                // getattr(), which returns null for dict keys, so read values
+                // via dict.get() instead.
+                final String msg = "Done: " + result.callAttr("get", "duration_s") + "s @ "
+                        + result.callAttr("get", "sample_rate") + " Hz";
                 runOnUiThread(() -> {
                     setStatus(msg);
                     btnPlay.setEnabled(true);
@@ -163,12 +166,23 @@ public class MainActivity extends Activity {
         try {
             if (player != null) {
                 player.release();
+                player = null;
             }
             player = new MediaPlayer();
             player.setDataSource(outputPath);
-            player.prepare();
-            player.start();
-            setStatus("Playing processed audio...");
+            player.setOnPreparedListener(mp -> {
+                mp.start();
+                setStatus("Playing processed audio...");
+            });
+            player.setOnCompletionListener(mp -> setStatus("Playback finished."));
+            player.setOnErrorListener((mp, what, extra) -> {
+                setStatus("Playback error: " + what + "/" + extra);
+                return true;
+            });
+            // prepareAsync(): prepare() on the UI thread can block (ANR) on
+            // large files or slow storage.
+            player.prepareAsync();
+            setStatus("Preparing audio...");
         } catch (Exception e) {
             setStatus("Playback error: " + e.getMessage());
         }
