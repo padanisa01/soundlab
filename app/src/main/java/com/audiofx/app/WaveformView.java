@@ -421,7 +421,6 @@ public class WaveformView extends View {
         // Playback progress: track across the played range, filled up to
         // the current position, plus a playhead line through the bars.
         if (pbStartFrac != null && pbEndFrac != null) {
-            float density = getResources().getDisplayMetrics().density;
             float stripH = 6 * density;
             float stripY = barH - stripH - 4 * density;
             float rx0 = Math.max(0f, fractionToX(pbStartFrac));
