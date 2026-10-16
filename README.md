@@ -57,10 +57,10 @@ gradle testPython
 
 ## Build the APK
 
-Prerequisites: JDK 17, Android SDK (platform 34, build-tools), Gradle 8.9+.
+Prerequisites: JDK 17, Android SDK (platform 34, build-tools).
 
 ```bash
-gradle assembleDebug
+./gradlew assembleDebug
 # APK at app/build/outputs/apk/debug/app-debug.apk
 ```
 
