@@ -1,5 +1,6 @@
 """Unit tests for audiofx.pipeline and audiofx.android_bridge."""
 
+import json
 import math
 import os
 import struct
@@ -534,6 +535,182 @@ class TestLiveChain(unittest.TestCase):
             with self.assertRaises(ValueError):
                 android_bridge.join_remove(src, os.path.join(d, "o.wav"),
                                           0.0, None)
+
+
+class TestRenderChain(unittest.TestCase):
+    """render_chain: fold an op list over pristine in float, single write."""
+
+    SR = 22050
+
+    def _pristine(self, d, name="pristine.wav", seconds=1.0, amplitude=0.4):
+        p = os.path.join(d, name)
+        write_wav(p, sine(440, seconds, self.SR, amplitude=amplitude), self.SR)
+        return p
+
+    def test_dsp_version(self):
+        self.assertEqual(android_bridge.DSP_VERSION, "1")
+
+    def test_empty_chain_reproduces_pristine(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._pristine(d)
+            dst = os.path.join(d, "out.wav")
+            res = android_bridge.render_chain(src, "[]", dst)
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["output_path"], dst)
+            self.assertEqual(res["sample_rate"], self.SR)
+            self.assertEqual(res["duration_s"], 1.0)
+            orig, _ = read_wav_mono(src)
+            out, _ = read_wav_mono(dst)
+            self.assertEqual(out, orig)  # bit-identical: no DSP ran
+
+    def test_chain_matches_sequential_file_application(self):
+        # fx -> normalize -> trim -> join, then a windowed fx on the
+        # shortened buffer (window refers to the current buffer, like
+        # stacked application). Compared against the four existing
+        # file-level functions chained through temp files, per sample.
+        # Not bit-identical by design: the file path quantizes to 16-bit
+        # after every op, while render_chain stays in float with a single
+        # final write (no generational loss). The only per-sample
+        # difference is 16-bit quantization noise, small even after the
+        # normalize gain amplifies it.
+        with tempfile.TemporaryDirectory() as d:
+            src = self._pristine(d, seconds=2.0, amplitude=0.25)
+            ops = [
+                {"op": "fx", "params": {"warmth": 0.6, "reverb_preset": "studio",
+                                        "echo": 0.4}},
+                {"op": "normalize", "params": {"target_db": -1.0,
+                                               "percentile": 99.0}},
+                {"op": "trim", "params": {"start_sec": 0.3, "end_sec": 0.6}},
+                {"op": "join", "params": {"start_sec": 1.2, "end_sec": 1.5}},
+                {"op": "fx", "params": {"warmth": 0.4, "reverb_preset": "bathroom",
+                                        "echo": 0.2, "start_sec": 0.5,
+                                        "end_sec": 1.0}},
+            ]
+            dst = os.path.join(d, "chain.wav")
+            res = android_bridge.render_chain(src, json.dumps(ops), dst)
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["sample_rate"], self.SR)
+            chain_out, _ = read_wav_mono(dst)
+            # Sequential through the existing file-level functions.
+            t1 = os.path.join(d, "t1.wav")
+            t2 = os.path.join(d, "t2.wav")
+            t3 = os.path.join(d, "t3.wav")
+            t4 = os.path.join(d, "t4.wav")
+            t5 = os.path.join(d, "t5.wav")
+            android_bridge.process_file(src, t1, warmth=0.6,
+                                        reverb_preset="studio", echo=0.4)
+            android_bridge.normalize_file(t1, t2, target_db=-1.0,
+                                          percentile=99.0)
+            android_bridge.trim_to_silence(t2, t3, 0.3, 0.6)
+            android_bridge.join_remove(t3, t4, 1.2, 1.5)
+            android_bridge.process_file(t4, t5, warmth=0.4,
+                                        reverb_preset="bathroom", echo=0.2,
+                                        start_sec=0.5, end_sec=1.0)
+            seq_out, _ = read_wav_mono(t5)
+            self.assertEqual(len(chain_out), len(seq_out))
+            self.assertEqual(res["duration_s"],
+                             round(len(chain_out) / self.SR, 2))
+            max_diff = 0.0
+            for a, b in zip(chain_out, seq_out):
+                max_diff = max(max_diff, abs(a - b))
+                self.assertAlmostEqual(a, b, delta=8.0 / 32768)
+            self.assertLess(max_diff, 8.0 / 32768)
+
+    def test_percentile_param_honored(self):
+        # Single-op chain: one final write in both paths -> bit-identical.
+        with tempfile.TemporaryDirectory() as d:
+            src = self._pristine(d)
+            dst = os.path.join(d, "chain.wav")
+            android_bridge.render_chain(
+                src,
+                json.dumps([{"op": "normalize",
+                             "params": {"target_db": -1.0,
+                                        "percentile": 50.0}}]),
+                dst)
+            ref = os.path.join(d, "ref.wav")
+            android_bridge.normalize_file(src, ref, percentile=50.0)
+            chain_out, _ = read_wav_mono(dst)
+            ref_out, _ = read_wav_mono(ref)
+            self.assertEqual(chain_out, ref_out)
+
+    def test_livefx_op_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._pristine(d)
+            ops = [{"op": "livefx", "params": {"warmth": 0.5,
+                                               "reverb_preset": "studio",
+                                               "echo": 0.3}}]
+            with self.assertRaises(ValueError):
+                android_bridge.render_chain(src, json.dumps(ops),
+                                            os.path.join(d, "o.wav"))
+
+    def test_unknown_op_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._pristine(d)
+            ops = [{"op": "reverb", "params": {}}]
+            with self.assertRaises(ValueError):
+                android_bridge.render_chain(src, json.dumps(ops),
+                                            os.path.join(d, "o.wav"))
+
+    def test_windowed_fx_matches_windowed_process_file(self):
+        # Single windowed fx op: one final write in both paths ->
+        # bit-identical to windowed process_file.
+        with tempfile.TemporaryDirectory() as d:
+            src = self._pristine(d, seconds=2.0)
+            ops = [{"op": "fx", "params": {"warmth": 0.5,
+                                           "reverb_preset": "studio",
+                                           "echo": 0.5, "start_sec": 0.4,
+                                           "end_sec": 1.2}}]
+            dst = os.path.join(d, "chain.wav")
+            android_bridge.render_chain(src, json.dumps(ops), dst)
+            ref = os.path.join(d, "ref.wav")
+            android_bridge.process_file(src, ref, warmth=0.5,
+                                        reverb_preset="studio", echo=0.5,
+                                        start_sec=0.4, end_sec=1.2)
+            chain_out, _ = read_wav_mono(dst)
+            ref_out, _ = read_wav_mono(ref)
+            self.assertEqual(chain_out, ref_out)
+
+    def test_bad_normalize_param_raises(self):
+        # Param validation matches the file-level functions.
+        with tempfile.TemporaryDirectory() as d:
+            src = self._pristine(d)
+            ops = [{"op": "normalize",
+                    "params": {"target_db": -1.0, "percentile": 0.0}}]
+            with self.assertRaises(ValueError):
+                android_bridge.render_chain(src, json.dumps(ops),
+                                            os.path.join(d, "o.wav"))
+
+    def test_bad_trim_window_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._pristine(d)
+            ops = [{"op": "trim", "params": {"start_sec": 0.5,
+                                             "end_sec": 0.2}}]
+            with self.assertRaises(ValueError):
+                android_bridge.render_chain(src, json.dumps(ops),
+                                            os.path.join(d, "o.wav"))
+
+    def test_join_whole_buffer_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._pristine(d)
+            ops = [{"op": "join", "params": {"start_sec": 0.0,
+                                             "end_sec": None}}]
+            with self.assertRaises(ValueError):
+                android_bridge.render_chain(src, json.dumps(ops),
+                                            os.path.join(d, "o.wav"))
+
+    def test_missing_pristine_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ValueError):
+                android_bridge.render_chain(os.path.join(d, "nope.wav"), "[]",
+                                            os.path.join(d, "o.wav"))
+
+    def test_bad_ops_json_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._pristine(d)
+            for bad in ("not json", '{"op": "fx"}', '[42]', 'null'):
+                with self.assertRaises(ValueError):
+                    android_bridge.render_chain(src, bad,
+                                                os.path.join(d, "o.wav"))
 
 
 if __name__ == "__main__":

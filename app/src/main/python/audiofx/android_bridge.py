@@ -4,8 +4,10 @@ Kept deliberately thin: argument validation, WAV in/out, and the fixed
 effect order Warmth -> Reverb -> Echo.
 """
 
+import json
 import math
 import os
+import wave
 
 from .effects import Echo, Reverb, Warmth
 from .pipeline import (
@@ -17,26 +19,25 @@ from .pipeline import (
     write_wav,
 )
 
+#: DSP engine version. Java stores this per library entry and refuses to
+#: silently re-render when the engine changes.
+DSP_VERSION = "1"
+
 
 def list_reverb_presets():
     """Preset names for the Android spinner, sorted."""
     return sorted(Reverb.PRESETS)
 
 
-def process_file(input_path, output_path, warmth=0.5, reverb_preset="studio", echo=0.3,
-                 start_sec=None, end_sec=None):
-    """Apply the effect chain to a WAV file.
+def _apply_fx(samples, sample_rate, warmth=0.5, reverb_preset="studio",
+              echo=0.3, start_sec=None, end_sec=None):
+    """Float core of process_file: apply the effect chain to a sample list.
 
-    When ``start_sec``/``end_sec`` select a window, only that window is
-    processed (spliced back with a short crossfade); otherwise the whole
-    file is processed.
-
-    Returns a dict with ok/output_path/sample_rate/duration_s/start_s/end_s.
-    Raises ValueError on a missing input or unknown preset.
+    Returns (processed_samples, s, e) where s/e are the sample window.
+    Window semantics are identical to process_file (windowed: reverb tail
+    truncated to the window, spliced with a crossfade; full-file: natural
+    tail). Raises ValueError on an unknown preset (via Reverb).
     """
-    if not os.path.isfile(input_path):
-        raise ValueError("input file not found: %s" % input_path)
-    samples, sample_rate = read_wav_mono(input_path)
     n = len(samples)
     s = 0 if start_sec is None else int(start_sec * sample_rate)
     e = n if end_sec is None else int(end_sec * sample_rate)
@@ -56,6 +57,26 @@ def process_file(input_path, output_path, warmth=0.5, reverb_preset="studio", ec
         # (Full-file applies keep the natural tail extension.)
         window_out = window_out[: e - s]
         processed = splice_with_crossfade(samples, window_out, s, e, sample_rate)
+    return processed, s, e
+
+
+def process_file(input_path, output_path, warmth=0.5, reverb_preset="studio", echo=0.3,
+                 start_sec=None, end_sec=None):
+    """Apply the effect chain to a WAV file.
+
+    When ``start_sec``/``end_sec`` select a window, only that window is
+    processed (spliced back with a short crossfade); otherwise the whole
+    file is processed.
+
+    Returns a dict with ok/output_path/sample_rate/duration_s/start_s/end_s.
+    Raises ValueError on a missing input or unknown preset.
+    """
+    if not os.path.isfile(input_path):
+        raise ValueError("input file not found: %s" % input_path)
+    samples, sample_rate = read_wav_mono(input_path)
+    processed, s, e = _apply_fx(samples, sample_rate, warmth=warmth,
+                                reverb_preset=reverb_preset, echo=echo,
+                                start_sec=start_sec, end_sec=end_sec)
     write_wav(output_path, processed, sample_rate)
     return {
         "ok": True,
@@ -65,6 +86,41 @@ def process_file(input_path, output_path, warmth=0.5, reverb_preset="studio", ec
         "start_s": round(s / sample_rate, 2),
         "end_s": round(e / sample_rate, 2),
     }
+
+
+def _apply_normalize(samples, sample_rate, target_db=-1.0, percentile=99.0):
+    """Float core of normalize_file: peak-normalize a sample list.
+
+    The reference level is the given percentile of |samples| (default the
+    99th), not the absolute max, so a few pops or bursts cannot mislead the
+    gain computation. Gain is a single whole-file constant (dynamics
+    preserved); samples that would exceed the target after gain are
+    hard-held at target_db dBFS, so loud transients are limited, never
+    boosted into clipping.
+
+    Returns (out_samples, info) where info carries peak_before_db /
+    ref_percentile_db / applied_gain_db / percentile. Raises ValueError on
+    an out-of-range percentile or a silent input.
+    """
+    if not 0.0 < percentile <= 100.0:
+        raise ValueError("percentile must be in (0, 100]: %r" % (percentile,))
+    peak = max(abs(s) for s in samples)
+    if peak <= 0:
+        raise ValueError("input is silent: nothing to normalize")
+    mag = sorted(abs(s) for s in samples)
+    ref = mag[min(len(mag) - 1, int(math.ceil(percentile / 100.0 * len(mag))) - 1)]
+    if ref <= 0:
+        raise ValueError("input is silent below the percentile: nothing to normalize")
+    target_peak = 10.0 ** (target_db / 20.0)
+    gain = target_peak / ref
+    out = [min(max(s * gain, -target_peak), target_peak) for s in samples]
+    info = {
+        "peak_before_db": round(20 * math.log10(peak), 2),
+        "ref_percentile_db": round(20 * math.log10(ref), 2),
+        "applied_gain_db": round(20 * math.log10(gain), 2),
+        "percentile": percentile,
+    }
+    return out, info
 
 
 def normalize_file(input_path, output_path, target_db=-1.0, percentile=99.0):
@@ -88,31 +144,37 @@ def normalize_file(input_path, output_path, target_db=-1.0, percentile=99.0):
     """
     if not os.path.isfile(input_path):
         raise ValueError("input file not found: %s" % input_path)
-    if not 0.0 < percentile <= 100.0:
-        raise ValueError("percentile must be in (0, 100]: %r" % (percentile,))
     samples, sample_rate = read_wav_mono(input_path)
-    peak = max(abs(s) for s in samples)
-    if peak <= 0:
-        raise ValueError("input is silent: nothing to normalize")
-    mag = sorted(abs(s) for s in samples)
-    ref = mag[min(len(mag) - 1, int(math.ceil(percentile / 100.0 * len(mag))) - 1)]
-    if ref <= 0:
-        raise ValueError("input is silent below the percentile: nothing to normalize")
-    target_peak = 10.0 ** (target_db / 20.0)
-    gain = target_peak / ref
-    out = [min(max(s * gain, -target_peak), target_peak) for s in samples]
+    out, info = _apply_normalize(samples, sample_rate,
+                                 target_db=target_db, percentile=percentile)
     write_wav(output_path, out, sample_rate)
     return {
         "ok": True,
         "output_path": output_path,
         "sample_rate": sample_rate,
         "duration_s": round(len(out) / sample_rate, 2),
-        "peak_before_db": round(20 * math.log10(peak), 2),
-        "ref_percentile_db": round(20 * math.log10(ref), 2),
+        "peak_before_db": info["peak_before_db"],
+        "ref_percentile_db": info["ref_percentile_db"],
         "peak_after_db": round(target_db, 2),
-        "applied_gain_db": round(20 * math.log10(gain), 2),
-        "percentile": percentile,
+        "applied_gain_db": info["applied_gain_db"],
+        "percentile": info["percentile"],
     }
+
+
+def _clamp_samples_window(samples, sample_rate, start_sec, end_sec):
+    """Validate a selection window against a sample buffer; returns (s, e).
+
+    ``end_sec`` may be None, meaning to the end of the buffer. Raises
+    ValueError on a missing/empty selection.
+    """
+    n = len(samples)
+    if start_sec is None:
+        raise ValueError("no selection: select a range first")
+    s = max(0, min(n, int(start_sec * sample_rate)))
+    e = n if end_sec is None else max(0, min(n, int(end_sec * sample_rate)))
+    if e <= s:
+        raise ValueError("empty selection")
+    return s, e
 
 
 def _clamp_window(input_path, start_sec, end_sec):
@@ -123,15 +185,27 @@ def _clamp_window(input_path, start_sec, end_sec):
     """
     if not os.path.isfile(input_path):
         raise ValueError("input file not found: %s" % input_path)
-    if start_sec is None:
-        raise ValueError("no selection: select a range first")
     samples, sample_rate = read_wav_mono(input_path)
-    n = len(samples)
-    s = max(0, min(n, int(start_sec * sample_rate)))
-    e = n if end_sec is None else max(0, min(n, int(end_sec * sample_rate)))
-    if e <= s:
-        raise ValueError("empty selection")
+    s, e = _clamp_samples_window(samples, sample_rate, start_sec, end_sec)
     return samples, sample_rate, s, e
+
+
+def _apply_trim(samples, sample_rate, start_sec, end_sec, edge_fade_sec=0.005):
+    """Float core of trim_to_silence: zero the window with soft edges.
+
+    Returns (out_samples, s, e). The selection stays valid: duration is
+    unchanged. Raises ValueError on a missing/empty selection.
+    """
+    s, e = _clamp_samples_window(samples, sample_rate, start_sec, end_sec)
+    out = list(samples)
+    for i in range(s, e):
+        out[i] = 0.0
+    fade_n = min(int(edge_fade_sec * sample_rate), (e - s) // 2)
+    for i in range(fade_n):
+        t = 1.0 - (i + 1) / (fade_n + 1)
+        out[s + i] = samples[s + i] * t
+        out[e - 1 - i] = samples[e - 1 - i] * t
+    return out, s, e
 
 
 def trim_to_silence(input_path, output_path, start_sec, end_sec,
@@ -143,14 +217,8 @@ def trim_to_silence(input_path, output_path, start_sec, end_sec,
     start_s/end_s. Raises ValueError on a missing input or bad window.
     """
     samples, sample_rate, s, e = _clamp_window(input_path, start_sec, end_sec)
-    out = list(samples)
-    for i in range(s, e):
-        out[i] = 0.0
-    fade_n = min(int(edge_fade_sec * sample_rate), (e - s) // 2)
-    for i in range(fade_n):
-        t = 1.0 - (i + 1) / (fade_n + 1)
-        out[s + i] = samples[s + i] * t
-        out[e - 1 - i] = samples[e - 1 - i] * t
+    out, s, e = _apply_trim(samples, sample_rate, start_sec, end_sec,
+                            edge_fade_sec=edge_fade_sec)
     write_wav(output_path, out, sample_rate)
     return {
         "ok": True,
@@ -162,15 +230,13 @@ def trim_to_silence(input_path, output_path, start_sec, end_sec,
     }
 
 
-def join_remove(input_path, output_path, start_sec, end_sec, fade_sec=0.005):
-    """Cut the selected window out and glue the remaining parts together.
+def _apply_join(samples, sample_rate, start_sec, end_sec, fade_sec=0.005):
+    """Float core of join_remove: cut the window out, crossfade the junction.
 
-    A 5 ms crossfade at the junction avoids clicks; there is no silence
-    in between. Returns a dict with ok/output_path/sample_rate/
-    duration_s/removed_s. Raises ValueError on a missing input, a bad
-    window, or a window covering the whole file.
+    Returns (out_samples, s, e). Raises ValueError on a missing/empty
+    selection or a window covering the whole buffer.
     """
-    samples, sample_rate, s, e = _clamp_window(input_path, start_sec, end_sec)
+    s, e = _clamp_samples_window(samples, sample_rate, start_sec, end_sec)
     n = len(samples)
     if s <= 0 and e >= n:
         raise ValueError("selection covers the whole file: nothing to join")
@@ -184,6 +250,20 @@ def join_remove(input_path, output_path, start_sec, end_sec, fade_sec=0.005):
         out.extend(tail[fade_n:])
     else:
         out = head + tail
+    return out, s, e
+
+
+def join_remove(input_path, output_path, start_sec, end_sec, fade_sec=0.005):
+    """Cut the selected window out and glue the remaining parts together.
+
+    A 5 ms crossfade at the junction avoids clicks; there is no silence
+    in between. Returns a dict with ok/output_path/sample_rate/
+    duration_s/removed_s. Raises ValueError on a missing input, a bad
+    window, or a window covering the whole file.
+    """
+    samples, sample_rate, s, e = _clamp_window(input_path, start_sec, end_sec)
+    out, s, e = _apply_join(samples, sample_rate, start_sec, end_sec,
+                            fade_sec=fade_sec)
     write_wav(output_path, out, sample_rate)
     return {
         "ok": True,
@@ -191,6 +271,72 @@ def join_remove(input_path, output_path, start_sec, end_sec, fade_sec=0.005):
         "sample_rate": sample_rate,
         "duration_s": round(len(out) / sample_rate, 2),
         "removed_s": round((e - s) / sample_rate, 2),
+    }
+
+
+def render_chain(pristine_path, ops_json, output_path):
+    """Render a library op chain: fold ops over pristine in float, write
+    the 16-bit WAV once.
+
+    ``ops_json`` is a JSON array of {"op": "fx"|"normalize"|"trim"|"join",
+    "params": {...}} (params per the library spec section 6). Ops apply in
+    sequence in float; window positions refer to the current buffer at
+    apply time, exactly like stacked application. ``livefx`` ops are never
+    passed in (display-only): they raise ValueError, as do unknown ops and
+    invalid parameters (same validation as the file-level functions).
+
+    Returns {"ok": True, "output_path": ..., "duration_s": ..., "sample_rate": ...}.
+    """
+    if not os.path.isfile(pristine_path):
+        raise ValueError("input file not found: %s" % pristine_path)
+    try:
+        ops = json.loads(ops_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ops_json is not valid JSON: %s" % exc)
+    if not isinstance(ops, list):
+        raise ValueError("ops_json must be a JSON array of ops")
+    samples, sample_rate = read_wav_mono(pristine_path)
+    samples = list(samples)
+    for i, entry in enumerate(ops):
+        if not isinstance(entry, dict):
+            raise ValueError("op #%d is not an object" % i)
+        op = entry.get("op")
+        params = entry.get("params") or {}
+        if not isinstance(params, dict):
+            raise ValueError("op #%d params must be an object" % i)
+        if op == "fx":
+            samples, _, _ = _apply_fx(
+                samples, sample_rate,
+                warmth=params.get("warmth", 0.5),
+                reverb_preset=params.get("reverb_preset", "studio"),
+                echo=params.get("echo", 0.3),
+                start_sec=params.get("start_sec"),
+                end_sec=params.get("end_sec"))
+        elif op == "normalize":
+            samples, _ = _apply_normalize(
+                samples, sample_rate,
+                target_db=params.get("target_db", -1.0),
+                percentile=params.get("percentile", 99.0))
+        elif op == "trim":
+            samples, _, _ = _apply_trim(
+                samples, sample_rate,
+                params.get("start_sec"), params.get("end_sec"))
+        elif op == "join":
+            samples, _, _ = _apply_join(
+                samples, sample_rate,
+                params.get("start_sec"), params.get("end_sec"))
+        elif op == "livefx":
+            # Live-FX takes are baked into the pristine; the livefx op is a
+            # display-only label and must never be re-run.
+            raise ValueError("livefx ops are never re-rendered in render_chain")
+        else:
+            raise ValueError("unknown op %r" % (op,))
+    write_wav(output_path, samples, sample_rate)
+    return {
+        "ok": True,
+        "output_path": output_path,
+        "duration_s": round(len(samples) / sample_rate, 2),
+        "sample_rate": sample_rate,
     }
 
 
@@ -240,9 +386,6 @@ def waveform_peaks(input_path, n_buckets=240):
     sample_rate, bit_depth and duration_s. Raises ValueError on a
     missing input.
     """
-    import json
-    import wave
-
     if not os.path.isfile(input_path):
         raise ValueError("input file not found: %s" % input_path)
     samples, sample_rate = read_wav_mono(input_path)
