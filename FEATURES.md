@@ -14,7 +14,8 @@ or the plan changes.
   timeline on the x-axis.
 - Tap the waveform to place a start marker; tap again to place the end
   marker (a tap at/before the start moves it). Double-tap clears.
-  Pinch to zoom (1x-8x), drag to pan while zoomed.
+  Pinch to zoom (1x-8x), drag to pan while zoomed; the seconds
+  timeline follows the visible range.
 - Playback and Apply effects honor the selection: a start point alone
   plays/processes from there to the end of the file; a full window
   plays/processes only inside it (processed audio is spliced back with
@@ -39,6 +40,8 @@ or the plan changes.
   start when one is set, and stops at the selection end.
 - **Pause** freezes playback; **Play** resumes from the pause point.
 - **Stop** halts playback; enabled only while audio is playing or paused.
+  Play is re-enabled after every stop, so different windows can be
+  auditioned back to back.
 - While playing, the waveform shows a horizontal progress bar across
   the played range, filling up to the current position, with a
   playhead line.
