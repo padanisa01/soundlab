@@ -90,16 +90,21 @@ def waveform_peaks(input_path, n_buckets=240):
     """Peak amplitudes of a WAV file for the waveform display.
 
     Returns a dict with peaks_json (a JSON array of floats in 0..1),
-    sample_rate and duration_s. Raises ValueError on a missing input.
+    sample_rate, bit_depth and duration_s. Raises ValueError on a
+    missing input.
     """
     import json
+    import wave
 
     if not os.path.isfile(input_path):
         raise ValueError("input file not found: %s" % input_path)
     samples, sample_rate = read_wav_mono(input_path)
+    with wave.open(input_path, "rb") as w:
+        bit_depth = w.getsampwidth() * 8
     peaks = _waveform_peaks(samples, int(n_buckets))
     return {
         "peaks_json": json.dumps(peaks),
         "sample_rate": sample_rate,
+        "bit_depth": bit_depth,
         "duration_s": round(len(samples) / sample_rate, 2),
     }

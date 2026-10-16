@@ -175,6 +175,8 @@ class TestWaveformPeaks(unittest.TestCase):
             self.assertEqual(len(peaks), 32)
             self.assertTrue(all(0.0 <= p <= 1.0 for p in peaks))
             self.assertAlmostEqual(max(peaks), 1.0)
+            self.assertEqual(result["bit_depth"], 16)
+            self.assertEqual(result["sample_rate"], 22050)
 
     def test_bridge_missing_input_raises(self):
         with self.assertRaises(ValueError):

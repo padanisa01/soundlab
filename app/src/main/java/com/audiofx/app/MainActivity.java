@@ -10,6 +10,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.OpenableColumns;
+import android.view.MotionEvent;
 import android.view.View;
 import android.widget.Button;
 import android.widget.ImageButton;
@@ -82,7 +83,8 @@ public class MainActivity extends Activity {
     private LinearLayout selChipRow;
     private TextView selChipText;
     private Button btnSelClear;
-    private TextView tvTime;
+    private TextView tvTimeCur;
+    private TextView tvTimeTot;
     private TextView tvSource;
 
     private String inputPath;   // cached WAV picked by the user
@@ -107,7 +109,7 @@ public class MainActivity extends Activity {
                 try {
                     int ms = player.getCurrentPosition();
                     waveformView.setPlaybackPosition((float) (ms / 1000.0 / audioDurationSec));
-                    tvTime.setText(fmtTime(ms / 1000.0) + " / " + fmtTime(audioDurationSec));
+                    tvTimeCur.setText(fmtTime(ms / 1000.0));
                 } catch (Exception ignored) {
                 }
                 mainHandler.postDelayed(this, 200);
@@ -248,7 +250,8 @@ public class MainActivity extends Activity {
         selChipRow = findViewById(R.id.sel_chip_row);
         selChipText = findViewById(R.id.sel_chip_text);
         btnSelClear = findViewById(R.id.btn_sel_clear);
-        tvTime = findViewById(R.id.tv_time);
+        tvTimeCur = findViewById(R.id.tv_time_cur);
+        tvTimeTot = findViewById(R.id.tv_time_tot);
         tvSource = findViewById(R.id.tv_source);
         waveformView.setOnSelectionListener(this::onSelectionChanged);
 
@@ -268,6 +271,19 @@ public class MainActivity extends Activity {
         chipBath.setOnClickListener(v -> selectReverb("bathroom"));
         chipCave.setOnClickListener(v -> selectReverb("cave"));
         btnProcess.setOnClickListener(v -> processAudio());
+        // Pressed-state shrink on Apply (SL-10).
+        btnProcess.setOnTouchListener((v, event) -> {
+            switch (event.getAction()) {
+                case MotionEvent.ACTION_DOWN:
+                    v.animate().scaleX(0.98f).scaleY(0.98f).setDuration(80).start();
+                    break;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(80).start();
+                    break;
+            }
+            return false;
+        });
         btnUndo.setOnClickListener(v -> undoLastEffect());
         btnPlayPause.setOnClickListener(v -> togglePlayPause());
         btnStop.setOnClickListener(v -> stopPlayback());
@@ -428,7 +444,8 @@ public class MainActivity extends Activity {
                 updateUndoBadge();
                 waveformView.setPeaks(new float[0]);
                 waveformView.setDuration(0);
-                tvTime.setText("0:00 / 0:00");
+                tvTimeCur.setText("0:00");
+                tvTimeTot.setText("0:00");
                 tvSource.setVisibility(View.GONE);
                 btnPick.setVisibility(View.GONE);
                 trackCard.setVisibility(View.VISIBLE);
@@ -488,12 +505,16 @@ public class MainActivity extends Activity {
                 }
                 final double dur = Double.parseDouble(
                         result.callAttr("get", "duration_s").toString());
+                final int bitDepth = Integer.parseInt(
+                        result.callAttr("get", "bit_depth").toString());
                 runOnUiThread(() -> {
                     waveformView.setPeaks(peaks);
                     waveformView.setDuration(dur);
                     audioDurationSec = dur;
-                    tvTrackMeta.setText(String.format("%.1fs · WAV · mono", dur));
-                    tvTime.setText("0:00 / " + fmtTime(dur));
+                    tvTrackMeta.setText(String.format(
+                            "%.1fs · WAV %d-bit mono · WAV input only", dur, bitDepth));
+                    tvTimeCur.setText("0:00");
+                    tvTimeTot.setText(fmtTime(dur));
                     // The raw input can be auditioned before any Apply.
                     setPlayPauseEnabled(true);
                 });
@@ -751,6 +772,7 @@ public class MainActivity extends Activity {
                     try {
                         if (mp.isPlaying()) {
                             stopPlayback();
+                            setStatus("Stopped at window end.");
                         }
                     } catch (Exception ignored) {
                     }
@@ -869,7 +891,7 @@ public class MainActivity extends Activity {
                 setPlayPauseEnabled(true);
                 refreshPlayPause();
                 tvSource.setVisibility(View.GONE);
-                tvTime.setText(fmtTime(audioDurationSec) + " / " + fmtTime(audioDurationSec));
+                tvTimeCur.setText(fmtTime(audioDurationSec));
                 btnStop.setEnabled(false);
             });
             player.setOnErrorListener((mp, what, extra) -> {
@@ -902,7 +924,7 @@ public class MainActivity extends Activity {
         setPlayPauseEnabled(currentOutputPath != null || inputPath != null);
         refreshPlayPause();
         tvSource.setVisibility(View.GONE);
-        tvTime.setText("0:00 / " + fmtTime(audioDurationSec));
+        tvTimeCur.setText("0:00");
         btnStop.setEnabled(false);
         setStatus("Playback stopped.");
     }

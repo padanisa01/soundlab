@@ -39,7 +39,7 @@ or the plan changes.
   never blocks): the processed output when one exists, otherwise the
   raw input — so a selection can be auditioned before any Apply.
   Starts at the selection start when one is set, and stops at the
-  selection end. The status line says which source is playing.
+  selection end. The toast says which source is playing.
 - **Pause** freezes playback; **Play** resumes from the pause point.
 - **Stop** halts playback; enabled only while audio is playing or paused.
   Play is re-enabled after every stop, so different windows can be
@@ -53,7 +53,7 @@ or the plan changes.
   runs, and hidden when idle.
 - While Apply effects runs, the waveform fills left to right with a
   translucent gradient to indicate progress — confined to the
-  selection window when one is set. The status line reports the
+  selection window when one is set. The toast reports the
   window Python actually applied, e.g. `(applied 10.0s–20.0s)`.
 
 ### Save
