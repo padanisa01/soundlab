@@ -157,9 +157,17 @@ or the plan changes.
   room reverb is advice-only, never faked.
 - Tune Up applies all observed fixes as one composite `tune_up` op in
   canonical DSP order (declip, DC, hum, denoise, de-plosive, de-esser,
-  silence trim, loudness, EQ, fades), stored as a single undoable
-  history entry with a summary label. After each fix the diagnosis
-  re-runs so findings visibly turn green.
+  silence trim, leveling, loudness, EQ, fades), stored as a single
+  undoable history entry with a summary label. After each fix the
+  diagnosis re-runs so findings visibly turn green.
+- Tune-up recipes per content type: Podcast (free, default: full voice
+  chain, -16 LUFS), Singing (premium: gentle de-esser, no leveling or
+  silence trim, -14 LUFS), Music (premium: loudness/balance/fades,
+  -14 LUFS). Detection stays universal; the recipe only decides what
+  Tune Up applies. The recipe picker lives in the report dialog, the
+  choice persists, locked recipes show an upsell into the existing
+  one-time premium purchase. Diagnosis and per-finding Fix buttons are
+  free for everyone.
 - Python: `audiofx/diagnose.py` (checks + `tune_up_fixes`), `audiofx/repair.py`
   (11 fix ops), wired into `render_chain` via a shared `_apply_op`
   dispatcher; `diagnose_file` / `tune_up_build` entry points in

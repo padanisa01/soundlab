@@ -155,6 +155,12 @@ public class MainActivity extends Activity {
      * applied or the audio changes. Keyed by the diagnosed file path. */
     private String cachedDiagJson;
     private String cachedDiagPath;
+    /** Tune-up profile metadata JSON (from list_tune_up_profiles). */
+    private String cachedProfilesJson;
+    /** Live refs to the open diagnosis dialog's profile UI. */
+    private java.util.ArrayList<Button> diagProfileBtns;
+    private TextView diagProfileDesc;
+    private Button diagTuneUpBtn;
     private TextView saveFolderLabel;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Runnable scheduledStop;
@@ -432,6 +438,10 @@ public class MainActivity extends Activity {
             if (premium && adView != null) {
                 adView.setVisibility(View.GONE);
                 setStatus("Premium activated — all ads removed.");
+            }
+            if (premium) {
+                // Unlock any Pro tune-up recipes in the open report.
+                refreshDiagProfileSegments();
             }
         });
         premiumBilling.start();
@@ -1247,6 +1257,9 @@ public class MainActivity extends Activity {
                 final String findingsJson = Python.getInstance()
                         .getModule("audiofx.android_bridge")
                         .callAttr("diagnose_file", diagPath).toString();
+                cachedProfilesJson = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("list_tune_up_profiles").toString();
                 runOnUiThread(() -> {
                     setBusy(false);
                     waveformView.finishProgressAnimation();
@@ -1302,6 +1315,41 @@ public class MainActivity extends Activity {
         header.setTextSize(16);
         header.setPadding(0, 0, 0, (int) (12 * dp));
         list.addView(header);
+
+        // Tune-up recipe picker: segmented control + recipe description.
+        TextView tuneAsLabel = new TextView(this);
+        tuneAsLabel.setText("Tune up as");
+        tuneAsLabel.setTextColor(getColor(R.color.sl_mut));
+        tuneAsLabel.setTextSize(12);
+        list.addView(tuneAsLabel);
+
+        LinearLayout segments = new LinearLayout(this);
+        segments.setOrientation(LinearLayout.HORIZONTAL);
+        segments.setPadding(0, (int) (4 * dp), 0, 0);
+        diagProfileBtns = new java.util.ArrayList<>();
+        for (String pid : TUNE_UP_PROFILE_ORDER) {
+            Button seg = new Button(this);
+            seg.setTag(pid);
+            seg.setTextSize(12);
+            seg.setBackgroundResource(R.drawable.bg_ghost);
+            LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            if (!diagProfileBtns.isEmpty()) {
+                slp.setMargins((int) (6 * dp), 0, 0, 0);
+            }
+            seg.setLayoutParams(slp);
+            seg.setOnClickListener(v -> onProfileSelected((String) v.getTag()));
+            segments.addView(seg);
+            diagProfileBtns.add(seg);
+        }
+        list.addView(segments);
+
+        diagProfileDesc = new TextView(this);
+        diagProfileDesc.setTextColor(getColor(R.color.sl_mut));
+        diagProfileDesc.setTextSize(12);
+        diagProfileDesc.setPadding(0, (int) (4 * dp), 0, (int) (10 * dp));
+        list.addView(diagProfileDesc);
+        refreshDiagProfileSegments();
 
         for (int i = 0; i < findings.length(); i++) {
             final JSONObject f = findings.optJSONObject(i);
@@ -1381,18 +1429,19 @@ public class MainActivity extends Activity {
         }
 
         if (hasFixable) {
-            Button tuneUpBtn = new Button(this);
-            tuneUpBtn.setText("Tune Up: fix all issues");
-            tuneUpBtn.setTextColor(getColor(R.color.sl_teal2));
-            tuneUpBtn.setBackgroundResource(R.drawable.bg_ghost);
-            tuneUpBtn.setPadding(0, (int) (10 * dp), 0, (int) (10 * dp));
-            tuneUpBtn.setOnClickListener(v -> {
+            diagTuneUpBtn = new Button(this);
+            diagTuneUpBtn.setTextColor(getColor(R.color.sl_teal2));
+            diagTuneUpBtn.setBackgroundResource(R.drawable.bg_ghost);
+            diagTuneUpBtn.setPadding(0, (int) (10 * dp), 0, (int) (10 * dp));
+            diagTuneUpBtn.setOnClickListener(v -> {
                 if (diagDialog != null) {
                     diagDialog.dismiss();
                 }
-                runTuneUp(findingsJson);
+                runTuneUp(findingsJson, currentTuneUpProfile());
             });
-            list.addView(tuneUpBtn);
+            list.addView(diagTuneUpBtn);
+        } else {
+            diagTuneUpBtn = null;
         }
 
         android.widget.ScrollView scroll = new android.widget.ScrollView(this);
@@ -1401,14 +1450,97 @@ public class MainActivity extends Activity {
                 .setTitle("Diagnosis")
                 .setView(scroll)
                 .setNegativeButton("Close", null)
-                .setOnDismissListener(d -> diagDialog = null)
+                .setOnDismissListener(d -> {
+                    diagDialog = null;
+                    diagProfileBtns = null;
+                    diagProfileDesc = null;
+                    diagTuneUpBtn = null;
+                })
                 .show();
         diagDialog.getButton(AlertDialog.BUTTON_NEGATIVE)
                 .setTextColor(getColor(R.color.sl_mut));
+        refreshDiagProfileSegments();
     }
 
-    /** One-button Tune Up: build the composite op and apply it. */
-    private void runTuneUp(final String findingsJson) {
+    private static final String[] TUNE_UP_PROFILE_ORDER =
+            {"podcast", "singing", "music"};
+
+    private String currentTuneUpProfile() {
+        return getSharedPreferences("soundlab", MODE_PRIVATE)
+                .getString("tuneup_profile", "podcast");
+    }
+
+    private JSONObject tuneUpProfiles() {
+        try {
+            if (cachedProfilesJson != null) {
+                return new JSONObject(cachedProfilesJson);
+            }
+        } catch (Exception ignored) {
+        }
+        return new JSONObject();
+    }
+
+    /** Profile segment tap: locked Pro recipes open the upsell instead. */
+    private void onProfileSelected(String pid) {
+        JSONObject meta = tuneUpProfiles().optJSONObject(pid);
+        if (meta != null && meta.optBoolean("premium", false) && !isPremium()) {
+            showProfileUpsell(pid);
+            return;
+        }
+        getSharedPreferences("soundlab", MODE_PRIVATE).edit()
+                .putString("tuneup_profile", pid).apply();
+        refreshDiagProfileSegments();
+    }
+
+    /** Sync the segment control, recipe line and Tune Up label. */
+    private void refreshDiagProfileSegments() {
+        if (diagProfileBtns == null) {
+            return;
+        }
+        String current = currentTuneUpProfile();
+        JSONObject profiles = tuneUpProfiles();
+        boolean premium = isPremium();
+        for (Button seg : diagProfileBtns) {
+            String pid = (String) seg.getTag();
+            JSONObject meta = profiles.optJSONObject(pid);
+            String label = meta != null ? meta.optString("label", pid) : pid;
+            boolean locked = meta != null && meta.optBoolean("premium", false)
+                    && !premium;
+            seg.setText(label + (locked ? " \uD83D\uDD12" : ""));
+            boolean selected = pid.equals(current);
+            seg.setTextColor(getColor(
+                    selected ? R.color.sl_teal2 : R.color.sl_mut));
+            seg.setTypeface(null, selected ? android.graphics.Typeface.BOLD
+                    : android.graphics.Typeface.NORMAL);
+        }
+        JSONObject cur = profiles.optJSONObject(current);
+        if (diagProfileDesc != null) {
+            diagProfileDesc.setText(
+                    cur != null ? cur.optString("description", "") : "");
+        }
+        if (diagTuneUpBtn != null) {
+            String label = cur != null ? cur.optString("label", current)
+                    : current;
+            diagTuneUpBtn.setText("Tune Up as " + label);
+        }
+    }
+
+    /** Upsell for the premium tune-up recipes. */
+    private void showProfileUpsell(final String pid) {
+        JSONObject meta = tuneUpProfiles().optJSONObject(pid);
+        String label = meta != null ? meta.optString("label", pid) : pid;
+        new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+                .setTitle(label + " is a Pro recipe")
+                .setMessage("The " + label
+                        + " tune-up recipe comes with Premium, our one-time "
+                        + "purchase. It also removes all ads.")
+                .setPositiveButton("Buy premium", (d, w) -> buyPremium())
+                .setNegativeButton("Not now", null)
+                .show();
+    }
+
+    /** One-button Tune Up: build the composite op for the profile. */
+    private void runTuneUp(final String findingsJson, final String profile) {
         setBusy(true);
         setStatus("Building tune-up...");
         new Thread(() -> {
@@ -1418,14 +1550,16 @@ public class MainActivity extends Activity {
                 }
                 final String tuneUpJson = Python.getInstance()
                         .getModule("audiofx.android_bridge")
-                        .callAttr("tune_up_build", findingsJson).toString();
+                        .callAttr("tune_up_build", findingsJson, profile)
+                        .toString();
                 final JSONObject params =
                         new JSONObject(tuneUpJson).getJSONObject("params");
                 final String summary = params.optString("summary", "Tune Up");
+                final String receipt = summary.replaceFirst(
+                        "^Tune Up \\([^)]*\\): ", "");
                 runOnUiThread(() -> applyLibraryOp("tune_up",
                         params.toString(), summary,
-                        "Tuning up...", "Tune-up complete. "
-                                + summary.replace("Tune Up: ", ""),
+                        "Tuning up...", "Tune-up complete. " + receipt,
                         () -> onDiagnoseClicked()));
             } catch (Exception e) {
                 runOnUiThread(() -> {

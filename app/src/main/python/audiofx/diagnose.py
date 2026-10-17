@@ -505,17 +505,81 @@ _TUNE_UP_ORDER = (
     "deplosive",
     "deess",
     "silence_trim",
-    "loudness",
     "level",
+    "loudness",
     "eq_balance",
     "fade_ends",
 )
 
+#: Tune-up recipes per content type. Detection stays universal; the
+#: profile only decides what the one-button Tune Up applies, and with
+#: which parameters. ``params`` are per-op overrides merged over the
+#: finding's own params (detection-derived values like the hum
+#: frequency win). ``premium`` marks recipes sold with the one-time
+#: premium purchase; the podcast recipe is always free.
+TUNE_UP_PROFILES = {
+    "podcast": {
+        "label": "Podcast",
+        "description": "Voice recipe: de-plosive, de-esser, leveling, "
+                       "-16 LUFS",
+        "premium": False,
+        "fixes": ("declip", "dc_remove", "hum_notch", "denoise",
+                  "deplosive", "deess", "silence_trim", "level",
+                  "loudness", "eq_balance", "fade_ends"),
+        "params": {
+            "loudness": {"target_lufs": -16.0},
+            "deess": {"reduction_db": 8.0},
+            "denoise": {"strength": 0.5},
+        },
+    },
+    "singing": {
+        "label": "Singing",
+        "description": "Vocal recipe: gentle de-esser, no leveling, "
+                       "-14 LUFS (dynamics preserved)",
+        "premium": True,
+        "fixes": ("declip", "dc_remove", "hum_notch", "denoise",
+                  "deplosive", "deess", "loudness", "eq_balance",
+                  "fade_ends"),
+        "params": {
+            "loudness": {"target_lufs": -14.0},
+            "deess": {"reduction_db": 4.0},
+            "denoise": {"strength": 0.35},
+        },
+    },
+    "music": {
+        "label": "Music",
+        "description": "Mix recipe: loudness, balance, fades, -14 LUFS",
+        "premium": True,
+        "fixes": ("declip", "dc_remove", "hum_notch", "denoise",
+                  "loudness", "eq_balance", "fade_ends"),
+        "params": {
+            "loudness": {"target_lufs": -14.0},
+            "denoise": {"strength": 0.5},
+        },
+    },
+}
 
-def tune_up_fixes(findings):
+DEFAULT_PROFILE = "podcast"
+
+
+def list_profiles():
+    """Profile metadata for the UI: {id: {label, description, premium}}."""
+    return {
+        pid: {"label": p["label"], "description": p["description"],
+              "premium": p["premium"]}
+        for pid, p in TUNE_UP_PROFILES.items()
+    }
+
+
+def tune_up_fixes(findings, profile=DEFAULT_PROFILE):
     """Reduce warn findings to an ordered, de-duplicated list of
-    ``{"op":..., "params":..., "label":...}`` fix ops. ``loudness``
-    supersedes ``level`` (it includes peak safety)."""
+    ``{"op":..., "params":..., "label":...}`` fix ops for the profile's
+    recipe. ``loudness`` supersedes ``level`` (it includes peak safety).
+    Detection-derived params (hum frequency, EQ gains) are kept; the
+    profile only overrides its tunable params."""
+    prof = TUNE_UP_PROFILES.get(profile, TUNE_UP_PROFILES[DEFAULT_PROFILE])
+    allowed = set(prof["fixes"])
+    overrides = prof.get("params", {})
     by_op = {}
     for f in findings:
         if f.get("severity") != "warn":
@@ -523,7 +587,12 @@ def tune_up_fixes(findings):
         fix = f.get("fix")
         if not fix:
             continue
-        by_op.setdefault(fix["op"], fix)
-    if "loudness" in by_op:
-        by_op.pop("level", None)
+        op = fix["op"]
+        if op not in allowed:
+            continue
+        params = dict(fix.get("params") or {})
+        for key, val in overrides.get(op, {}).items():
+            params[key] = val
+        by_op.setdefault(op, {"op": op, "params": params,
+                              "label": fix.get("label", op)})
     return [by_op[op] for op in _TUNE_UP_ORDER if op in by_op]

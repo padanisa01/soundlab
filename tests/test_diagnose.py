@@ -92,20 +92,50 @@ class DiagnoseTest(unittest.TestCase):
         f = by_id(diagnose.analyze(sig, SR))["loudness"]
         self.assertEqual(f["severity"], "warn")
 
-    def test_tune_up_order_and_dedupe(self):
+    def test_tune_up_profiles(self):
         findings = [
-            {"id": "level", "severity": "warn",
+            {"id": "sibilance", "severity": "warn",
+             "fix": {"op": "deess", "params": {}, "label": "x"}},
+            {"id": "silence", "severity": "warn",
+             "fix": {"op": "silence_trim", "params": {}, "label": "x"}},
+            {"id": "uneven_level", "severity": "warn",
              "fix": {"op": "level", "params": {}, "label": "x"}},
             {"id": "loudness", "severity": "warn",
              "fix": {"op": "loudness", "params": {}, "label": "x"}},
-            {"id": "hum", "severity": "warn",
-             "fix": {"op": "hum_notch", "params": {}, "label": "x"}},
             {"id": "clipping", "severity": "ok", "fix": None},
         ]
-        ops = diagnose.tune_up_fixes(findings)
-        names = [o["op"] for o in ops]
-        # loudness supersedes level; hum_notch before loudness.
-        self.assertEqual(names, ["hum_notch", "loudness"])
+        names = lambda ps: [o["op"] for o in diagnose.tune_up_fixes(
+            findings, ps)]
+        # Podcast takes everything, canonical order (level before loudness).
+        self.assertEqual(names("podcast"),
+                         ["deess", "silence_trim", "level", "loudness"])
+        # Singing skips silence trim and leveling (dynamics are music).
+        self.assertEqual(names("singing"), ["deess", "loudness"])
+        # Music skips voice-specific fixes too.
+        self.assertEqual(names("music"), ["loudness"])
+
+    def test_tune_up_profile_param_overrides(self):
+        findings = [
+            {"id": "sibilance", "severity": "warn",
+             "fix": {"op": "deess", "params": {}, "label": "x"}},
+            {"id": "hum", "severity": "warn",
+             "fix": {"op": "hum_notch", "params": {"freq_hz": 50.0},
+                     "label": "x"}},
+        ]
+        singing = {o["op"]: o for o in diagnose.tune_up_fixes(
+            findings, "singing")}
+        # Profile overrides the tunable; detection keeps the measured freq.
+        self.assertEqual(singing["deess"]["params"]["reduction_db"], 4.0)
+        self.assertEqual(singing["hum_notch"]["params"]["freq_hz"], 50.0)
+        podcast = {o["op"]: o for o in diagnose.tune_up_fixes(
+            findings, "podcast")}
+        self.assertEqual(podcast["deess"]["params"]["reduction_db"], 8.0)
+
+    def test_list_profiles(self):
+        profiles = diagnose.list_profiles()
+        self.assertEqual(set(profiles), {"podcast", "singing", "music"})
+        self.assertFalse(profiles["podcast"]["premium"])
+        self.assertTrue(profiles["singing"]["premium"])
 
     def test_warn_first_ordering(self):
         sig = sine(440, 1.0, 0.05)  # quiet -> warn; most else ok

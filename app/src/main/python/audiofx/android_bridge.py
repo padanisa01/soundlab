@@ -73,7 +73,9 @@ def _apply_op(samples, sample_rate, op, params, index):
     elif op == "deplosive":
         samples = _repair.deplosive(samples, sample_rate)
     elif op == "deess":
-        samples = _repair.deess(samples, sample_rate)
+        samples = _repair.deess(
+            samples, sample_rate,
+            reduction_db=float(params.get("reduction_db", 8.0)))
     elif op == "level":
         samples = _repair.level(samples, sample_rate)
     elif op == "loudness":
@@ -416,22 +418,32 @@ def diagnose_file(input_wav_path):
     return json.dumps(findings)
 
 
-def tune_up_build(findings_json):
-    """Build the composite tune_up op from diagnose_file's findings JSON.
-    Returns the op as a JSON object string:
-    {"op": "tune_up", "params": {"fixes": [...], "summary": "..."}}."""
+def list_tune_up_profiles():
+    """Profile metadata for the Tune Up recipe picker UI."""
+    return json.dumps(_diagnose.list_profiles())
+
+
+def tune_up_build(findings_json, profile="podcast"):
+    """Build the composite tune_up op from diagnose_file's findings JSON
+    and a profile id ("podcast", "singing", "music"). Returns the op as a
+    JSON object string:
+    {"op": "tune_up", "params": {"fixes": [...], "summary": "...",
+                                 "profile": "podcast"}}."""
     try:
         findings = json.loads(findings_json)
     except (TypeError, ValueError) as exc:
         raise ValueError("findings_json is not valid JSON: %s" % exc)
     if not isinstance(findings, list):
         raise ValueError("findings_json must be a JSON array of findings")
-    fixes = _diagnose.tune_up_fixes(findings)
+    prof = _diagnose.TUNE_UP_PROFILES.get(
+        profile, _diagnose.TUNE_UP_PROFILES[_diagnose.DEFAULT_PROFILE])
+    fixes = _diagnose.tune_up_fixes(findings, profile)
     labels = [f.get("label", f.get("op", "?")) for f in fixes]
-    summary = ("Tune Up: " + ", ".join(labels)) if labels else "Tune Up: nothing to fix"
+    summary = ("Tune Up (%s): " % prof["label"] + ", ".join(labels)) \
+        if labels else "Tune Up (%s): nothing to fix" % prof["label"]
     return json.dumps({
         "op": "tune_up",
-        "params": {"fixes": fixes, "summary": summary},
+        "params": {"fixes": fixes, "summary": summary, "profile": profile},
     })
 
 
