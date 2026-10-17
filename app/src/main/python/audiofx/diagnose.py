@@ -50,6 +50,17 @@ BALANCE_FIX_DB = 2.5            # corrective EQ applied (<= 3 dB)
 _SEVERITY_ORDER = {"warn": 0, "info": 1, "ok": 2}
 
 
+def _arr(s, ctx):
+    """Shared float64 view of the signal. Converted once in analyze() and
+    reused by every check, so a 10-minute file doesn't pay the list->array
+    conversion a dozen times."""
+    x = ctx.get("x")
+    if x is None and _HAVE_NUMPY and s:
+        x = _np.asarray(s, dtype=_np.float64)
+        ctx["x"] = x
+    return x
+
+
 def _finding(fid, severity, title, detail, fix=None, advice=""):
     return {
         "id": fid,
@@ -82,20 +93,19 @@ def _check_clipping(s, sr, ctx):
     longest = 0
     i = 0
     if _HAVE_NUMPY:
-        x = _np.asarray(s)
-        mask = _np.abs(x) >= CLIP_THRESHOLD
+        mask = _np.abs(_arr(s, ctx)) >= CLIP_THRESHOLD
         count = int(_np.sum(mask))
         if count:
-            runs = 1
-            cur = 0
-            for m in mask:
-                if m:
-                    cur += 1
-                    longest = max(longest, cur)
-                else:
-                    if cur:
-                        runs += 1
-                    cur = 0
+            # Run boundaries via diff: no Python loop over the signal.
+            d = _np.diff(mask.astype(_np.int8))
+            starts = _np.where(d == 1)[0] + 1
+            ends = _np.where(d == -1)[0] + 1
+            if mask[0]:
+                starts = _np.concatenate((_np.array([0]), starts))
+            if mask[-1]:
+                ends = _np.concatenate((ends, _np.array([len(mask)])))
+            runs = len(starts)
+            longest = int(_np.max(ends - starts))
     else:
         while i < n:
             if abs(s[i]) >= CLIP_THRESHOLD:
@@ -122,7 +132,10 @@ def _check_clipping(s, sr, ctx):
 
 
 def _check_level(s, sr, ctx):
-    peak = max([abs(v) for v in s]) if s else 0.0
+    if _HAVE_NUMPY and s:
+        peak = float(_np.max(_np.abs(_arr(s, ctx))))
+    else:
+        peak = max([abs(v) for v in s]) if s else 0.0
     peak_db = _db(peak)
     if peak_db < QUIET_PEAK_DB:
         return _finding(
@@ -137,7 +150,10 @@ def _check_level(s, sr, ctx):
 
 
 def _check_dc(s, sr, ctx):
-    mean = sum(s) / len(s) if s else 0.0
+    if _HAVE_NUMPY and s:
+        mean = float(_np.mean(_arr(s, ctx)))
+    else:
+        mean = sum(s) / len(s) if s else 0.0
     if abs(mean) > DC_THRESHOLD:
         return _finding(
             "dc_offset", "warn", "DC offset detected",
@@ -150,11 +166,12 @@ def _check_dc(s, sr, ctx):
                     "Signal mean is %+.4f." % mean, None, "")
 
 
-def _window_flags(s, sr, win_sec, db_thresh):
+def _window_flags(s, sr, win_sec, db_thresh, ctx=None):
     win = max(1, int(win_sec * sr))
     thresh = 10.0 ** (db_thresh / 20.0)
     if _HAVE_NUMPY:
-        x = _np.asarray(s, dtype=_np.float64)
+        x = _arr(s, ctx) if ctx is not None else _np.asarray(
+            s, dtype=_np.float64)
         n = (x.size // win) * win
         if n == 0:
             return [], win
@@ -169,7 +186,7 @@ def _window_flags(s, sr, win_sec, db_thresh):
 
 
 def _check_silence(s, sr, ctx):
-    flags, win = _window_flags(s, sr, 0.05, SILENCE_DB)
+    flags, win = _window_flags(s, sr, 0.05, SILENCE_DB, ctx)
     if not flags:
         return None
     total = sum(flags) * win / sr
@@ -238,10 +255,10 @@ def _check_hum(s, sr, ctx):
 
 
 def _check_noise_floor(s, sr, ctx):
-    flags, win = _window_flags(s, sr, 0.05, SILENCE_DB)
+    flags, win = _window_flags(s, sr, 0.05, SILENCE_DB, ctx)
     if not flags or not _HAVE_NUMPY:
         return None
-    x = _np.asarray(s, dtype=_np.float64)
+    x = _arr(s, ctx)
     n = (x.size // win) * win
     if n == 0:
         return None
@@ -265,7 +282,7 @@ def _check_plosive(s, sr, ctx):
     if not _HAVE_NUMPY:
         return None
     from . import repair
-    x = _np.asarray(s, dtype=_np.float64)
+    x = _arr(s, ctx)
     n = x.size
     if n == 0:
         return None
@@ -277,13 +294,11 @@ def _check_plosive(s, sr, ctx):
     mask = env > thresh
     # Count distinct bursts (merge neighbors within 100 ms).
     gap = int(0.1 * sr)
-    count = 0
-    last = -10 * gap
     idx = _np.where(mask)[0]
-    for j in idx:
-        if j - last > gap:
-            count += 1
-        last = j
+    if idx.size == 0:
+        count = 0
+    else:
+        count = 1 + int(_np.sum(_np.diff(idx) > gap))
     if count >= PLOSIVE_MIN_COUNT:
         return _finding(
             "plosive", "warn", "Plosive thumps",
@@ -299,7 +314,7 @@ def _check_sibilance(s, sr, ctx):
     if not _HAVE_NUMPY:
         return None
     from . import repair
-    x = _np.asarray(s, dtype=_np.float64)
+    x = _arr(s, ctx)
     n = x.size
     if n == 0:
         return None
@@ -327,7 +342,7 @@ def _check_sibilance(s, sr, ctx):
 def _check_uneven_level(s, sr, ctx):
     win = max(1, int(0.5 * sr))
     if _HAVE_NUMPY:
-        x = _np.asarray(s, dtype=_np.float64)
+        x = _arr(s, ctx)
         nw = max(1, x.size // win)
         rms = _np.sqrt(_np.mean(
             x[: nw * win].reshape(nw, win) ** 2, axis=1))
@@ -362,13 +377,21 @@ def _check_abrupt_ends(s, sr, ctx):
     if n == 0:
         return None
     edge = max(1, int(0.05 * sr))
-    peak = max([abs(v) for v in s])
+    if _HAVE_NUMPY:
+        ax = _np.abs(_arr(s, ctx))
+        peak = float(_np.max(ax))
+        edge_start = float(_np.max(ax[:edge]))
+        edge_end = float(_np.max(ax[-edge:]))
+    else:
+        peak = max([abs(v) for v in s])
+        edge_start = max([abs(v) for v in s[:edge]])
+        edge_end = max([abs(v) for v in s[-edge:]])
     if peak == 0:
         return None
     abrupt = []
-    if max([abs(v) for v in s[:edge]]) > END_ABRUPT_RATIO * peak:
+    if edge_start > END_ABRUPT_RATIO * peak:
         abrupt.append("start")
-    if max([abs(v) for v in s[-edge:]]) > END_ABRUPT_RATIO * peak:
+    if edge_end > END_ABRUPT_RATIO * peak:
         abrupt.append("end")
     if abrupt:
         return _finding(
@@ -456,6 +479,7 @@ def analyze(samples, sample_rate):
     s = list(samples)
     ctx = {}
     if _HAVE_NUMPY and len(s) > 0:
+        ctx["x"] = _np.asarray(s, dtype=_np.float64)
         ctx["spectrum"] = _spectrum(s, sample_rate)
     findings = []
     for check in _CHECKS:
