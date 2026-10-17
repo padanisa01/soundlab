@@ -1214,15 +1214,19 @@ public class MainActivity extends Activity {
     /** Run the diagnostics on the current output, then show the report. */
     private void onDiagnoseClicked() {
         final String entryId = currentEntryId;
-        if (entryId == null || currentOutputPath == null
-                || !new File(currentOutputPath).exists()) {
+        // Same fallback playback uses: the render when there is one,
+        // otherwise the pristine input (fresh picks have no render yet).
+        String path = (currentOutputPath != null
+                && new File(currentOutputPath).exists()) ? currentOutputPath
+                        : inputPath;
+        if (entryId == null || path == null || !new File(path).exists()) {
             setStatus("Open or record audio first.");
             return;
         }
         setBusy(true);
         setStatus("Diagnosing...");
         waveformView.startProgressAnimation();
-        final String path = currentOutputPath;
+        final String diagPath = path;
         new Thread(() -> {
             try {
                 if (!Python.isStarted()) {
@@ -1230,7 +1234,7 @@ public class MainActivity extends Activity {
                 }
                 final String findingsJson = Python.getInstance()
                         .getModule("audiofx.android_bridge")
-                        .callAttr("diagnose_file", path).toString();
+                        .callAttr("diagnose_file", diagPath).toString();
                 runOnUiThread(() -> {
                     setBusy(false);
                     waveformView.finishProgressAnimation();
