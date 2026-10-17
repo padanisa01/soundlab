@@ -20,6 +20,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.OpenableColumns;
+import android.util.Log;
 import android.view.MotionEvent;
 import android.view.View;
 import android.widget.Button;
@@ -325,7 +326,7 @@ public class MainActivity extends Activity {
         switchAutoNorm = findViewById(R.id.switch_autonorm);
         SharedPreferences prefs = getSharedPreferences("soundlab", MODE_PRIVATE);
         switchAgc.setChecked(prefs.getBoolean("mic_agc", false));
-        switchNs.setChecked(prefs.getBoolean("mic_ns", false));
+        switchNs.setChecked(prefs.getBoolean("mic_ns", true));
         switchLiveFx.setChecked(prefs.getBoolean("mic_livefx", false));
         switchAutoNorm.setChecked(prefs.getBoolean("mic_autonorm", true));
         switchAgc.setOnCheckedChangeListener((b, on) ->
@@ -2418,8 +2419,15 @@ public class MainActivity extends Activity {
                         try {
                             libraryDb.logExport(currentEntryId, savedAs,
                                     saveFolderName(), undoDepth());
+                        } catch (Exception e) {
+                            Log.w("AudioMechanic", "logExport failed", e);
+                        }
+                        // Separate try: an export-logging failure must not
+                        // block the project rename below.
+                        try {
                             maybeAdoptExportName(currentEntryId, savedAs);
-                        } catch (Exception ignored) {
+                        } catch (Exception e) {
+                            Log.w("AudioMechanic", "adoptExportName failed", e);
                         }
                     }
                 });
