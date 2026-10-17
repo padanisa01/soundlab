@@ -134,6 +134,21 @@
                     android:text="Share"
                     android:textColor="@color/sl_txt"
                     android:textSize="12.5sp" />
+
+                <Button
+                    android:id="@+id/btn_diagnose"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_ghost"
+                    android:drawableTop="@drawable/ic_diagnose"
+                    android:drawablePadding="6dp"
+                    android:gravity="center"
+                    android:padding="10dp"
+                    android:text="Diagnose"
+                    android:textColor="@color/sl_txt"
+                    android:textSize="12.5sp" />
             </LinearLayout>
 
             <!-- Waveform card -->

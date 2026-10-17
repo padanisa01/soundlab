@@ -146,6 +146,25 @@ or the plan changes.
   selection window when one is set. The toast reports the
   window Python actually applied, e.g. `(applied 10.0s–20.0s)`.
 
+### Diagnostics and Tune Up
+- The Diagnose button (track card) runs twelve checks over the current
+  audio on a background thread and shows a report card: clipping, level,
+  DC offset, dead air, mains hum (50/60 Hz), noise floor, plosives,
+  sibilance, uneven level, abrupt ends, loudness (LUFS), tonal balance.
+- Every finding carries a one-tap Fix (a renderable library op, undoable
+  like any other) and a "Tip" for next time. Clipping and high noise
+  floor are labeled honestly as partial fixes ("reduce", not "remove");
+  room reverb is advice-only, never faked.
+- Tune Up applies all observed fixes as one composite `tune_up` op in
+  canonical DSP order (declip, DC, hum, denoise, de-plosive, de-esser,
+  silence trim, loudness, EQ, fades), stored as a single undoable
+  history entry with a summary label. After each fix the diagnosis
+  re-runs so findings visibly turn green.
+- Python: `audiofx/diagnose.py` (checks + `tune_up_fixes`), `audiofx/repair.py`
+  (11 fix ops), wired into `render_chain` via a shared `_apply_op`
+  dispatcher; `diagnose_file` / `tune_up_build` entry points in
+  `android_bridge.py`.
+
 ### Library of recordings
 - Every recording becomes a durable project in `filesDir/library/`:
   one immutable pristine WAV (`takes/<uuid>.wav`) plus an ordered,

@@ -46,6 +46,7 @@ import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
 
 import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -81,6 +82,7 @@ public class MainActivity extends Activity {
     private Button btnOpen;
     private Button btnSave2;
     private Button btnShare;
+    private Button btnDiagnose;
     private TextView toastView;
     private final Runnable hideToast = () -> {
         toastView.animate().alpha(0f).setDuration(250)
@@ -148,6 +150,7 @@ public class MainActivity extends Activity {
     /** Peak accumulator fed by the capture threads; drained by recTick. */
     private volatile float livePeakAcc;
     private android.app.AlertDialog saveDialog;
+    private android.app.AlertDialog diagDialog;
     private TextView saveFolderLabel;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Runnable scheduledStop;
@@ -308,9 +311,11 @@ public class MainActivity extends Activity {
         btnOpen = findViewById(R.id.btn_open);
         btnSave2 = findViewById(R.id.btn_save2);
         btnShare = findViewById(R.id.btn_share);
+        btnDiagnose = findViewById(R.id.btn_diagnose);
         btnOpen.setOnClickListener(v -> pickAudio());
         btnSave2.setOnClickListener(v -> onSaveClicked());
         btnShare.setOnClickListener(v -> shareAudio());
+        btnDiagnose.setOnClickListener(v -> onDiagnoseClicked());
         updateTrackActions();
         btnNormalize = findViewById(R.id.btn_normalize);
         btnNormalize.setOnClickListener(v -> normalizeAudio());
@@ -494,6 +499,8 @@ public class MainActivity extends Activity {
         btnSave2.setAlpha(hasTrack ? 1f : 0.4f);
         btnShare.setEnabled(hasTrack);
         btnShare.setAlpha(hasTrack ? 1f : 0.4f);
+        btnDiagnose.setEnabled(hasTrack);
+        btnDiagnose.setAlpha(hasTrack ? 1f : 0.4f);
     }
 
     /** Project status bar: entry/file name, or an untitled placeholder. */
@@ -1018,7 +1025,13 @@ public class MainActivity extends Activity {
     /** True for ops that render_chain executes (display-only ops excluded). */
     private static boolean isRenderableOp(String opType) {
         return "fx".equals(opType) || "normalize".equals(opType)
-                || "trim".equals(opType) || "join".equals(opType);
+                || "trim".equals(opType) || "join".equals(opType)
+                || "dc_remove".equals(opType) || "fade_ends".equals(opType)
+                || "silence_trim".equals(opType) || "hum_notch".equals(opType)
+                || "declip".equals(opType) || "denoise".equals(opType)
+                || "deplosive".equals(opType) || "deess".equals(opType)
+                || "level".equals(opType) || "loudness".equals(opType)
+                || "eq_balance".equals(opType) || "tune_up".equals(opType);
     }
 
     private boolean hasRenderableOps(String entryId) {
@@ -1193,6 +1206,213 @@ public class MainActivity extends Activity {
                     setBusy(false);
                     waveformView.clearProgress();
                     updateUndoBadge();
+                });
+            }
+        }).start();
+    }
+
+    /** Run the diagnostics on the current output, then show the report. */
+    private void onDiagnoseClicked() {
+        final String entryId = currentEntryId;
+        if (entryId == null || currentOutputPath == null
+                || !new File(currentOutputPath).exists()) {
+            setStatus("Open or record audio first.");
+            return;
+        }
+        setBusy(true);
+        setStatus("Diagnosing...");
+        waveformView.startProgressAnimation();
+        final String path = currentOutputPath;
+        new Thread(() -> {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                final String findingsJson = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("diagnose_file", path).toString();
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    waveformView.finishProgressAnimation();
+                    showDiagnosisReport(findingsJson);
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    waveformView.clearProgress();
+                    setStatus("Diagnosis failed: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    /** The mechanic's report card: findings with per-issue Fix and Tune Up. */
+    private void showDiagnosisReport(final String findingsJson) {
+        final float dp = getResources().getDisplayMetrics().density;
+        JSONArray findings;
+        try {
+            findings = new JSONArray(findingsJson);
+        } catch (Exception e) {
+            setStatus("Diagnosis failed: bad report.");
+            return;
+        }
+        int warnCount = 0;
+        boolean hasFixable = false;
+        for (int i = 0; i < findings.length(); i++) {
+            JSONObject f = findings.optJSONObject(i);
+            if (f == null) {
+                continue;
+            }
+            if ("warn".equals(f.optString("severity"))) {
+                warnCount++;
+                if (!f.isNull("fix")) {
+                    hasFixable = true;
+                }
+            }
+        }
+
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (16 * dp);
+        list.setPadding(pad, pad, pad, pad);
+
+        TextView header = new TextView(this);
+        header.setText(warnCount == 0 ? "All clear. No issues found."
+                : warnCount + (warnCount == 1 ? " issue" : " issues")
+                        + " found.");
+        header.setTextColor(getColor(R.color.sl_txt));
+        header.setTextSize(16);
+        header.setPadding(0, 0, 0, (int) (12 * dp));
+        list.addView(header);
+
+        for (int i = 0; i < findings.length(); i++) {
+            final JSONObject f = findings.optJSONObject(i);
+            if (f == null) {
+                continue;
+            }
+            String severity = f.optString("severity", "info");
+            int dotColor = "warn".equals(severity) ? R.color.sl_red
+                    : "ok".equals(severity) ? R.color.sl_teal2 : R.color.sl_org;
+
+            LinearLayout titleRow = new LinearLayout(this);
+            titleRow.setOrientation(LinearLayout.HORIZONTAL);
+            titleRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            TextView dot = new TextView(this);
+            dot.setText("\u25cf ");
+            dot.setTextColor(getColor(dotColor));
+            dot.setTextSize(14);
+            titleRow.addView(dot);
+            TextView title = new TextView(this);
+            title.setText(f.optString("title", ""));
+            title.setTextColor(getColor(R.color.sl_txt));
+            title.setTextSize(14);
+            title.setTypeface(null, android.graphics.Typeface.BOLD);
+            titleRow.addView(title);
+            list.addView(titleRow);
+
+            TextView detail = new TextView(this);
+            detail.setText(f.optString("detail", ""));
+            detail.setTextColor(getColor(R.color.sl_mut));
+            detail.setTextSize(13);
+            detail.setPadding((int) (20 * dp), (int) (2 * dp), 0, 0);
+            list.addView(detail);
+
+            String advice = f.optString("advice", "");
+            if (!advice.isEmpty()) {
+                TextView tip = new TextView(this);
+                tip.setText("Tip: " + advice);
+                tip.setTextColor(getColor(R.color.sl_mut));
+                tip.setTextSize(12);
+                tip.setPadding((int) (20 * dp), (int) (2 * dp), 0, 0);
+                list.addView(tip);
+            }
+
+            final JSONObject fix = f.optJSONObject("fix");
+            if (fix != null) {
+                Button fixBtn = new Button(this);
+                fixBtn.setText(fix.optString("label", "Fix"));
+                fixBtn.setTextSize(12);
+                fixBtn.setTextColor(getColor(R.color.sl_teal2));
+                fixBtn.setBackgroundResource(R.drawable.bg_ghost);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+                lp.setMargins((int) (20 * dp), (int) (6 * dp), 0,
+                        (int) (10 * dp));
+                fixBtn.setLayoutParams(lp);
+                fixBtn.setPadding((int) (14 * dp), (int) (4 * dp),
+                        (int) (14 * dp), (int) (4 * dp));
+                fixBtn.setOnClickListener(v -> {
+                    if (diagDialog != null) {
+                        diagDialog.dismiss();
+                    }
+                    applyLibraryOp(fix.optString("op"),
+                            fix.optJSONObject("params").toString(),
+                            fix.optString("label"),
+                            "Applying fix...", "Fix applied.",
+                            () -> onDiagnoseClicked());
+                });
+                list.addView(fixBtn);
+            } else {
+                android.view.View spacer = new android.view.View(this);
+                spacer.setLayoutParams(new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        (int) (10 * dp)));
+                list.addView(spacer);
+            }
+        }
+
+        if (hasFixable) {
+            Button tuneUpBtn = new Button(this);
+            tuneUpBtn.setText("Tune Up: fix all issues");
+            tuneUpBtn.setTextColor(getColor(R.color.sl_teal2));
+            tuneUpBtn.setBackgroundResource(R.drawable.bg_ghost);
+            tuneUpBtn.setPadding(0, (int) (10 * dp), 0, (int) (10 * dp));
+            tuneUpBtn.setOnClickListener(v -> {
+                if (diagDialog != null) {
+                    diagDialog.dismiss();
+                }
+                runTuneUp(findingsJson);
+            });
+            list.addView(tuneUpBtn);
+        }
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(list);
+        diagDialog = new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+                .setTitle("Diagnosis")
+                .setView(scroll)
+                .setNegativeButton("Close", null)
+                .setOnDismissListener(d -> diagDialog = null)
+                .show();
+        diagDialog.getButton(AlertDialog.BUTTON_NEGATIVE)
+                .setTextColor(getColor(R.color.sl_mut));
+    }
+
+    /** One-button Tune Up: build the composite op and apply it. */
+    private void runTuneUp(final String findingsJson) {
+        setBusy(true);
+        setStatus("Building tune-up...");
+        new Thread(() -> {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                final String tuneUpJson = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("tune_up_build", findingsJson).toString();
+                final JSONObject params =
+                        new JSONObject(tuneUpJson).getJSONObject("params");
+                final String summary = params.optString("summary", "Tune Up");
+                runOnUiThread(() -> applyLibraryOp("tune_up",
+                        params.toString(), summary,
+                        "Tuning up...", "Tune-up complete. "
+                                + summary.replace("Tune Up: ", ""),
+                        () -> onDiagnoseClicked()));
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    setStatus("Tune-up failed: " + e.getMessage());
                 });
             }
         }).start();

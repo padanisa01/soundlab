@@ -9,6 +9,8 @@ import math
 import os
 import wave
 
+from . import diagnose as _diagnose
+from . import repair as _repair
 from .effects import Echo, Reverb, Warmth
 from .pipeline import (
     EffectChain,
@@ -22,6 +24,91 @@ from .pipeline import (
 #: DSP engine version. Java stores this per library entry and refuses to
 #: silently re-render when the engine changes.
 DSP_VERSION = "1"
+
+
+def _apply_op(samples, sample_rate, op, params, index):
+    """Apply one render_chain op. Shared by the main loop and the tune_up
+    expansion so the two can never drift apart."""
+    if op == "fx":
+        samples, _, _ = _apply_fx(
+            samples, sample_rate,
+            warmth=params.get("warmth", 0.5),
+            reverb_preset=params.get("reverb_preset", "studio"),
+            echo=params.get("echo", 0.3),
+            start_sec=params.get("start_sec"),
+            end_sec=params.get("end_sec"))
+    elif op == "normalize":
+        samples, _ = _apply_normalize(
+            samples, sample_rate,
+            target_db=params.get("target_db", -1.0),
+            percentile=params.get("percentile", 99.0))
+    elif op == "trim":
+        samples, _, _ = _apply_trim(
+            samples, sample_rate,
+            params.get("start_sec"), params.get("end_sec"))
+    elif op == "join":
+        samples, _, _ = _apply_join(
+            samples, sample_rate,
+            params.get("start_sec"), params.get("end_sec"))
+    elif op == "dc_remove":
+        samples = _repair.dc_remove(samples)
+    elif op == "fade_ends":
+        samples = _repair.fade_ends(
+            samples, sample_rate,
+            fade_sec=float(params.get("fade_sec", 0.02)))
+    elif op == "silence_trim":
+        samples = _repair.silence_trim(
+            samples, sample_rate,
+            threshold_db=float(params.get("threshold_db", -45.0)),
+            min_silence_sec=float(params.get("min_silence_sec", 0.5)))
+    elif op == "hum_notch":
+        samples = _repair.hum_notch(
+            samples, sample_rate, float(params.get("freq_hz", 60.0)))
+    elif op == "declip":
+        samples = _repair.declip(samples)
+    elif op == "denoise":
+        samples = _repair.denoise(
+            samples, sample_rate,
+            strength=float(params.get("strength", 0.5)))
+    elif op == "deplosive":
+        samples = _repair.deplosive(samples, sample_rate)
+    elif op == "deess":
+        samples = _repair.deess(samples, sample_rate)
+    elif op == "level":
+        samples = _repair.level(samples, sample_rate)
+    elif op == "loudness":
+        samples = _repair.loudness_normalize(
+            samples, sample_rate,
+            target_lufs=float(params.get("target_lufs", -16.0)))
+    elif op == "eq_balance":
+        samples = _repair.eq_balance(
+            samples, sample_rate,
+            low_gain_db=float(params.get("low_gain_db", 0.0)),
+            high_gain_db=float(params.get("high_gain_db", 0.0)))
+    elif op == "tune_up":
+        fixes = params.get("fixes")
+        if not isinstance(fixes, list):
+            raise ValueError("op #%d tune_up params.fixes must be an array"
+                             % index)
+        for j, fix in enumerate(fixes):
+            if not isinstance(fix, dict):
+                raise ValueError("op #%d tune_up fix #%d is not an object"
+                                 % (index, j))
+            sub = fix.get("op")
+            sub_params = fix.get("params") or {}
+            if not isinstance(sub_params, dict):
+                raise ValueError("op #%d tune_up fix #%d params invalid"
+                                 % (index, j))
+            if sub == "tune_up":
+                raise ValueError("tune_up ops cannot nest")
+            samples = _apply_op(samples, sample_rate, sub, sub_params, index)
+    elif op == "livefx":
+        # Live-FX takes are baked into the pristine; the livefx op is a
+        # display-only label and must never be re-run.
+        raise ValueError("livefx ops are never re-rendered in render_chain")
+    else:
+        raise ValueError("unknown op %r" % (op,))
+    return samples
 
 
 def list_reverb_presets():
@@ -278,12 +365,16 @@ def render_chain(pristine_path, ops_json, output_path):
     """Render a library op chain: fold ops over pristine in float, write
     the 16-bit WAV once.
 
-    ``ops_json`` is a JSON array of {"op": "fx"|"normalize"|"trim"|"join",
-    "params": {...}} (params per the library spec section 6). Ops apply in
-    sequence in float; window positions refer to the current buffer at
-    apply time, exactly like stacked application. ``livefx`` ops are never
-    passed in (display-only): they raise ValueError, as do unknown ops and
-    invalid parameters (same validation as the file-level functions).
+    ``ops_json`` is a JSON array of {"op": <type>, "params": {...}} where
+    <type> is one of "fx", "normalize", "trim", "join", the repair ops
+    ("dc_remove", "fade_ends", "silence_trim", "hum_notch", "declip",
+    "denoise", "deplosive", "deess", "level", "loudness", "eq_balance"),
+    or the composite "tune_up" (whose params.fixes is an array of repair
+    ops). Ops apply in sequence in float; window positions refer to the
+    current buffer at apply time, exactly like stacked application.
+    ``livefx`` ops are never passed in (display-only): they raise
+    ValueError, as do unknown ops and invalid parameters (same validation
+    as the file-level functions).
 
     Returns {"ok": True, "output_path": ..., "duration_s": ..., "sample_rate": ...}.
     """
@@ -304,33 +395,7 @@ def render_chain(pristine_path, ops_json, output_path):
         params = entry.get("params") or {}
         if not isinstance(params, dict):
             raise ValueError("op #%d params must be an object" % i)
-        if op == "fx":
-            samples, _, _ = _apply_fx(
-                samples, sample_rate,
-                warmth=params.get("warmth", 0.5),
-                reverb_preset=params.get("reverb_preset", "studio"),
-                echo=params.get("echo", 0.3),
-                start_sec=params.get("start_sec"),
-                end_sec=params.get("end_sec"))
-        elif op == "normalize":
-            samples, _ = _apply_normalize(
-                samples, sample_rate,
-                target_db=params.get("target_db", -1.0),
-                percentile=params.get("percentile", 99.0))
-        elif op == "trim":
-            samples, _, _ = _apply_trim(
-                samples, sample_rate,
-                params.get("start_sec"), params.get("end_sec"))
-        elif op == "join":
-            samples, _, _ = _apply_join(
-                samples, sample_rate,
-                params.get("start_sec"), params.get("end_sec"))
-        elif op == "livefx":
-            # Live-FX takes are baked into the pristine; the livefx op is a
-            # display-only label and must never be re-run.
-            raise ValueError("livefx ops are never re-rendered in render_chain")
-        else:
-            raise ValueError("unknown op %r" % (op,))
+        samples = _apply_op(samples, sample_rate, op, params, i)
     write_wav(output_path, samples, sample_rate)
     return {
         "ok": True,
@@ -338,6 +403,36 @@ def render_chain(pristine_path, ops_json, output_path):
         "duration_s": round(len(samples) / sample_rate, 2),
         "sample_rate": sample_rate,
     }
+
+
+def diagnose_file(input_wav_path):
+    """Run the diagnostics over a WAV file. Returns a JSON array of
+    findings (see diagnose.analyze). Runs on a background thread from
+    Java; a multi-minute file takes a few seconds."""
+    if not os.path.isfile(input_wav_path):
+        raise ValueError("input file not found: %s" % input_wav_path)
+    samples, sample_rate = read_wav_mono(input_wav_path)
+    findings = _diagnose.analyze(samples, sample_rate)
+    return json.dumps(findings)
+
+
+def tune_up_build(findings_json):
+    """Build the composite tune_up op from diagnose_file's findings JSON.
+    Returns the op as a JSON object string:
+    {"op": "tune_up", "params": {"fixes": [...], "summary": "..."}}."""
+    try:
+        findings = json.loads(findings_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("findings_json is not valid JSON: %s" % exc)
+    if not isinstance(findings, list):
+        raise ValueError("findings_json must be a JSON array of findings")
+    fixes = _diagnose.tune_up_fixes(findings)
+    labels = [f.get("label", f.get("op", "?")) for f in fixes]
+    summary = ("Tune Up: " + ", ".join(labels)) if labels else "Tune Up: nothing to fix"
+    return json.dumps({
+        "op": "tune_up",
+        "params": {"fixes": fixes, "summary": summary},
+    })
 
 
 def live_chain_create(warmth, reverb_preset, echo, sample_rate,
