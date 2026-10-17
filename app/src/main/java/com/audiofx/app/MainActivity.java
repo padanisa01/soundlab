@@ -73,7 +73,6 @@ public class MainActivity extends Activity {
     private static final int PICK_FOLDER = 1002;
     private static final int REQ_RECORD_AUDIO = 2001;
 
-    private LinearLayout trackCard;
     private TextView tvProjectName;
     private ImageButton btnMenu;
     private AdView adView;
@@ -302,7 +301,6 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        trackCard = findViewById(R.id.track_card);
         tvProjectName = findViewById(R.id.tv_project_name);
         btnMenu = findViewById(R.id.btn_menu);
         btnMenu.setOnClickListener(v -> showMainMenu());
@@ -312,6 +310,7 @@ public class MainActivity extends Activity {
         btnOpen.setOnClickListener(v -> pickAudio());
         btnSave2.setOnClickListener(v -> onSaveClicked());
         btnShare.setOnClickListener(v -> shareAudio());
+        updateTrackActions();
         btnNormalize = findViewById(R.id.btn_normalize);
         btnNormalize.setOnClickListener(v -> normalizeAudio());
         toastView = findViewById(R.id.toast_view);
@@ -484,9 +483,20 @@ public class MainActivity extends Activity {
         }
     }
 
+    /**
+     * The Open/Save/Share bar is always visible. Save and Share are enabled
+     * only when a track is loaded; Open is always available.
+     */
+    private void updateTrackActions() {
+        boolean hasTrack = inputPath != null && new File(inputPath).exists();
+        btnSave2.setEnabled(hasTrack);
+        btnSave2.setAlpha(hasTrack ? 1f : 0.4f);
+        btnShare.setEnabled(hasTrack);
+        btnShare.setAlpha(hasTrack ? 1f : 0.4f);
+    }
+
     /** Project status bar: entry/file name, or an untitled placeholder. */
-    private void updateProjectName() {
-        String name;
+    private void updateProjectName() {        String name;
         boolean untitled = false;
         if (currentEntryId != null) {
             String entryName = null;
@@ -926,7 +936,7 @@ public class MainActivity extends Activity {
             tvTimeCur.setText("0:00");
             tvTimeTot.setText("0:00");
             tvSource.setVisibility(View.GONE);
-            trackCard.setVisibility(View.VISIBLE);
+            updateTrackActions();
             updateProjectName();
             setStatus("Ready. Adjust the effects and tap Apply.");
             loadWaveform();
@@ -984,7 +994,7 @@ public class MainActivity extends Activity {
         tvTimeCur.setText("0:00");
         tvTimeTot.setText("0:00");
         tvSource.setVisibility(View.GONE);
-        trackCard.setVisibility(View.VISIBLE);
+        updateTrackActions();
         updateProjectName();
         int depth = undoDepth();
         setStatus(depth > 0

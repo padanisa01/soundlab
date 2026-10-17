@@ -82,8 +82,7 @@
                 android:background="@drawable/bg_card"
                 android:gravity="center_vertical"
                 android:orientation="horizontal"
-                android:padding="10dp"
-                android:visibility="gone">
+                android:padding="10dp">
 
                 <Button
                     android:id="@+id/btn_open"
