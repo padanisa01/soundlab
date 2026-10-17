@@ -87,9 +87,16 @@ or the plan changes.
 - **Auto-naming**: when a recording still has its auto-generated
   "Recording ..." name, exporting with a user-chosen filename renames
   the project to match. Manual renames are never overridden.
-- **Advanced mic settings**: AGC, noise suppression, live effects and
-  auto-normalize live in a collapsible panel, collapsed by default
-  (expansion persisted).
+- **Advanced mic settings**: AGC, noise suppression, limiter, live
+  effects and auto-normalize live in a collapsible panel, collapsed by
+  default (expansion persisted).
+- **Limiter** (on by default): lookahead peak limiter on the mic capture
+  path (both dry and live-FX recording), ceiling -1 dBFS, 5 ms lookahead,
+  linked stereo — loud peaks can never clip a take, and it is
+  bit-transparent when nothing clips. Python reference
+  (`audiofx/limiter.py`, unit-tested incl. zero-overshoot guarantee)
+  ported 1:1 to `LiveLimiter.java`; differential check passes
+  bit-for-bit.
 - **Auto-normalize takes** toggle (on by default): recordings are
   peak-normalized to -1 dBFS right after the take, as an undoable
   history step — the raw mic capture stays recoverable via Undo.
