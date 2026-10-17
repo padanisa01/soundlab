@@ -2,6 +2,7 @@
 <resources>
     <!-- SoundLab dark studio theme (SL-2). Teal = selection/processing,
          orange = playback. Never mix them. -->
+    <color name="ic_launcher_background">#222124</color>
     <color name="sl_bg">#0b0d10</color>
     <color name="sl_phone">#14171c</color>
     <color name="sl_card">#1c2128</color>

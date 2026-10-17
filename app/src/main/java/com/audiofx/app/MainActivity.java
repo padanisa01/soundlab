@@ -20,6 +20,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.OpenableColumns;
+import android.util.Log;
 import android.view.MotionEvent;
 import android.view.View;
 import android.widget.Button;
@@ -73,12 +74,13 @@ public class MainActivity extends Activity {
     private static final int PICK_FOLDER = 1002;
     private static final int REQ_RECORD_AUDIO = 2001;
 
-    private LinearLayout trackCard;
-    private TextView tvTrackName;
-    private TextView tvTrackMeta;
     private TextView tvProjectName;
     private ImageButton btnMenu;
-    private Button btnChange;
+    private AdView adView;
+    private PremiumBilling premiumBilling;
+    private Button btnOpen;
+    private Button btnSave2;
+    private Button btnShare;
     private TextView toastView;
     private final Runnable hideToast = () -> {
         toastView.animate().alpha(0f).setDuration(250)
@@ -300,13 +302,16 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        trackCard = findViewById(R.id.track_card);
-        tvTrackName = findViewById(R.id.tv_track_name);
-        tvTrackMeta = findViewById(R.id.tv_track_meta);
         tvProjectName = findViewById(R.id.tv_project_name);
         btnMenu = findViewById(R.id.btn_menu);
         btnMenu.setOnClickListener(v -> showMainMenu());
-        btnChange = findViewById(R.id.btn_change);
+        btnOpen = findViewById(R.id.btn_open);
+        btnSave2 = findViewById(R.id.btn_save2);
+        btnShare = findViewById(R.id.btn_share);
+        btnOpen.setOnClickListener(v -> pickAudio());
+        btnSave2.setOnClickListener(v -> onSaveClicked());
+        btnShare.setOnClickListener(v -> shareAudio());
+        updateTrackActions();
         btnNormalize = findViewById(R.id.btn_normalize);
         btnNormalize.setOnClickListener(v -> normalizeAudio());
         toastView = findViewById(R.id.toast_view);
@@ -321,7 +326,7 @@ public class MainActivity extends Activity {
         switchAutoNorm = findViewById(R.id.switch_autonorm);
         SharedPreferences prefs = getSharedPreferences("soundlab", MODE_PRIVATE);
         switchAgc.setChecked(prefs.getBoolean("mic_agc", false));
-        switchNs.setChecked(prefs.getBoolean("mic_ns", false));
+        switchNs.setChecked(prefs.getBoolean("mic_ns", true));
         switchLiveFx.setChecked(prefs.getBoolean("mic_livefx", false));
         switchAutoNorm.setChecked(prefs.getBoolean("mic_autonorm", true));
         switchAgc.setOnCheckedChangeListener((b, on) ->
@@ -373,7 +378,6 @@ public class MainActivity extends Activity {
         seekWarmth.setOnSeekBarChangeListener(sliderListener());
         seekEcho.setOnSeekBarChangeListener(sliderListener());
         updateSliderLabels();
-        btnChange.setOnClickListener(v -> pickAudio());
         findViewById(R.id.btn_zoom_in).setOnClickListener(v -> waveformView.zoomBy(1.4f));
         findViewById(R.id.btn_zoom_out).setOnClickListener(v -> waveformView.zoomBy(1f / 1.4f));
         btnSelClear.setOnClickListener(v -> waveformView.clearSelection());
@@ -406,10 +410,22 @@ public class MainActivity extends Activity {
         refreshHistoryPanel();
 
         // AdMob banner (test ad unit ID until the real one is configured).
+        // Premium users never see ads.
         MobileAds.initialize(this, status -> {
         });
-        AdView adView = findViewById(R.id.ad_view);
-        adView.loadAd(new AdRequest.Builder().build());
+        adView = findViewById(R.id.ad_view);
+        if (isPremium()) {
+            adView.setVisibility(View.GONE);
+        } else {
+            adView.loadAd(new AdRequest.Builder().build());
+        }
+        premiumBilling = new PremiumBilling(this, premium -> {
+            if (premium && adView != null) {
+                adView.setVisibility(View.GONE);
+                setStatus("Premium activated — all ads removed.");
+            }
+        });
+        premiumBilling.start();
 
         String launchEntryId = getIntent().getStringExtra(LibraryActivity.EXTRA_ENTRY_ID);
         if (launchEntryId != null) {
@@ -429,13 +445,20 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Hamburger menu: Open, Library, Save as MP3, Share. */
+    /** Hamburger menu: Open, Library, Save as MP3, Share, Buy premium. */
     private void showMainMenu() {
         boolean canSave = inputPath != null && new File(inputPath).exists();
-        final String[] items = canSave
-                ? new String[]{"Open audio file", "Recordings library",
-                        "Save as MP3", "Share"}
-                : new String[]{"Open audio file", "Recordings library"};
+        List<String> menu = new ArrayList<>();
+        menu.add("Open audio file");
+        menu.add("Recordings library");
+        if (canSave) {
+            menu.add("Save as MP3");
+            menu.add("Share");
+        }
+        if (!isPremium()) {
+            menu.add("Buy premium version");
+        }
+        final String[] items = menu.toArray(new String[0]);
         new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
                 .setItems(items, (d, which) -> {
                     String sel = items[which];
@@ -445,6 +468,8 @@ public class MainActivity extends Activity {
                         openLibrary();
                     } else if (sel.equals("Share")) {
                         shareAudio();
+                    } else if (sel.equals("Buy premium version")) {
+                        buyPremium();
                     } else {
                         onSaveClicked();
                     }
@@ -452,9 +477,27 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    /** Starts the one-time premium purchase flow. */
+    private void buyPremium() {
+        if (premiumBilling != null) {
+            premiumBilling.buyPremium();
+        }
+    }
+
+    /**
+     * The Open/Save/Share bar is always visible. Save and Share are enabled
+     * only when a track is loaded; Open is always available.
+     */
+    private void updateTrackActions() {
+        boolean hasTrack = inputPath != null && new File(inputPath).exists();
+        btnSave2.setEnabled(hasTrack);
+        btnSave2.setAlpha(hasTrack ? 1f : 0.4f);
+        btnShare.setEnabled(hasTrack);
+        btnShare.setAlpha(hasTrack ? 1f : 0.4f);
+    }
+
     /** Project status bar: entry/file name, or an untitled placeholder. */
-    private void updateProjectName() {
-        String name;
+    private void updateProjectName() {        String name;
         boolean untitled = false;
         if (currentEntryId != null) {
             String entryName = null;
@@ -720,10 +763,34 @@ public class MainActivity extends Activity {
         if (requestCode == PICK_AUDIO && resultCode == RESULT_OK
                 && data != null && data.getData() != null) {
             Uri uri = data.getData();
+            final String displayName = getDisplayName(uri);
+            final boolean compressed = displayName.toLowerCase(Locale.US)
+                    .endsWith(".mp3");
+            if (compressed) {
+                // MP3: decode to WAV in the background, then adopt as usual.
+                setStatus("Decoding MP3...");
+                showProgress(true);
+                new Thread(() -> {
+                    try {
+                        File dest = new File(getCacheDir(), "input.wav");
+                        AudioDecoder.decodeToWav(this, uri, dest);
+                        runOnUiThread(() -> {
+                            showProgress(false);
+                            adoptAudioFile(dest, displayName);
+                        });
+                    } catch (Exception e) {
+                        runOnUiThread(() -> {
+                            showProgress(false);
+                            setStatus("Could not decode MP3: " + e.getMessage());
+                        });
+                    }
+                }).start();
+                return;
+            }
             try {
                 File dest = new File(getCacheDir(), "input.wav");
                 copyUriToFile(uri, dest);
-                adoptAudioFile(dest, getDisplayName(uri));
+                adoptAudioFile(dest, displayName);
             } catch (Exception e) {
                 setStatus("Could not read file: " + e.getMessage());
             }
@@ -763,12 +830,12 @@ public class MainActivity extends Activity {
         return seg != null ? seg : "audio.wav";
     }
 
-    private static String toMp3Name(String wavName) {
-        if (wavName.length() > 4
-                && wavName.regionMatches(true, wavName.length() - 4, ".wav", 0, 4)) {
-            return wavName.substring(0, wavName.length() - 4) + ".mp3";
+    private static String toMp3Name(String audioName) {
+        String lower = audioName.toLowerCase(Locale.US);
+        if (lower.endsWith(".wav") || lower.endsWith(".mp3")) {
+            return audioName.substring(0, audioName.length() - 4) + ".mp3";
         }
-        return wavName + ".mp3";
+        return audioName + ".mp3";
     }
 
     private void loadWaveform() {
@@ -798,8 +865,6 @@ public class MainActivity extends Activity {
                     waveformView.setPeaks(peaks);
                     waveformView.setDuration(dur);
                     audioDurationSec = dur;
-                    tvTrackMeta.setText(String.format(
-                            "%.1fs · WAV %d-bit mono · WAV input only", dur, bitDepth));
                     tvTimeCur.setText("0:00");
                     tvTimeTot.setText(fmtTime(dur));
                     // The raw input can be auditioned before any Apply.
@@ -838,49 +903,37 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Make {@code wavFile} the current input: copies it to input.wav,
-     * snapshots a pristine copy for Undo, and resets the UI.
-     *
-     * Picked-file path (recordings go through adoptLibraryEntry instead):
-     * session-only history, cache outputs, never touches the library.
+     * Make {@code wavFile} the current input as a first-class library entry:
+     * the decoded WAV is copied to the durable pristine, so effects, undo
+     * history and the project itself survive restarts — same as recordings.
+     * (Spec change 2026-10-17: picked files are no longer session-only.)
      */
     private void adoptAudioFile(File wavFile, String displayName) {
+        final String entryId = UUID.randomUUID().toString();
+        final File dest = libraryDb.takeFile(entryId);
         try {
-            File dest = new File(getCacheDir(), "input.wav");
-            if (!wavFile.getAbsolutePath().equals(dest.getAbsolutePath())) {
-                copyFile(wavFile, dest);
+            copyFile(wavFile, dest);
+            double[] info = wavInfo(dest);
+            String name = displayName;
+            int dot = name.lastIndexOf('.');
+            if (dot > 0) {
+                name = name.substring(0, dot);
             }
-            currentEntryId = null; // picked file: not a library entry
-            inputPath = dest.getAbsolutePath();
-            inputFileName = displayName;
-            // Pristine per-file copy, so Undo can always return to the
-            // original audio even if another file is picked later.
-            String hash = fileHash(inputFileName);
-            File pristine = new File(getCacheDir(), "orig_" + hash + ".wav");
-            copyFile(wavFile, pristine);
-            originalInputPath.put(hash, pristine.getAbsolutePath());
-            // Reset playback state for the new file.
-            releasePlayer();
-            btnStop.setEnabled(false);
-            currentOutputPath = null;
-            audioDurationSec = 0;
-            setPlayPauseEnabled(false);
-            refreshPlayPause(); // input is savable as-is, no Apply needed
-            updateUndoBadge();
-            waveformView.setPeaks(new float[0]);
-            waveformView.setDuration(0);
-            tvTimeCur.setText("0:00");
-            tvTimeTot.setText("0:00");
-            tvSource.setVisibility(View.GONE);
-            trackCard.setVisibility(View.VISIBLE);
-            tvTrackName.setText(inputFileName);
-            tvTrackMeta.setText("Loading…");
-            updateProjectName();
-            setStatus("Ready. Adjust the effects and tap Apply.");
-            loadWaveform();
+            name = name.trim();
+            if (name.isEmpty()) {
+                name = "Imported audio";
+            }
+            libraryDb.createEntryWithId(entryId, name, System.currentTimeMillis(),
+                    info[2], (int) info[0], (int) info[1],
+                    "import", displayName, LibraryDb.DSP_VERSION,
+                    dest.getAbsolutePath());
         } catch (Exception e) {
-            setStatus("Could not read file: " + e.getMessage());
+            dest.delete(); // don't orphan a take file with no DB row
+            setStatus("Could not import file: " + e.getMessage());
+            return;
         }
+        adoptLibraryEntry(entryId);
+        setStatus("Ready. Adjust the effects and tap Apply.");
     }
 
     // ---- Recordings library ----
@@ -932,9 +985,7 @@ public class MainActivity extends Activity {
         tvTimeCur.setText("0:00");
         tvTimeTot.setText("0:00");
         tvSource.setVisibility(View.GONE);
-        trackCard.setVisibility(View.VISIBLE);
-        tvTrackName.setText(e.name);
-        tvTrackMeta.setText("Loading…");
+        updateTrackActions();
         updateProjectName();
         int depth = undoDepth();
         setStatus(depth > 0
@@ -2336,8 +2387,8 @@ public class MainActivity extends Activity {
         final String srcPath = (currentOutputPath != null
                 && new File(currentOutputPath).exists()) ? currentOutputPath : inputPath;
         final boolean raw = srcPath.equals(inputPath);
-        showProgress(true);
-        setStatus(raw ? "Encoding MP3 (no effects)..." : "Encoding MP3...");
+        showEncodeWaitScreen(raw ? "Encoding MP3 (no effects)..."
+                : "Encoding MP3...", !isPremium());
         new Thread(() -> {
             try {
                 if (!Python.isStarted()) {
@@ -2352,22 +2403,32 @@ public class MainActivity extends Activity {
                 final String doneMsg = raw ? "Saved (no effects): " + savedAs
                         : "Saved: " + savedAs;
                 runOnUiThread(() -> {
+                    dismissEncodeWaitScreen();
                     setStatus(doneMsg);
                     if (currentEntryId != null) {
                         try {
                             libraryDb.logExport(currentEntryId, savedAs,
                                     saveFolderName(), undoDepth());
+                        } catch (Exception e) {
+                            Log.w("AudioMechanic", "logExport failed", e);
+                        }
+                        // Separate try: an export-logging failure must not
+                        // block the project rename below.
+                        try {
                             maybeAdoptExportName(currentEntryId, savedAs);
-                        } catch (Exception ignored) {
+                        } catch (Exception e) {
+                            Log.w("AudioMechanic", "adoptExportName failed", e);
                         }
                     }
                 });
             } catch (Exception e) {
-                runOnUiThread(() -> setStatus("Save failed: " + e.getMessage()));
-            } finally {
+                final String err = e.getMessage();
                 runOnUiThread(() -> {
-                    showProgress(false);
+                    dismissEncodeWaitScreen();
+                    setStatus("Save failed: " + err);
                 });
+            } finally {
+                encodeWaitDone = true;
             }
         }).start();
     }
@@ -2403,7 +2464,6 @@ public class MainActivity extends Activity {
             return;
         }
         inputFileName = stem;
-        tvTrackName.setText(stem);
         updateProjectName();
         setStatus("Saved: " + mp3Name + " — project renamed to " + stem + ".");
     }
@@ -2411,28 +2471,30 @@ public class MainActivity extends Activity {
     /** Size-optimized bitrate for shared MP3s (CBR). */
     private static final int SHARE_BITRATE_KBPS = 96;
 
-    private AlertDialog shareWaitDialog;
-    private AdView shareWaitAd;
-    private Handler shareAdHandler;
-    private Runnable shareAdRefresh;
+    private AlertDialog encodeWaitDialog;
+    private AdView encodeWaitAd;
+    private Handler encodeAdHandler;
+    private Runnable encodeAdRefresh;
     // Share flow state (volatile: written on the encode thread).
     private volatile boolean shareInProgress;
     private volatile boolean shareEncodeDone;
+    private volatile boolean encodeWaitDone;
     private volatile File shareMp3Result;
     private volatile String shareEncodeError;
 
     /** Test banner unit for the wait screen: swap for the real one at release. */
-    private static final String SHARE_WAIT_AD_UNIT =
+    private static final String ENCODE_WAIT_AD_UNIT =
             "ca-app-pub-3940256099942544/6300978111";
     /** Fresh ad request every interval while encoding is still running. */
-    private static final long SHARE_AD_REFRESH_MS = 15000;
+    private static final long ENCODE_AD_REFRESH_MS = 15000;
 
     /**
      * Split-screen wait dialog: encoding progress on top, ad below.
      * Non-cancelable; dismissed automatically when encoding finishes.
      */
-    private void showShareWaitScreen(String message) {
-        dismissShareWaitScreen();
+    private void showEncodeWaitScreen(String message, boolean withAd) {
+        dismissEncodeWaitScreen();
+        encodeWaitDone = false;
         float density = getResources().getDisplayMetrics().density;
         int pad = (int) (20 * density);
 
@@ -2456,71 +2518,75 @@ public class MainActivity extends Activity {
         top.addView(tv);
         root.addView(top);
 
-        View divider = new View(this);
-        divider.setBackgroundColor(getColor(R.color.sl_dim));
-        root.addView(divider, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, (int) (1 * density)));
+        if (withAd) {
+            View divider = new View(this);
+            divider.setBackgroundColor(getColor(R.color.sl_dim));
+            root.addView(divider, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, (int) (1 * density)));
 
-        LinearLayout adPanel = new LinearLayout(this);
-        adPanel.setGravity(Gravity.CENTER);
-        adPanel.setPadding(0, (int) (12 * density), 0, (int) (4 * density));
-        shareWaitAd = new AdView(this);
-        shareWaitAd.setAdSize(AdSize.MEDIUM_RECTANGLE);
-        shareWaitAd.setAdUnitId(SHARE_WAIT_AD_UNIT);
-        adPanel.addView(shareWaitAd);
-        root.addView(adPanel);
+            LinearLayout adPanel = new LinearLayout(this);
+            adPanel.setGravity(Gravity.CENTER);
+            adPanel.setPadding(0, (int) (12 * density), 0, (int) (4 * density));
+            encodeWaitAd = new AdView(this);
+            encodeWaitAd.setAdSize(AdSize.MEDIUM_RECTANGLE);
+            encodeWaitAd.setAdUnitId(ENCODE_WAIT_AD_UNIT);
+            adPanel.addView(encodeWaitAd);
+            root.addView(adPanel);
+        }
 
-        shareWaitDialog = new AlertDialog.Builder(this,
+        encodeWaitDialog = new AlertDialog.Builder(this,
                 R.style.Theme_SoundLab_Dialog)
                 .setView(root)
                 .setCancelable(false)
                 .create();
-        shareWaitDialog.show();
-        android.view.Window w = shareWaitDialog.getWindow();
+        encodeWaitDialog.show();
+        android.view.Window w = encodeWaitDialog.getWindow();
         if (w != null) {
             w.setLayout((int) (340 * density),
                     android.view.WindowManager.LayoutParams.WRAP_CONTENT);
         }
-        loadShareWaitAd();
-        shareAdHandler = new Handler(Looper.getMainLooper());
-        shareAdRefresh = new Runnable() {
-            @Override
-            public void run() {
-                if (shareWaitDialog == null || shareEncodeDone) {
-                    return;
+        if (withAd) {
+            loadEncodeWaitAd();
+            encodeAdHandler = new Handler(Looper.getMainLooper());
+            encodeAdRefresh = new Runnable() {
+                @Override
+                public void run() {
+                    if (encodeWaitDialog == null || encodeWaitDone) {
+                        return;
+                    }
+                    loadEncodeWaitAd();
+                    encodeAdHandler.postDelayed(this, ENCODE_AD_REFRESH_MS);
                 }
-                loadShareWaitAd();
-                shareAdHandler.postDelayed(this, SHARE_AD_REFRESH_MS);
-            }
-        };
-        shareAdHandler.postDelayed(shareAdRefresh, SHARE_AD_REFRESH_MS);
-    }
-
-    private void loadShareWaitAd() {
-        if (shareWaitAd != null) {
-            shareWaitAd.loadAd(new AdRequest.Builder().build());
+            };
+            encodeAdHandler.postDelayed(encodeAdRefresh, ENCODE_AD_REFRESH_MS);
         }
     }
 
-    private void dismissShareWaitScreen() {
-        if (shareAdHandler != null) {
-            shareAdHandler.removeCallbacksAndMessages(null);
-            shareAdHandler = null;
+    private void loadEncodeWaitAd() {
+        if (encodeWaitAd != null) {
+            encodeWaitAd.loadAd(new AdRequest.Builder().build());
         }
-        shareAdRefresh = null;
-        if (shareWaitAd != null) {
+    }
+
+    private void dismissEncodeWaitScreen() {
+        if (encodeAdHandler != null) {
+            encodeAdHandler.removeCallbacksAndMessages(null);
+            encodeAdHandler = null;
+        }
+        encodeAdRefresh = null;
+        if (encodeWaitAd != null) {
             try {
-                shareWaitAd.destroy();
+                encodeWaitAd.destroy();
             } catch (Exception ignored) {
             }
-            shareWaitAd = null;
+            encodeWaitAd = null;
         }
-        if (shareWaitDialog != null) {
+        if (encodeWaitDialog != null) {
             try {
-                shareWaitDialog.dismiss();
+                encodeWaitDialog.dismiss();
             } catch (Exception ignored) {
             }
-            shareWaitDialog = null;
+            encodeWaitDialog = null;
         }
     }
 
@@ -2542,7 +2608,7 @@ public class MainActivity extends Activity {
         shareEncodeDone = false;
         shareMp3Result = null;
         shareEncodeError = null;
-        showShareWaitScreen("Preparing share file...");
+        showEncodeWaitScreen("Preparing share file...", !isPremium());
         new Thread(() -> encodeShareFile(srcPath)).start();
     }
 
@@ -2574,6 +2640,7 @@ public class MainActivity extends Activity {
             shareEncodeError = e.getMessage();
         } finally {
             shareEncodeDone = true;
+            encodeWaitDone = true;
             runOnUiThread(this::finishShare);
         }
     }
@@ -2583,7 +2650,7 @@ public class MainActivity extends Activity {
      * open the app picker.
      */
     private void finishShare() {
-        dismissShareWaitScreen();
+        dismissEncodeWaitScreen();
         shareInProgress = false;
         if (shareEncodeError != null) {
             setStatus("Share failed: " + shareEncodeError);
@@ -2605,6 +2672,11 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             setStatus("Share failed: " + e.getMessage());
         }
+    }
+
+    /** True once the premium one-time purchase is owned. */
+    boolean isPremium() {
+        return PremiumBilling.isPremium(this);
     }
 
     private String copyToSaveFolder(File src, String baseName, boolean overwrite)
@@ -2644,7 +2716,10 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        dismissShareWaitScreen();
+        dismissEncodeWaitScreen();
+        if (premiumBilling != null) {
+            premiumBilling.destroy();
+        }
         super.onDestroy();
         if (recorder.isRecording()) {
             recorder.stop();
