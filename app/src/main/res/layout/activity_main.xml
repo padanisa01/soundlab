@@ -361,21 +361,6 @@
                             android:textSize="13sp" />
                     </LinearLayout>
 
-                    <TextView
-                        android:id="@+id/tv_source"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:background="@drawable/bg_source_pill"
-                        android:paddingStart="11dp"
-                        android:paddingEnd="11dp"
-                        android:paddingTop="5dp"
-                        android:paddingBottom="5dp"
-                        android:text="INPUT"
-                        android:textColor="@color/sl_org"
-                        android:textSize="11.5sp"
-                        android:textStyle="bold"
-                        android:visibility="gone" />
                 </LinearLayout>
 
                 <TextView
