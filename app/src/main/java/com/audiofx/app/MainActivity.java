@@ -2459,6 +2459,13 @@ public class MainActivity extends Activity {
             "ca-app-pub-3940256099942544/1033173712";
 
     private InterstitialAd shareInterstitial;
+    // Share flow state. The interstitial covers the encode wait, so the
+    // user stares at the ad instead of a spinner.
+    private volatile boolean shareInProgress;
+    private volatile boolean shareAdShowing;
+    private volatile boolean shareEncodeDone;
+    private volatile File shareMp3Result;
+    private volatile String shareEncodeError;
 
     /** Preloads the interstitial shown in the share flow. */
     private void loadShareInterstitial() {
@@ -2472,17 +2479,13 @@ public class MainActivity extends Activity {
                                 new FullScreenContentCallback() {
                                     @Override
                                     public void onAdDismissedFullScreenContent() {
-                                        shareInterstitial = null;
-                                        loadShareInterstitial();
-                                        doShareEncode();
+                                        onShareAdGone();
                                     }
 
                                     @Override
                                     public void onAdFailedToShowFullScreenContent(
                                             AdError e) {
-                                        shareInterstitial = null;
-                                        loadShareInterstitial();
-                                        doShareEncode();
+                                        onShareAdGone();
                                     }
                                 });
                     }
@@ -2494,78 +2497,111 @@ public class MainActivity extends Activity {
                 });
     }
 
-    /**
-     * Share entry point: shows the interstitial when one is ready, then
-     * encodes. Falls straight through to encoding when no ad loaded
-     * (offline or no fill), so share never blocks on ads.
-     */
-    private void shareAudio() {
-        if (shareInterstitial != null) {
-            shareInterstitial.show(this);
+    private void onShareAdGone() {
+        shareAdShowing = false;
+        shareInterstitial = null;
+        loadShareInterstitial();
+        if (shareEncodeDone) {
+            finishShare();
         } else {
-            loadShareInterstitial();
-            doShareEncode();
+            showBlockingProgress("Preparing share file...");
         }
     }
 
     /**
-     * Encodes the current audio with all applied effects, without
-     * requiring a prior save. The processed output is used when there
-     * is one, else the input as-is. Encoded at a size-optimized
-     * bitrate and handed to the system app picker.
+     * Share entry point: encoding starts in the background and the
+     * interstitial covers the wait. When no ad is ready (offline or no
+     * fill), the blocking progress dialog covers it instead, so share
+     * never blocks on ads.
      */
-    private void doShareEncode() {
+    private void shareAudio() {
+        if (shareInProgress) {
+            return;
+        }
         final String srcPath = (currentOutputPath != null
                 && new File(currentOutputPath).exists()) ? currentOutputPath : inputPath;
         if (srcPath == null || !(new File(srcPath).exists())) {
             setStatus("Nothing to share yet.");
             return;
         }
-        final boolean raw = srcPath.equals(inputPath);
-        showBlockingProgress(raw ? "Preparing share file (no effects)..."
-                : "Preparing share file...");
-        new Thread(() -> {
-            try {
-                if (!Python.isStarted()) {
-                    Python.start(new AndroidPlatform(this));
-                }
-                File shareDir = new File(getCacheDir(), "share");
-                if (!shareDir.exists() && !shareDir.mkdirs()) {
-                    throw new Exception("Could not create share folder");
-                }
-                String base = inputFileName;
-                int dot = base.lastIndexOf('.');
-                if (dot > 0) {
-                    base = base.substring(0, dot);
-                }
-                base = base.replaceAll("[\\\\/:*?\"<>|]", "_").trim();
-                if (base.isEmpty()) {
-                    base = "soundlab";
-                }
-                File mp3 = new File(shareDir, base + ".mp3");
-                Python.getInstance().getModule("audiofx.android_bridge").callAttr(
-                        "encode_wav_to_mp3", srcPath, mp3.getAbsolutePath(),
-                        SHARE_BITRATE_KBPS);
-                Uri uri = FileProvider.getUriForFile(this,
-                        getPackageName() + ".fileprovider", mp3);
-                Intent send = new Intent(Intent.ACTION_SEND);
-                send.setType("audio/mpeg");
-                send.putExtra(Intent.EXTRA_STREAM, uri);
-                send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                final Intent chooser = Intent.createChooser(send, "Share audio");
-                final String sharedName = mp3.getName();
-                runOnUiThread(() -> {
-                    dismissBlockingProgress();
-                    setStatus("Sharing " + sharedName + ".");
-                    startActivity(chooser);
-                });
-            } catch (Exception e) {
-                runOnUiThread(() -> {
-                    dismissBlockingProgress();
-                    setStatus("Share failed: " + e.getMessage());
-                });
+        shareInProgress = true;
+        shareAdShowing = false;
+        shareEncodeDone = false;
+        shareMp3Result = null;
+        shareEncodeError = null;
+        new Thread(() -> encodeShareFile(srcPath)).start();
+        if (shareInterstitial != null) {
+            shareAdShowing = true;
+            shareInterstitial.show(this);
+        } else {
+            loadShareInterstitial();
+            showBlockingProgress("Preparing share file...");
+        }
+    }
+
+    /** Background MP3 encode for the share flow. */
+    private void encodeShareFile(String srcPath) {
+        try {
+            if (!Python.isStarted()) {
+                Python.start(new AndroidPlatform(this));
             }
-        }).start();
+            File shareDir = new File(getCacheDir(), "share");
+            if (!shareDir.exists() && !shareDir.mkdirs()) {
+                throw new Exception("Could not create share folder");
+            }
+            String base = inputFileName;
+            int dot = base.lastIndexOf('.');
+            if (dot > 0) {
+                base = base.substring(0, dot);
+            }
+            base = base.replaceAll("[\\\\/:*?\"<>|]", "_").trim();
+            if (base.isEmpty()) {
+                base = "soundlab";
+            }
+            File mp3 = new File(shareDir, base + ".mp3");
+            Python.getInstance().getModule("audiofx.android_bridge").callAttr(
+                    "encode_wav_to_mp3", srcPath, mp3.getAbsolutePath(),
+                    SHARE_BITRATE_KBPS);
+            shareMp3Result = mp3;
+        } catch (Exception e) {
+            shareEncodeError = e.getMessage();
+        } finally {
+            shareEncodeDone = true;
+            runOnUiThread(this::onShareEncodeDone);
+        }
+    }
+
+    private void onShareEncodeDone() {
+        if (shareAdShowing) {
+            return; // the ad-dismiss handler finishes the flow
+        }
+        finishShare();
+    }
+
+    /** Launches the app picker once the encode is done and no ad is up. */
+    private void finishShare() {
+        dismissBlockingProgress();
+        shareInProgress = false;
+        if (shareEncodeError != null) {
+            setStatus("Share failed: " + shareEncodeError);
+            return;
+        }
+        if (shareMp3Result == null) {
+            setStatus("Nothing to share yet.");
+            return;
+        }
+        try {
+            Uri uri = FileProvider.getUriForFile(this,
+                    getPackageName() + ".fileprovider", shareMp3Result);
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("audio/mpeg");
+            send.putExtra(Intent.EXTRA_STREAM, uri);
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            setStatus("Sharing " + shareMp3Result.getName() + ".");
+            startActivity(Intent.createChooser(send, "Share audio"));
+        } catch (Exception e) {
+            setStatus("Share failed: " + e.getMessage());
+        }
     }
 
     private String copyToSaveFolder(File src, String baseName, boolean overwrite)
