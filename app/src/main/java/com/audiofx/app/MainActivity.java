@@ -852,12 +852,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    @Override
-    protected void onDestroy() {
-        dismissBlockingProgress();
-        super.onDestroy();
-    }
-
     private void copyUriToFile(Uri uri, File dest) throws Exception {
         try (InputStream in = getContentResolver().openInputStream(uri);
              OutputStream out = new FileOutputStream(dest)) {
@@ -2551,6 +2545,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        dismissBlockingProgress();
         super.onDestroy();
         if (recorder.isRecording()) {
             recorder.stop();
