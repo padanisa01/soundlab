@@ -2465,7 +2465,7 @@ public class MainActivity extends Activity {
         adPanel.setGravity(Gravity.CENTER);
         adPanel.setPadding(0, (int) (12 * density), 0, (int) (4 * density));
         shareWaitAd = new AdView(this);
-        shareWaitAd.setAdSize(AdSize.BANNER);
+        shareWaitAd.setAdSize(AdSize.MEDIUM_RECTANGLE);
         shareWaitAd.setAdUnitId(SHARE_WAIT_AD_UNIT);
         adPanel.addView(shareWaitAd);
         root.addView(adPanel);

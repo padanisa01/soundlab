@@ -53,7 +53,7 @@ or the plan changes.
   destination folder, whether or not one was chosen before.
 - **High-contrast mic switches**: on = bright teal thumb on a teal
   track, off = gray thumb on a dark track.
-- **AdMob**: banner fixed at the bottom of the main screen, plus a split-screen share wait dialog (encoding progress on top, banner ad below, fresh ad every 15s while encoding runs, auto-closed when done). Test ad units for now; swap in the real app ID + ad unit IDs at release.
+- **AdMob**: banner fixed at the bottom of the main screen, plus a split-screen share wait dialog (encoding progress on top, 300x250 medium-rectangle ad below, fresh ad every 15s while encoding runs, auto-closed when done). Test ad units for now; swap in the real app ID + ad unit IDs at release.
 - **Share**: the hamburger menu's Share action encodes the current
   audio (processed output with all applied effects, or the input
   as-is) as a size-optimized 96 kbps MP3 and opens the system app
