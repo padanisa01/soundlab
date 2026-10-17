@@ -3,6 +3,10 @@
 App renamed from AudioFX/SoundLab to **Audio Mechanic** (2026-10-17):
 display name in `strings.xml`, two-tone in-app header title
 ("Audio"/"Mechanic"). Package name `com.audiofx.app` unchanged.
+Launcher icon (2026-10-17): teal wrench over waveform bars with a
+horizontal mic below, on dark charcoal — legacy PNG mipmaps
+(mdpi–xxxhdpi) plus adaptive icon (`mipmap-anydpi-v26`). Master at
+`icon-concepts/icon-a4-final.png`.
 
 Living list of what the app does. Update this file when a feature ships
 or the plan changes.
