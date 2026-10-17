@@ -143,7 +143,9 @@ or the plan changes.
 - Every recording becomes a durable project in `filesDir/library/`:
   one immutable pristine WAV (`takes/<uuid>.wav`) plus an ordered,
   re-runnable op chain in SQLite (`soundlab_library.db`), surviving
-  app restarts. Picked/imported files stay on the old session-only path.
+  app restarts. Since 2026-10-17 picked/imported files are first-class
+  too: opening audio imports a pristine copy as a new entry (named
+  after the file), with the same op chain, undo history and exports.
 - **Library screen** (`LibraryActivity`, via the header icon or the
   "Open library" button): newest first; rows show name, recorded
   date/time, duration, size, up to 3 effect chips, and a teal dot when

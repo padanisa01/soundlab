@@ -903,47 +903,37 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Make {@code wavFile} the current input: copies it to input.wav,
-     * snapshots a pristine copy for Undo, and resets the UI.
-     *
-     * Picked-file path (recordings go through adoptLibraryEntry instead):
-     * session-only history, cache outputs, never touches the library.
+     * Make {@code wavFile} the current input as a first-class library entry:
+     * the decoded WAV is copied to the durable pristine, so effects, undo
+     * history and the project itself survive restarts — same as recordings.
+     * (Spec change 2026-10-17: picked files are no longer session-only.)
      */
     private void adoptAudioFile(File wavFile, String displayName) {
+        final String entryId = UUID.randomUUID().toString();
+        final File dest = libraryDb.takeFile(entryId);
         try {
-            File dest = new File(getCacheDir(), "input.wav");
-            if (!wavFile.getAbsolutePath().equals(dest.getAbsolutePath())) {
-                copyFile(wavFile, dest);
+            copyFile(wavFile, dest);
+            double[] info = wavInfo(dest);
+            String name = displayName;
+            int dot = name.lastIndexOf('.');
+            if (dot > 0) {
+                name = name.substring(0, dot);
             }
-            currentEntryId = null; // picked file: not a library entry
-            inputPath = dest.getAbsolutePath();
-            inputFileName = displayName;
-            // Pristine per-file copy, so Undo can always return to the
-            // original audio even if another file is picked later.
-            String hash = fileHash(inputFileName);
-            File pristine = new File(getCacheDir(), "orig_" + hash + ".wav");
-            copyFile(wavFile, pristine);
-            originalInputPath.put(hash, pristine.getAbsolutePath());
-            // Reset playback state for the new file.
-            releasePlayer();
-            btnStop.setEnabled(false);
-            currentOutputPath = null;
-            audioDurationSec = 0;
-            setPlayPauseEnabled(false);
-            refreshPlayPause(); // input is savable as-is, no Apply needed
-            updateUndoBadge();
-            waveformView.setPeaks(new float[0]);
-            waveformView.setDuration(0);
-            tvTimeCur.setText("0:00");
-            tvTimeTot.setText("0:00");
-            tvSource.setVisibility(View.GONE);
-            updateTrackActions();
-            updateProjectName();
-            setStatus("Ready. Adjust the effects and tap Apply.");
-            loadWaveform();
+            name = name.trim();
+            if (name.isEmpty()) {
+                name = "Imported audio";
+            }
+            libraryDb.createEntryWithId(entryId, name, System.currentTimeMillis(),
+                    info[2], (int) info[0], (int) info[1],
+                    "import", displayName, LibraryDb.DSP_VERSION,
+                    dest.getAbsolutePath());
         } catch (Exception e) {
-            setStatus("Could not read file: " + e.getMessage());
+            dest.delete(); // don't orphan a take file with no DB row
+            setStatus("Could not import file: " + e.getMessage());
+            return;
         }
+        adoptLibraryEntry(entryId);
+        setStatus("Ready. Adjust the effects and tap Apply.");
     }
 
     // ---- Recordings library ----
