@@ -33,6 +33,9 @@ import android.widget.Toast;
 
 import androidx.core.content.FileProvider;
 import androidx.documentfile.provider.DocumentFile;
+import com.google.android.gms.ads.AdRequest;
+import com.google.android.gms.ads.AdView;
+import com.google.android.gms.ads.MobileAds;
 
 import com.chaquo.python.PyObject;
 import com.chaquo.python.Python;
@@ -398,6 +401,12 @@ public class MainActivity extends Activity {
         restoreSaveFolderUri(prefs);
         updateProjectName();
         refreshHistoryPanel();
+
+        // AdMob banner (test ad unit ID until the real one is configured).
+        MobileAds.initialize(this, status -> {
+        });
+        AdView adView = findViewById(R.id.ad_view);
+        adView.loadAd(new AdRequest.Builder().build());
 
         String launchEntryId = getIntent().getStringExtra(LibraryActivity.EXTRA_ENTRY_ID);
         if (launchEntryId != null) {
