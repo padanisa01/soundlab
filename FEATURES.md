@@ -53,6 +53,10 @@ or the plan changes.
   destination folder, whether or not one was chosen before.
 - **High-contrast mic switches**: on = bright teal thumb on a teal
   track, off = gray thumb on a dark track.
+- **Track actions**: the track card is now an Open / Save / Share icon bar; the title lives only in the top status bar.
+- **MP3 import**: MP3s can be opened as well as WAVs (decoded to WAV via MediaCodec on import).
+- **Save wait screen**: saving shows the same split-screen wait dialog as share (progress on top, 300x250 ad below).
+- **Premium**: one-time in-app purchase (`soundlab_premium`, Play Billing) from the hamburger menu; removes the banner and all wait-screen ads.
 - **AdMob**: banner fixed at the bottom of the main screen, plus a split-screen share wait dialog (encoding progress on top, 300x250 medium-rectangle ad below, fresh ad every 15s while encoding runs, auto-closed when done). Test ad units for now; swap in the real app ID + ad unit IDs at release.
 - **Share**: the hamburger menu's Share action encodes the current
   audio (processed output with all applied effects, or the input

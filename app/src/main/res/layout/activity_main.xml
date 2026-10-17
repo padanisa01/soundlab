@@ -74,7 +74,7 @@
                     android:textStyle="bold" />
             </LinearLayout>
 
-            <!-- Track card -->
+            <!-- Track actions: open / save / share -->
             <LinearLayout
                 android:id="@+id/track_card"
                 android:layout_width="match_parent"
@@ -82,50 +82,52 @@
                 android:background="@drawable/bg_card"
                 android:gravity="center_vertical"
                 android:orientation="horizontal"
-                android:padding="14dp"
+                android:padding="10dp"
                 android:visibility="gone">
 
-                <ImageView
-                    android:layout_width="44dp"
-                    android:layout_height="44dp"
-                    android:background="@drawable/bg_icon_tile"
-                    android:padding="10dp"
-                    android:src="@drawable/ic_note" />
-
-                <LinearLayout
+                <Button
+                    android:id="@+id/btn_open"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:layout_marginStart="12dp"
-                    android:layout_marginEnd="12dp"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:id="@+id/tv_track_name"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:textColor="@color/sl_txt"
-                        android:textSize="15sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/tv_track_meta"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="3dp"
-                        android:textColor="@color/sl_mut"
-                        android:textSize="12sp" />
-                </LinearLayout>
+                    android:background="@drawable/bg_ghost"
+                    android:drawableTop="@drawable/ic_open"
+                    android:drawablePadding="6dp"
+                    android:gravity="center"
+                    android:padding="10dp"
+                    android:text="Open"
+                    android:textColor="@color/sl_txt"
+                    android:textSize="12.5sp" />
 
                 <Button
-                    android:id="@+id/btn_change"
-                    android:layout_width="wrap_content"
+                    android:id="@+id/btn_save2"
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="8dp"
                     android:background="@drawable/bg_ghost"
-                    android:text="Change"
+                    android:drawableTop="@drawable/ic_save"
+                    android:drawablePadding="6dp"
+                    android:gravity="center"
+                    android:padding="10dp"
+                    android:text="Save"
                     android:textColor="@color/sl_txt"
-                    android:textSize="12.5sp"
-                    android:padding="8dp" />
+                    android:textSize="12.5sp" />
+
+                <Button
+                    android:id="@+id/btn_share"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_ghost"
+                    android:drawableTop="@drawable/ic_share"
+                    android:drawablePadding="6dp"
+                    android:gravity="center"
+                    android:padding="10dp"
+                    android:text="Share"
+                    android:textColor="@color/sl_txt"
+                    android:textSize="12.5sp" />
             </LinearLayout>
 
             <!-- Waveform card -->
