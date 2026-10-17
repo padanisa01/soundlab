@@ -1,4 +1,8 @@
-# AudioFX — Feature List
+# Audio Mechanic — Feature List
+
+App renamed from AudioFX/SoundLab to **Audio Mechanic** (2026-10-17):
+display name in `strings.xml`, two-tone in-app header title
+("Audio"/"Mechanic"). Package name `com.audiofx.app` unchanged.
 
 Living list of what the app does. Update this file when a feature ships
 or the plan changes.

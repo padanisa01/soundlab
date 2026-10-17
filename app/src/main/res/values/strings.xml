@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">AudioFX</string>
+    <string name="app_name">Audio Mechanic</string>
     <string-array name="reverb_presets">
         <item>studio</item>
         <item>concert_hall</item>
