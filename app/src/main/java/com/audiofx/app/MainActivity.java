@@ -1277,7 +1277,8 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    /** The mechanic's report card: findings with per-issue Fix and Tune Up. */
+    /** The mechanic's report card (Option A): score hero, grouped findings,
+     * profile picker, sticky Tune Up bar. */
     private void showDiagnosisReport(final String findingsJson) {
         final float dp = getResources().getDisplayMetrics().density;
         JSONArray findings;
@@ -1287,34 +1288,76 @@ public class MainActivity extends Activity {
             setStatus("Diagnosis failed: bad report.");
             return;
         }
-        int warnCount = 0;
+        java.util.ArrayList<JSONObject> warns = new java.util.ArrayList<>();
+        java.util.ArrayList<JSONObject> infos = new java.util.ArrayList<>();
+        java.util.ArrayList<JSONObject> oks = new java.util.ArrayList<>();
         boolean hasFixable = false;
         for (int i = 0; i < findings.length(); i++) {
             JSONObject f = findings.optJSONObject(i);
             if (f == null) {
                 continue;
             }
-            if ("warn".equals(f.optString("severity"))) {
-                warnCount++;
+            String sev = f.optString("severity", "info");
+            if ("warn".equals(sev)) {
+                warns.add(f);
+                if (!f.isNull("fix")) {
+                    hasFixable = true;
+                }
+            } else if ("ok".equals(sev)) {
+                oks.add(f);
+            } else {
+                infos.add(f);
                 if (!f.isNull("fix")) {
                     hasFixable = true;
                 }
             }
         }
 
+        int score = Math.max(0, 100 - 10 * warns.size() - 2 * infos.size());
+        String verdict = score >= 85 ? "Excellent" : score >= 70 ? "Good"
+                : score >= 50 ? "Needs work" : "Rough";
+
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         int pad = (int) (16 * dp);
-        list.setPadding(pad, pad, pad, pad);
+        list.setPadding(pad, pad, pad, (int) (8 * dp));
 
-        TextView header = new TextView(this);
-        header.setText(warnCount == 0 ? "All clear. No issues found."
-                : warnCount + (warnCount == 1 ? " issue" : " issues")
-                        + " found.");
-        header.setTextColor(getColor(R.color.sl_txt));
-        header.setTextSize(16);
-        header.setPadding(0, 0, 0, (int) (12 * dp));
-        list.addView(header);
+        // Score hero: ring + verdict caption.
+        LinearLayout hero = new LinearLayout(this);
+        hero.setOrientation(LinearLayout.HORIZONTAL);
+        hero.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        hero.setPadding(0, 0, 0, (int) (12 * dp));
+        ScoreRingView ring = new ScoreRingView(this);
+        int ringSize = (int) (96 * dp);
+        ring.setLayoutParams(new LinearLayout.LayoutParams(ringSize, ringSize));
+        ring.setScore(score);
+        hero.addView(ring);
+        LinearLayout cap = new LinearLayout(this);
+        cap.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams capLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        capLp.setMargins((int) (16 * dp), 0, 0, 0);
+        cap.setLayoutParams(capLp);
+        TextView verdictTv = new TextView(this);
+        verdictTv.setText(verdict);
+        verdictTv.setTextColor(getColor(R.color.sl_txt));
+        verdictTv.setTextSize(17);
+        verdictTv.setTypeface(null, android.graphics.Typeface.BOLD);
+        cap.addView(verdictTv);
+        TextView subTv = new TextView(this);
+        String sub = warns.size() + (warns.size() == 1 ? " issue" : " issues")
+                + " · " + oks.size() + " passed";
+        if (!infos.isEmpty()) {
+            sub += " · " + infos.size() + " notes";
+        }
+        subTv.setText(sub);
+        subTv.setTextColor(getColor(R.color.sl_mut));
+        subTv.setTextSize(12.5f);
+        subTv.setPadding(0, (int) (3 * dp), 0, 0);
+        cap.addView(subTv);
+        hero.addView(cap);
+        list.addView(hero);
 
         // Tune-up recipe picker: segmented control + recipe description.
         TextView tuneAsLabel = new TextView(this);
@@ -1347,108 +1390,81 @@ public class MainActivity extends Activity {
         diagProfileDesc = new TextView(this);
         diagProfileDesc.setTextColor(getColor(R.color.sl_mut));
         diagProfileDesc.setTextSize(12);
-        diagProfileDesc.setPadding(0, (int) (4 * dp), 0, (int) (10 * dp));
+        diagProfileDesc.setPadding(0, (int) (4 * dp), 0, (int) (4 * dp));
         list.addView(diagProfileDesc);
         refreshDiagProfileSegments();
 
-        for (int i = 0; i < findings.length(); i++) {
-            final JSONObject f = findings.optJSONObject(i);
-            if (f == null) {
-                continue;
-            }
-            String severity = f.optString("severity", "info");
-            int dotColor = "warn".equals(severity) ? R.color.sl_red
-                    : "ok".equals(severity) ? R.color.sl_teal2 : R.color.sl_org;
-
-            LinearLayout titleRow = new LinearLayout(this);
-            titleRow.setOrientation(LinearLayout.HORIZONTAL);
-            titleRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
-            TextView dot = new TextView(this);
-            dot.setText("\u25cf ");
-            dot.setTextColor(getColor(dotColor));
-            dot.setTextSize(14);
-            titleRow.addView(dot);
-            TextView title = new TextView(this);
-            title.setText(f.optString("title", ""));
-            title.setTextColor(getColor(R.color.sl_txt));
-            title.setTextSize(14);
-            title.setTypeface(null, android.graphics.Typeface.BOLD);
-            titleRow.addView(title);
-            list.addView(titleRow);
-
-            TextView detail = new TextView(this);
-            detail.setText(f.optString("detail", ""));
-            detail.setTextColor(getColor(R.color.sl_mut));
-            detail.setTextSize(13);
-            detail.setPadding((int) (20 * dp), (int) (2 * dp), 0, 0);
-            list.addView(detail);
-
-            String advice = f.optString("advice", "");
-            if (!advice.isEmpty()) {
-                TextView tip = new TextView(this);
-                tip.setText("Tip: " + advice);
-                tip.setTextColor(getColor(R.color.sl_mut));
-                tip.setTextSize(12);
-                tip.setPadding((int) (20 * dp), (int) (2 * dp), 0, 0);
-                list.addView(tip);
-            }
-
-            final JSONObject fix = f.optJSONObject("fix");
-            if (fix != null) {
-                Button fixBtn = new Button(this);
-                fixBtn.setText(fix.optString("label", "Fix"));
-                fixBtn.setTextSize(12);
-                fixBtn.setTextColor(getColor(R.color.sl_teal2));
-                fixBtn.setBackgroundResource(R.drawable.bg_ghost);
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT);
-                lp.setMargins((int) (20 * dp), (int) (6 * dp), 0,
-                        (int) (10 * dp));
-                fixBtn.setLayoutParams(lp);
-                fixBtn.setPadding((int) (14 * dp), (int) (4 * dp),
-                        (int) (14 * dp), (int) (4 * dp));
-                fixBtn.setOnClickListener(v -> {
-                    if (diagDialog != null) {
-                        diagDialog.dismiss();
-                    }
-                    applyLibraryOp(fix.optString("op"),
-                            fix.optJSONObject("params").toString(),
-                            fix.optString("label"),
-                            "Applying fix...", "Fix applied.",
-                            () -> onDiagnoseClicked());
-                });
-                list.addView(fixBtn);
-            } else {
-                android.view.View spacer = new android.view.View(this);
-                spacer.setLayoutParams(new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        (int) (10 * dp)));
-                list.addView(spacer);
+        // Grouped findings: issues open, notes and passed collapsed.
+        if (!warns.isEmpty()) {
+            LinearLayout warnBody =
+                    addDiagSection(list, "Needs attention", warns, true, dp);
+            boolean first = true;
+            for (JSONObject f : warns) {
+                addDiagIssueCard(warnBody, f, first, dp);
+                first = false;
             }
         }
+        if (!infos.isEmpty()) {
+            LinearLayout infoBody =
+                    addDiagSection(list, "Notes", infos, false, dp);
+            for (JSONObject f : infos) {
+                addDiagIssueCard(infoBody, f, false, dp);
+            }
+        }
+        LinearLayout passedBody = addDiagSection(list, "Passed", oks, false, dp);
+        for (JSONObject f : oks) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            row.setPadding(0, (int) (7 * dp), 0, (int) (7 * dp));
+            TextView dot = new TextView(this);
+            dot.setText("\u25cf ");
+            dot.setTextColor(getColor(R.color.sl_teal2));
+            dot.setTextSize(11);
+            row.addView(dot);
+            TextView title = new TextView(this);
+            title.setText(f.optString("title", ""));
+            title.setTextColor(getColor(R.color.sl_mut));
+            title.setTextSize(13.5f);
+            row.addView(title);
+            passedBody.addView(row);
+        }
 
+        // Root: scrollable report with a sticky Tune Up bar.
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        scroll.addView(list);
+        root.addView(scroll);
         if (hasFixable) {
+            LinearLayout bar = new LinearLayout(this);
+            bar.setPadding(pad, (int) (8 * dp), pad, (int) (4 * dp));
             diagTuneUpBtn = new Button(this);
-            diagTuneUpBtn.setTextColor(getColor(R.color.sl_teal2));
-            diagTuneUpBtn.setBackgroundResource(R.drawable.bg_ghost);
-            diagTuneUpBtn.setPadding(0, (int) (10 * dp), 0, (int) (10 * dp));
+            diagTuneUpBtn.setBackgroundResource(R.drawable.bg_apply);
+            diagTuneUpBtn.setTextColor(getColor(R.color.sl_txt));
+            diagTuneUpBtn.setTextSize(15.5f);
+            diagTuneUpBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+            diagTuneUpBtn.setPadding(0, (int) (13 * dp), 0, (int) (13 * dp));
+            diagTuneUpBtn.setLayoutParams(new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT));
             diagTuneUpBtn.setOnClickListener(v -> {
                 if (diagDialog != null) {
                     diagDialog.dismiss();
                 }
                 runTuneUp(findingsJson, currentTuneUpProfile());
             });
-            list.addView(diagTuneUpBtn);
+            bar.addView(diagTuneUpBtn);
+            root.addView(bar);
         } else {
             diagTuneUpBtn = null;
         }
 
-        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
-        scroll.addView(list);
         diagDialog = new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
                 .setTitle("Diagnosis")
-                .setView(scroll)
+                .setView(root)
                 .setNegativeButton("Close", null)
                 .setOnDismissListener(d -> {
                     diagDialog = null;
@@ -1460,6 +1476,155 @@ public class MainActivity extends Activity {
         diagDialog.getButton(AlertDialog.BUTTON_NEGATIVE)
                 .setTextColor(getColor(R.color.sl_mut));
         refreshDiagProfileSegments();
+    }
+
+    /** Collapsible report section; returns the body container to fill. */
+    private LinearLayout addDiagSection(LinearLayout parent, String title,
+            java.util.ArrayList<JSONObject> items, boolean openByDefault,
+            final float dp) {
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        head.setPadding(0, (int) (10 * dp), 0, (int) (6 * dp));
+        TextView titleTv = new TextView(this);
+        titleTv.setText(title + " (" + items.size() + ")");
+        titleTv.setTextColor(getColor(R.color.sl_txt));
+        titleTv.setTextSize(14);
+        titleTv.setTypeface(null, android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        titleTv.setLayoutParams(tlp);
+        head.addView(titleTv);
+        final TextView chev = new TextView(this);
+        chev.setTextColor(getColor(R.color.sl_mut));
+        chev.setTextSize(13);
+        head.addView(chev);
+        parent.addView(head);
+
+        final LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        parent.addView(body);
+
+        final boolean[] isOpen = {openByDefault};
+        Runnable sync = () -> {
+            body.setVisibility(isOpen[0] ? android.view.View.VISIBLE
+                    : android.view.View.GONE);
+            chev.setText(isOpen[0] ? "\u25be" : "\u25b8");
+        };
+        sync.run();
+        head.setOnClickListener(v -> {
+            isOpen[0] = !isOpen[0];
+            sync.run();
+        });
+        return body;
+    }
+
+    /** Expandable issue card with detail, tip and Fix button. */
+    private void addDiagIssueCard(LinearLayout parent, final JSONObject f,
+            boolean openByDefault, final float dp) {
+        String severity = f.optString("severity", "info");
+        final int dotColor = "warn".equals(severity) ? R.color.sl_red
+                : R.color.sl_org;
+
+        final LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackgroundResource(R.drawable.bg_card);
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        clp.setMargins(0, 0, 0, (int) (10 * dp));
+        card.setLayoutParams(clp);
+
+        LinearLayout headRow = new LinearLayout(this);
+        headRow.setOrientation(LinearLayout.HORIZONTAL);
+        headRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        headRow.setPadding((int) (14 * dp), (int) (12 * dp),
+                (int) (14 * dp), (int) (12 * dp));
+        TextView dot = new TextView(this);
+        dot.setText("\u25cf ");
+        dot.setTextColor(getColor(dotColor));
+        dot.setTextSize(12);
+        headRow.addView(dot);
+        TextView title = new TextView(this);
+        title.setText(f.optString("title", ""));
+        title.setTextColor(getColor(R.color.sl_txt));
+        title.setTextSize(14);
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        title.setLayoutParams(tlp);
+        headRow.addView(title);
+        final TextView chev = new TextView(this);
+        chev.setTextColor(getColor(R.color.sl_mut));
+        chev.setTextSize(12);
+        headRow.addView(chev);
+        card.addView(headRow);
+
+        final LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding((int) (14 * dp), 0, (int) (14 * dp), (int) (13 * dp));
+        TextView detail = new TextView(this);
+        detail.setText(f.optString("detail", ""));
+        detail.setTextColor(getColor(R.color.sl_mut));
+        detail.setTextSize(13);
+        detail.setLineSpacing(0, 1.15f);
+        body.addView(detail);
+        String advice = f.optString("advice", "");
+        if (!advice.isEmpty()) {
+            TextView tip = new TextView(this);
+            tip.setText(advice);
+            tip.setTextColor(getColor(R.color.sl_mut));
+            tip.setTextSize(12.5f);
+            tip.setLineSpacing(0, 1.15f);
+            LinearLayout.LayoutParams tipLp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            tipLp.setMargins((int) (10 * dp), (int) (8 * dp), 0, 0);
+            tip.setLayoutParams(tipLp);
+            tip.setPadding((int) (8 * dp), 0, 0, 0);
+            tip.setBackgroundResource(R.drawable.bg_ghost);
+            body.addView(tip);
+        }
+        final JSONObject fix = f.optJSONObject("fix");
+        if (fix != null) {
+            Button fixBtn = new Button(this);
+            fixBtn.setText(fix.optString("label", "Fix"));
+            fixBtn.setTextSize(12.5f);
+            fixBtn.setTextColor(getColor(R.color.sl_teal2));
+            fixBtn.setBackgroundResource(R.drawable.bg_ghost);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(0, (int) (10 * dp), 0, 0);
+            fixBtn.setLayoutParams(lp);
+            fixBtn.setPadding((int) (16 * dp), (int) (6 * dp),
+                    (int) (16 * dp), (int) (6 * dp));
+            fixBtn.setOnClickListener(v -> {
+                if (diagDialog != null) {
+                    diagDialog.dismiss();
+                }
+                applyLibraryOp(fix.optString("op"),
+                        fix.optJSONObject("params").toString(),
+                        fix.optString("label"),
+                        "Applying fix...", "Fix applied.",
+                        () -> onDiagnoseClicked());
+            });
+            body.addView(fixBtn);
+        }
+        card.addView(body);
+
+        final boolean[] isOpen = {openByDefault};
+        Runnable sync = () -> {
+            body.setVisibility(isOpen[0] ? android.view.View.VISIBLE
+                    : android.view.View.GONE);
+            chev.setText(isOpen[0] ? "\u25be" : "\u25b8");
+        };
+        sync.run();
+        headRow.setOnClickListener(v -> {
+            isOpen[0] = !isOpen[0];
+            sync.run();
+        });
+        parent.addView(card);
     }
 
     private static final String[] TUNE_UP_PROFILE_ORDER =
