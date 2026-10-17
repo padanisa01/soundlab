@@ -126,6 +126,8 @@ SCAFFOLD_CHECKS = [
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "shareAudio"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "SHARE_BITRATE_KBPS"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "FileProvider"),
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", "showBlockingProgress"),
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", "dismissBlockingProgress"),
     ("app/src/main/res/xml/file_paths.xml", "cache-path"),
     ("app/src/main/AndroidManifest.xml", "android.support.FILE_PROVIDER_PATHS"),
     ("app/build.gradle", "androidx.core:core"),

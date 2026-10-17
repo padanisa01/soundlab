@@ -2,6 +2,7 @@ package com.audiofx.app;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.view.Gravity;
 import android.Manifest;
 import android.animation.ObjectAnimator;
 import android.animation.ValueAnimator;
@@ -800,6 +801,52 @@ public class MainActivity extends Activity {
 
     private void showProgress(boolean show) {
         progressBar.setVisibility(show ? View.VISIBLE : View.GONE);
+    }
+
+    private AlertDialog blockingProgress;
+
+    /** Modal spinner dialog, visible wherever the page is scrolled. */
+    private void showBlockingProgress(String message) {
+        dismissBlockingProgress();
+        float density = getResources().getDisplayMetrics().density;
+        int pad = (int) (20 * density);
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.HORIZONTAL);
+        layout.setGravity(Gravity.CENTER_VERTICAL);
+        layout.setPadding(pad, pad, pad, pad);
+        layout.addView(new ProgressBar(this));
+        TextView tv = new TextView(this);
+        tv.setText(message);
+        tv.setTextColor(getColor(R.color.sl_txt));
+        tv.setTextSize(15f);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.setMarginStart(pad);
+        tv.setLayoutParams(lp);
+        layout.addView(tv);
+        blockingProgress = new AlertDialog.Builder(this,
+                R.style.Theme_SoundLab_Dialog)
+                .setView(layout)
+                .setCancelable(false)
+                .create();
+        blockingProgress.show();
+    }
+
+    private void dismissBlockingProgress() {
+        if (blockingProgress != null) {
+            try {
+                blockingProgress.dismiss();
+            } catch (Exception ignored) {
+            }
+            blockingProgress = null;
+        }
+    }
+
+    @Override
+    protected void onDestroy() {
+        dismissBlockingProgress();
+        super.onDestroy();
     }
 
     private void copyUriToFile(Uri uri, File dest) throws Exception {
@@ -2412,8 +2459,7 @@ public class MainActivity extends Activity {
             return;
         }
         final boolean raw = srcPath.equals(inputPath);
-        showProgress(true);
-        setStatus(raw ? "Preparing share file (no effects)..."
+        showBlockingProgress(raw ? "Preparing share file (no effects)..."
                 : "Preparing share file...");
         new Thread(() -> {
             try {
@@ -2446,13 +2492,13 @@ public class MainActivity extends Activity {
                 final Intent chooser = Intent.createChooser(send, "Share audio");
                 final String sharedName = mp3.getName();
                 runOnUiThread(() -> {
-                    showProgress(false);
+                    dismissBlockingProgress();
                     setStatus("Sharing " + sharedName + ".");
                     startActivity(chooser);
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
-                    showProgress(false);
+                    dismissBlockingProgress();
                     setStatus("Share failed: " + e.getMessage());
                 });
             }
