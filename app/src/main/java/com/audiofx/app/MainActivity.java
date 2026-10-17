@@ -109,6 +109,7 @@ public class MainActivity extends Activity {
     private ImageButton btnNormalize;
     private Switch switchAgc;
     private Switch switchNs;
+    private Switch switchLimiter;
     private Switch switchLiveFx;
     private Switch switchAutoNorm;
     private LinearLayout advMicPanel;
@@ -322,17 +323,21 @@ public class MainActivity extends Activity {
         seekEcho = findViewById(R.id.seek_echo);
         switchAgc = findViewById(R.id.switch_agc);
         switchNs = findViewById(R.id.switch_ns);
+        switchLimiter = findViewById(R.id.switch_limiter);
         switchLiveFx = findViewById(R.id.switch_livefx);
         switchAutoNorm = findViewById(R.id.switch_autonorm);
         SharedPreferences prefs = getSharedPreferences("soundlab", MODE_PRIVATE);
         switchAgc.setChecked(prefs.getBoolean("mic_agc", false));
         switchNs.setChecked(prefs.getBoolean("mic_ns", true));
+        switchLimiter.setChecked(prefs.getBoolean("mic_limiter", true));
         switchLiveFx.setChecked(prefs.getBoolean("mic_livefx", false));
         switchAutoNorm.setChecked(prefs.getBoolean("mic_autonorm", true));
         switchAgc.setOnCheckedChangeListener((b, on) ->
                 prefs.edit().putBoolean("mic_agc", on).apply());
         switchNs.setOnCheckedChangeListener((b, on) ->
                 prefs.edit().putBoolean("mic_ns", on).apply());
+        switchLimiter.setOnCheckedChangeListener((b, on) ->
+                prefs.edit().putBoolean("mic_limiter", on).apply());
         switchLiveFx.setOnCheckedChangeListener((b, on) ->
                 prefs.edit().putBoolean("mic_livefx", on).apply());
         switchAutoNorm.setOnCheckedChangeListener((b, on) ->
@@ -1365,7 +1370,8 @@ public class MainActivity extends Activity {
             startLiveRecording();
             return;
         }
-        recorder.setPreprocessing(switchAgc.isChecked(), switchNs.isChecked());
+        recorder.setPreprocessing(switchAgc.isChecked(), switchNs.isChecked(),
+                switchLimiter.isChecked());
         File take = new File(getCacheDir(), "rec_take.wav");
         if (!recorder.start(take)) {
             setStatus("Microphone unavailable on this device.");
@@ -1408,7 +1414,8 @@ public class MainActivity extends Activity {
         double echo = seekEcho.getProgress() / 100.0;
         File take = new File(getCacheDir(), "rec_take.wav");
         if (!liveMonitor.start(take, warmth, reverbPreset, echo,
-                switchAgc.isChecked(), switchNs.isChecked())) {
+                switchAgc.isChecked(), switchNs.isChecked(),
+                switchLimiter.isChecked())) {
             setStatus("Live FX unavailable on this device.");
             return;
         }

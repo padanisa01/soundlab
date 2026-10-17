@@ -76,7 +76,8 @@ public class LiveFxMonitor {
      * must have started Chaquopy Python first.
      */
     public synchronized boolean start(File outFile, double warmth, String reverbPreset,
-                                      double echo, boolean wantAgc, boolean wantNs) {
+                                      double echo, boolean wantAgc, boolean wantNs,
+                                      boolean wantLimiter) {
         if (running) {
             return true;
         }
@@ -194,6 +195,10 @@ public class LiveFxMonitor {
         running = true;
         final AudioRecord rec = h.rec;
         final int blockBytes = BLOCK_SAMPLES * h.channels * 2;
+        // Safety limiter on the mic input, before the FX chain, so hot
+        // signals cannot clip the wet take.
+        final LiveLimiter limiter =
+                wantLimiter ? new LiveLimiter(h.sampleRate, h.channels) : null;
         worker = new Thread(() -> {
             byte[] inBuf = new byte[blockBytes];
             int filled = 0;
@@ -212,6 +217,9 @@ public class LiveFxMonitor {
                         continue;
                     }
                     filled = 0;
+                    if (limiter != null) {
+                        limiter.processPcm16(inBuf, blockBytes);
+                    }
                     final byte[] wet;
                     try {
                         wet = chain.callAttr("process_pcm_block", inBuf)
