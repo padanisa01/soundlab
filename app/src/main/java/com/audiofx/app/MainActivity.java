@@ -127,7 +127,6 @@ public class MainActivity extends Activity {
     private Button btnJoin;
     private TextView tvTimeCur;
     private TextView tvTimeTot;
-    private TextView tvSource;
 
     private String inputPath;   // cached WAV picked by the user, or a library pristine
     private String inputFileName = "audio.wav";
@@ -375,7 +374,6 @@ public class MainActivity extends Activity {
         btnJoin.setOnClickListener(v -> joinSelection());
         tvTimeCur = findViewById(R.id.tv_time_cur);
         tvTimeTot = findViewById(R.id.tv_time_tot);
-        tvSource = findViewById(R.id.tv_source);
         waveformView.setOnSelectionListener(this::onSelectionChanged);
 
         selectReverb(reverbPreset);
@@ -989,7 +987,6 @@ public class MainActivity extends Activity {
         waveformView.setDuration(0);
         tvTimeCur.setText("0:00");
         tvTimeTot.setText("0:00");
-        tvSource.setVisibility(View.GONE);
         updateTrackActions();
         updateProjectName();
         int depth = undoDepth();
@@ -1467,9 +1464,6 @@ public class MainActivity extends Activity {
             chipBath.setEnabled(false);
             chipCave.setEnabled(false);
         }
-        tvSource.setVisibility(View.VISIBLE);
-        tvSource.setText("REC");
-        tvSource.setTextColor(getColor(R.color.sl_red));
         tvTimeCur.setText("0:00");
         tvTimeTot.setText("--:--");
         mainHandler.post(recTick);
@@ -1483,8 +1477,6 @@ public class MainActivity extends Activity {
         }
         btnRecord.setAlpha(1f);
         btnRecord.setImageResource(0);
-        tvSource.setVisibility(View.GONE);
-        tvSource.setTextColor(getColor(R.color.sl_org));
         btnProcess.setEnabled(true);
         btnProcess.setAlpha(1f);
         btnTrim.setEnabled(true);
@@ -2014,14 +2006,7 @@ public class MainActivity extends Activity {
         startPositionUpdates();
         setPlayPauseEnabled(true);
         refreshPlayPause();
-        showSourcePill();
         setStatus(playbackStatus(startMs, stopMs));
-    }
-
-    /** Orange pill: INPUT when auditioning raw audio, PROCESSED otherwise. */
-    private void showSourcePill() {
-        tvSource.setVisibility(View.VISIBLE);
-        tvSource.setText(isPlayingInput() ? "INPUT" : "PROCESSED");
     }
 
     /**
@@ -2148,7 +2133,6 @@ public class MainActivity extends Activity {
             setStatus(playbackStatus(startMs, stopMs));
             setPlayPauseEnabled(true);
             refreshPlayPause();
-            showSourcePill();
             btnStop.setEnabled(true);
             return;
         }
@@ -2180,7 +2164,6 @@ public class MainActivity extends Activity {
                 setStatus(playbackStatus(startMs, stopMs));
                 setPlayPauseEnabled(true);
                 refreshPlayPause();
-                showSourcePill();
                 btnStop.setEnabled(true);
             });
             player.setOnCompletionListener(mp -> {
@@ -2190,7 +2173,6 @@ public class MainActivity extends Activity {
                 setStatus("Playback finished.");
                 setPlayPauseEnabled(true);
                 refreshPlayPause();
-                tvSource.setVisibility(View.GONE);
                 tvTimeCur.setText(fmtTime(audioDurationSec));
                 btnStop.setEnabled(false);
             });
@@ -2199,7 +2181,6 @@ public class MainActivity extends Activity {
                 releasePlayer();
                 setPlayPauseEnabled(true);
                 refreshPlayPause();
-                tvSource.setVisibility(View.GONE);
                 btnStop.setEnabled(false);
                 return true;
             });
@@ -2223,7 +2204,6 @@ public class MainActivity extends Activity {
         releasePlayer();
         setPlayPauseEnabled(currentOutputPath != null || inputPath != null);
         refreshPlayPause();
-        tvSource.setVisibility(View.GONE);
         tvTimeCur.setText("0:00");
         btnStop.setEnabled(false);
         setStatus("Playback stopped.");

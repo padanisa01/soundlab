@@ -157,7 +157,6 @@ SCAFFOLD_CHECKS = [
     ("app/src/main/res/layout/activity_main.xml", "toast_view"),
     ("app/src/main/res/layout/activity_main.xml", "undo_badge"),
     ("app/src/main/res/layout/activity_main.xml", "sel_chip_text"),
-    ("app/src/main/res/layout/activity_main.xml", "tv_source"),
     ("app/src/main/res/layout/activity_main.xml", "tv_time_cur"),
     ("app/src/main/res/values/colors.xml", "sl_teal"),
     ("app/src/main/res/values/themes.xml", "Theme.SoundLab"),
