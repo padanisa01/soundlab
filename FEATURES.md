@@ -53,6 +53,11 @@ or the plan changes.
   destination folder, whether or not one was chosen before.
 - **High-contrast mic switches**: on = bright teal thumb on a teal
   track, off = gray thumb on a dark track.
+- **Share**: the hamburger menu's Share action encodes the current
+  audio (processed output with all applied effects, or the input
+  as-is) as a size-optimized 96 kbps MP3 and opens the system app
+  picker. No save required first; shared via FileProvider from the
+  app-private cache.
 - **Hamburger menu + project status bar**: the top bar holds a hamburger
   menu (Open audio file, Recordings library, Save as MP3) and a status
   bar showing the project name, or `<untitled project - date - time>`

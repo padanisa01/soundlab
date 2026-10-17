@@ -70,6 +70,18 @@ class TestEncodeWavToMp3(unittest.TestCase):
         with self.assertRaises(ValueError):
             android_bridge.encode_wav_to_mp3("/nonexistent/in.wav", "/tmp/out.mp3")
 
+    def test_lower_bitrate_smaller_file(self):
+        # Share path encodes at a size-optimized bitrate.
+        with tempfile.TemporaryDirectory() as d:
+            wav_path = os.path.join(d, "in.wav")
+            hi_path = os.path.join(d, "hi.mp3")
+            lo_path = os.path.join(d, "lo.mp3")
+            write_wav(wav_path, sine(440.0, 2.0, 22050), 22050)
+            android_bridge.encode_wav_to_mp3(wav_path, hi_path, 192)
+            android_bridge.encode_wav_to_mp3(wav_path, lo_path, 96)
+            self.assertTrue(os.path.getsize(lo_path)
+                            < os.path.getsize(hi_path))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -30,6 +30,7 @@ import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.core.content.FileProvider;
 import androidx.documentfile.provider.DocumentFile;
 
 import com.chaquo.python.PyObject;
@@ -415,19 +416,22 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Hamburger menu: Open, Library, Save as MP3. */
+    /** Hamburger menu: Open, Library, Save as MP3, Share. */
     private void showMainMenu() {
         boolean canSave = inputPath != null && new File(inputPath).exists();
         final String[] items = canSave
-                ? new String[]{"Open audio file", "Recordings library", "Save as MP3"}
+                ? new String[]{"Open audio file", "Recordings library",
+                        "Save as MP3", "Share"}
                 : new String[]{"Open audio file", "Recordings library"};
         new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
                 .setItems(items, (d, which) -> {
                     String sel = items[which];
-                    if (sel.startsWith("Open")) {
+                    if (sel.equals("Open audio file")) {
                         pickAudio();
-                    } else if (sel.startsWith("Recordings")) {
+                    } else if (sel.equals("Recordings library")) {
                         openLibrary();
+                    } else if (sel.equals("Share")) {
+                        shareAudio();
                     } else {
                         onSaveClicked();
                     }
@@ -2389,6 +2393,70 @@ public class MainActivity extends Activity {
         tvTrackName.setText(stem);
         updateProjectName();
         setStatus("Saved: " + mp3Name + " — project renamed to " + stem + ".");
+    }
+
+    /** Size-optimized bitrate for shared MP3s (CBR). */
+    private static final int SHARE_BITRATE_KBPS = 96;
+
+    /**
+     * Shares the current audio with all applied effects, without
+     * requiring a prior save. The processed output is used when there
+     * is one, else the input as-is. Encoded at a size-optimized
+     * bitrate and handed to the system app picker.
+     */
+    private void shareAudio() {
+        final String srcPath = (currentOutputPath != null
+                && new File(currentOutputPath).exists()) ? currentOutputPath : inputPath;
+        if (srcPath == null || !(new File(srcPath).exists())) {
+            setStatus("Nothing to share yet.");
+            return;
+        }
+        final boolean raw = srcPath.equals(inputPath);
+        showProgress(true);
+        setStatus(raw ? "Preparing share file (no effects)..."
+                : "Preparing share file...");
+        new Thread(() -> {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                File shareDir = new File(getCacheDir(), "share");
+                if (!shareDir.exists() && !shareDir.mkdirs()) {
+                    throw new Exception("Could not create share folder");
+                }
+                String base = inputFileName;
+                int dot = base.lastIndexOf('.');
+                if (dot > 0) {
+                    base = base.substring(0, dot);
+                }
+                base = base.replaceAll("[\\\\/:*?\"<>|]", "_").trim();
+                if (base.isEmpty()) {
+                    base = "soundlab";
+                }
+                File mp3 = new File(shareDir, base + ".mp3");
+                Python.getInstance().getModule("audiofx.android_bridge").callAttr(
+                        "encode_wav_to_mp3", srcPath, mp3.getAbsolutePath(),
+                        SHARE_BITRATE_KBPS);
+                Uri uri = FileProvider.getUriForFile(this,
+                        getPackageName() + ".fileprovider", mp3);
+                Intent send = new Intent(Intent.ACTION_SEND);
+                send.setType("audio/mpeg");
+                send.putExtra(Intent.EXTRA_STREAM, uri);
+                send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                final Intent chooser = Intent.createChooser(send, "Share audio");
+                final String sharedName = mp3.getName();
+                runOnUiThread(() -> {
+                    showProgress(false);
+                    setStatus("Sharing " + sharedName + ".");
+                    startActivity(chooser);
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    showProgress(false);
+                    setStatus("Share failed: " + e.getMessage());
+                });
+            }
+        }).start();
     }
 
     private String copyToSaveFolder(File src, String baseName, boolean overwrite)
