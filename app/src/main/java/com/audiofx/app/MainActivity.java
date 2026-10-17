@@ -151,6 +151,10 @@ public class MainActivity extends Activity {
     private volatile float livePeakAcc;
     private android.app.AlertDialog saveDialog;
     private android.app.AlertDialog diagDialog;
+    /** Session-scoped diagnosis cache: re-show instantly until an op is
+     * applied or the audio changes. Keyed by the diagnosed file path. */
+    private String cachedDiagJson;
+    private String cachedDiagPath;
     private TextView saveFolderLabel;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Runnable scheduledStop;
@@ -982,6 +986,8 @@ public class MainActivity extends Activity {
         releasePlayer();
         btnStop.setEnabled(false);
         currentOutputPath = null;
+        cachedDiagJson = null;
+        cachedDiagPath = null;
         audioDurationSec = 0;
         selStartSec = null;
         selEndSec = null;
@@ -1178,6 +1184,8 @@ public class MainActivity extends Activity {
             try {
                 libraryDb.addOp(entryId, opType, paramsJson, label);
                 added = true;
+                cachedDiagJson = null;
+                cachedDiagPath = null;
                 final double dur = renderChainToCache(entryId);
                 runOnUiThread(() -> {
                     currentOutputPath =
@@ -1223,10 +1231,14 @@ public class MainActivity extends Activity {
             setStatus("Open or record audio first.");
             return;
         }
+        final String diagPath = path;
+        if (diagPath.equals(cachedDiagPath) && cachedDiagJson != null) {
+            showDiagnosisReport(cachedDiagJson);
+            return;
+        }
         setBusy(true);
         setStatus("Diagnosing...");
         waveformView.startProgressAnimation();
-        final String diagPath = path;
         new Thread(() -> {
             try {
                 if (!Python.isStarted()) {
@@ -1238,6 +1250,8 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     setBusy(false);
                     waveformView.finishProgressAnimation();
+                    cachedDiagPath = diagPath;
+                    cachedDiagJson = findingsJson;
                     showDiagnosisReport(findingsJson);
                 });
             } catch (Exception e) {
@@ -1455,6 +1469,8 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 libraryDb.popLastOp(entryId);
+                cachedDiagJson = null;
+                cachedDiagPath = null;
                 final boolean remaining = hasRenderableOps(entryId);
                 final String refreshPath;
                 if (remaining) {
