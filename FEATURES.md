@@ -53,7 +53,7 @@ or the plan changes.
   destination folder, whether or not one was chosen before.
 - **High-contrast mic switches**: on = bright teal thumb on a teal
   track, off = gray thumb on a dark track.
-- **AdMob banner**: test ad unit for now (banner fixed at the bottom of the main screen; swap in the real app ID + ad unit ID at release).
+- **AdMob**: banner fixed at the bottom of the main screen plus a full-screen interstitial in the share flow (tap Share -> ad -> preparing dialog -> app picker). Test ad units for now; swap in the real app ID + ad unit IDs at release.
 - **Share**: the hamburger menu's Share action encodes the current
   audio (processed output with all applied effects, or the input
   as-is) as a size-optimized 96 kbps MP3 and opens the system app

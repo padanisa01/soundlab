@@ -33,9 +33,14 @@ import android.widget.Toast;
 
 import androidx.core.content.FileProvider;
 import androidx.documentfile.provider.DocumentFile;
+import com.google.android.gms.ads.AdError;
 import com.google.android.gms.ads.AdRequest;
 import com.google.android.gms.ads.AdView;
+import com.google.android.gms.ads.FullScreenContentCallback;
+import com.google.android.gms.ads.LoadAdError;
 import com.google.android.gms.ads.MobileAds;
+import com.google.android.gms.ads.interstitial.InterstitialAd;
+import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback;
 
 import com.chaquo.python.PyObject;
 import com.chaquo.python.Python;
@@ -407,6 +412,7 @@ public class MainActivity extends Activity {
         });
         AdView adView = findViewById(R.id.ad_view);
         adView.loadAd(new AdRequest.Builder().build());
+        loadShareInterstitial();
 
         String launchEntryId = getIntent().getStringExtra(LibraryActivity.EXTRA_ENTRY_ID);
         if (launchEntryId != null) {
@@ -2448,13 +2454,67 @@ public class MainActivity extends Activity {
     /** Size-optimized bitrate for shared MP3s (CBR). */
     private static final int SHARE_BITRATE_KBPS = 96;
 
+    /** Test interstitial unit: swap for the real one at release. */
+    private static final String SHARE_INTERSTITIAL_UNIT =
+            "ca-app-pub-3940256099942544/1033173712";
+
+    private InterstitialAd shareInterstitial;
+
+    /** Preloads the interstitial shown in the share flow. */
+    private void loadShareInterstitial() {
+        InterstitialAd.load(this, SHARE_INTERSTITIAL_UNIT,
+                new AdRequest.Builder().build(),
+                new InterstitialAdLoadCallback() {
+                    @Override
+                    public void onAdLoaded(InterstitialAd ad) {
+                        shareInterstitial = ad;
+                        shareInterstitial.setFullScreenContentCallback(
+                                new FullScreenContentCallback() {
+                                    @Override
+                                    public void onAdDismissedFullScreenContent() {
+                                        shareInterstitial = null;
+                                        loadShareInterstitial();
+                                        doShareEncode();
+                                    }
+
+                                    @Override
+                                    public void onAdFailedToShowFullScreenContent(
+                                            AdError e) {
+                                        shareInterstitial = null;
+                                        loadShareInterstitial();
+                                        doShareEncode();
+                                    }
+                                });
+                    }
+
+                    @Override
+                    public void onAdFailedToLoad(LoadAdError e) {
+                        shareInterstitial = null;
+                    }
+                });
+    }
+
     /**
-     * Shares the current audio with all applied effects, without
+     * Share entry point: shows the interstitial when one is ready, then
+     * encodes. Falls straight through to encoding when no ad loaded
+     * (offline or no fill), so share never blocks on ads.
+     */
+    private void shareAudio() {
+        if (shareInterstitial != null) {
+            shareInterstitial.show(this);
+        } else {
+            loadShareInterstitial();
+            doShareEncode();
+        }
+    }
+
+    /**
+     * Encodes the current audio with all applied effects, without
      * requiring a prior save. The processed output is used when there
      * is one, else the input as-is. Encoded at a size-optimized
      * bitrate and handed to the system app picker.
      */
-    private void shareAudio() {
+    private void doShareEncode() {
         final String srcPath = (currentOutputPath != null
                 && new File(currentOutputPath).exists()) ? currentOutputPath : inputPath;
         if (srcPath == null || !(new File(srcPath).exists())) {
