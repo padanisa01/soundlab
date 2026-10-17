@@ -1377,7 +1377,7 @@ public class MainActivity extends Activity {
             list.addView(tuneUpBtn);
         }
 
-        ScrollView scroll = new ScrollView(this);
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
         scroll.addView(list);
         diagDialog = new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
                 .setTitle("Diagnosis")
