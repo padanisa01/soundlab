@@ -105,6 +105,7 @@ public class MainActivity extends Activity {
     private LinearLayout advMicHeader;
     private ImageView advMicChevron;
     private ProgressBar progressBar;
+    private LinearLayout histCard;
     private LinearLayout histList;
     private TextView tvHistCount;
     private WaveformView waveformView;
@@ -343,6 +344,7 @@ public class MainActivity extends Activity {
         btnRecord = findViewById(R.id.btn_record);
         btnStop = findViewById(R.id.btn_stop);
         progressBar = findViewById(R.id.progress_bar);
+        histCard = findViewById(R.id.hist_card);
         histList = findViewById(R.id.hist_list);
         tvHistCount = findViewById(R.id.tv_hist_count);
         waveformView = findViewById(R.id.waveform);
@@ -463,7 +465,6 @@ public class MainActivity extends Activity {
 
     /** Effect history panel: library ops or legacy picked-file history. */
     private void refreshHistoryPanel() {
-        histList.removeAllViews();
         List<String[]> rows = new ArrayList<>();
         if (currentEntryId != null) {
             try {
@@ -477,16 +478,15 @@ public class MainActivity extends Activity {
                 rows.add(new String[]{r.effects, fmtDateTime(r.timestamp)});
             }
         }
-        tvHistCount.setText(rows.size()
-                + (rows.size() == 1 ? " effect" : " effects"));
+        // No history, no panel.
         if (rows.isEmpty()) {
-            TextView empty = new TextView(this);
-            empty.setText("No effects yet — Apply, Normalize, Trim or Join to build history.");
-            empty.setTextColor(getColor(R.color.sl_dim));
-            empty.setTextSize(12.5f);
-            histList.addView(empty);
+            histCard.setVisibility(View.GONE);
             return;
         }
+        histCard.setVisibility(View.VISIBLE);
+        histList.removeAllViews();
+        tvHistCount.setText(rows.size()
+                + (rows.size() == 1 ? " effect" : " effects"));
         float density = getResources().getDisplayMetrics().density;
         int n = 1;
         for (String[] row : rows) {

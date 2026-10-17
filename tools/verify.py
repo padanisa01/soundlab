@@ -116,6 +116,7 @@ SCAFFOLD_CHECKS = [
     ("app/src/main/res/layout/activity_main.xml", "btn_menu"),
     ("app/src/main/res/layout/activity_main.xml", "tv_project_name"),
     ("app/src/main/res/layout/activity_main.xml", "hist_list"),
+    ("app/src/main/res/layout/activity_main.xml", "hist_card"),
     ("app/src/main/res/layout/activity_main.xml", "tv_hist_count"),
     ("app/src/main/res/drawable/ic_menu.xml", "vector"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "showMainMenu"),
