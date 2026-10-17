@@ -2,6 +2,8 @@ package com.audiofx.app;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Gravity;
 import android.Manifest;
 import android.animation.ObjectAnimator;
@@ -33,14 +35,10 @@ import android.widget.Toast;
 
 import androidx.core.content.FileProvider;
 import androidx.documentfile.provider.DocumentFile;
-import com.google.android.gms.ads.AdError;
 import com.google.android.gms.ads.AdRequest;
+import com.google.android.gms.ads.AdSize;
 import com.google.android.gms.ads.AdView;
-import com.google.android.gms.ads.FullScreenContentCallback;
-import com.google.android.gms.ads.LoadAdError;
 import com.google.android.gms.ads.MobileAds;
-import com.google.android.gms.ads.interstitial.InterstitialAd;
-import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback;
 
 import com.chaquo.python.PyObject;
 import com.chaquo.python.Python;
@@ -412,7 +410,6 @@ public class MainActivity extends Activity {
         });
         AdView adView = findViewById(R.id.ad_view);
         adView.loadAd(new AdRequest.Builder().build());
-        loadShareInterstitial();
 
         String launchEntryId = getIntent().getStringExtra(LibraryActivity.EXTRA_ENTRY_ID);
         if (launchEntryId != null) {
@@ -816,46 +813,6 @@ public class MainActivity extends Activity {
 
     private void showProgress(boolean show) {
         progressBar.setVisibility(show ? View.VISIBLE : View.GONE);
-    }
-
-    private AlertDialog blockingProgress;
-
-    /** Modal spinner dialog, visible wherever the page is scrolled. */
-    private void showBlockingProgress(String message) {
-        dismissBlockingProgress();
-        float density = getResources().getDisplayMetrics().density;
-        int pad = (int) (20 * density);
-        LinearLayout layout = new LinearLayout(this);
-        layout.setOrientation(LinearLayout.HORIZONTAL);
-        layout.setGravity(Gravity.CENTER_VERTICAL);
-        layout.setPadding(pad, pad, pad, pad);
-        layout.addView(new ProgressBar(this));
-        TextView tv = new TextView(this);
-        tv.setText(message);
-        tv.setTextColor(getColor(R.color.sl_txt));
-        tv.setTextSize(15f);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        lp.setMarginStart(pad);
-        tv.setLayoutParams(lp);
-        layout.addView(tv);
-        blockingProgress = new AlertDialog.Builder(this,
-                R.style.Theme_SoundLab_Dialog)
-                .setView(layout)
-                .setCancelable(false)
-                .create();
-        blockingProgress.show();
-    }
-
-    private void dismissBlockingProgress() {
-        if (blockingProgress != null) {
-            try {
-                blockingProgress.dismiss();
-            } catch (Exception ignored) {
-            }
-            blockingProgress = null;
-        }
     }
 
     private void copyUriToFile(Uri uri, File dest) throws Exception {
@@ -2454,65 +2411,122 @@ public class MainActivity extends Activity {
     /** Size-optimized bitrate for shared MP3s (CBR). */
     private static final int SHARE_BITRATE_KBPS = 96;
 
-    /** Test interstitial unit: swap for the real one at release. */
-    private static final String SHARE_INTERSTITIAL_UNIT =
-            "ca-app-pub-3940256099942544/1033173712";
-
-    private InterstitialAd shareInterstitial;
-    // Share flow state. The interstitial covers the encode wait, so the
-    // user stares at the ad instead of a spinner.
+    private AlertDialog shareWaitDialog;
+    private AdView shareWaitAd;
+    private Handler shareAdHandler;
+    private Runnable shareAdRefresh;
+    // Share flow state (volatile: written on the encode thread).
     private volatile boolean shareInProgress;
-    private volatile boolean shareAdShowing;
     private volatile boolean shareEncodeDone;
     private volatile File shareMp3Result;
     private volatile String shareEncodeError;
 
-    /** Preloads the interstitial shown in the share flow. */
-    private void loadShareInterstitial() {
-        InterstitialAd.load(this, SHARE_INTERSTITIAL_UNIT,
-                new AdRequest.Builder().build(),
-                new InterstitialAdLoadCallback() {
-                    @Override
-                    public void onAdLoaded(InterstitialAd ad) {
-                        shareInterstitial = ad;
-                        shareInterstitial.setFullScreenContentCallback(
-                                new FullScreenContentCallback() {
-                                    @Override
-                                    public void onAdDismissedFullScreenContent() {
-                                        onShareAdGone();
-                                    }
+    /** Test banner unit for the wait screen: swap for the real one at release. */
+    private static final String SHARE_WAIT_AD_UNIT =
+            "ca-app-pub-3940256099942544/6300978111";
+    /** Fresh ad request every interval while encoding is still running. */
+    private static final long SHARE_AD_REFRESH_MS = 15000;
 
-                                    @Override
-                                    public void onAdFailedToShowFullScreenContent(
-                                            AdError e) {
-                                        onShareAdGone();
-                                    }
-                                });
-                    }
+    /**
+     * Split-screen wait dialog: encoding progress on top, ad below.
+     * Non-cancelable; dismissed automatically when encoding finishes.
+     */
+    private void showShareWaitScreen(String message) {
+        dismissShareWaitScreen();
+        float density = getResources().getDisplayMetrics().density;
+        int pad = (int) (20 * density);
 
-                    @Override
-                    public void onAdFailedToLoad(LoadAdError e) {
-                        shareInterstitial = null;
-                    }
-                });
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        top.setPadding(pad, pad, pad, pad);
+        top.addView(new ProgressBar(this));
+        TextView tv = new TextView(this);
+        tv.setText(message);
+        tv.setTextColor(getColor(R.color.sl_txt));
+        tv.setTextSize(15f);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.setMarginStart(pad);
+        tv.setLayoutParams(lp);
+        top.addView(tv);
+        root.addView(top);
+
+        View divider = new View(this);
+        divider.setBackgroundColor(getColor(R.color.sl_dim));
+        root.addView(divider, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, (int) (1 * density)));
+
+        LinearLayout adPanel = new LinearLayout(this);
+        adPanel.setGravity(Gravity.CENTER);
+        adPanel.setPadding(0, (int) (12 * density), 0, (int) (4 * density));
+        shareWaitAd = new AdView(this);
+        shareWaitAd.setAdSize(AdSize.BANNER);
+        shareWaitAd.setAdUnitId(SHARE_WAIT_AD_UNIT);
+        adPanel.addView(shareWaitAd);
+        root.addView(adPanel);
+
+        shareWaitDialog = new AlertDialog.Builder(this,
+                R.style.Theme_SoundLab_Dialog)
+                .setView(root)
+                .setCancelable(false)
+                .create();
+        shareWaitDialog.show();
+        android.view.Window w = shareWaitDialog.getWindow();
+        if (w != null) {
+            w.setLayout((int) (340 * density),
+                    android.view.WindowManager.LayoutParams.WRAP_CONTENT);
+        }
+        loadShareWaitAd();
+        shareAdHandler = new Handler(Looper.getMainLooper());
+        shareAdRefresh = new Runnable() {
+            @Override
+            public void run() {
+                if (shareWaitDialog == null || shareEncodeDone) {
+                    return;
+                }
+                loadShareWaitAd();
+                shareAdHandler.postDelayed(this, SHARE_AD_REFRESH_MS);
+            }
+        };
+        shareAdHandler.postDelayed(shareAdRefresh, SHARE_AD_REFRESH_MS);
     }
 
-    private void onShareAdGone() {
-        shareAdShowing = false;
-        shareInterstitial = null;
-        loadShareInterstitial();
-        if (shareEncodeDone) {
-            finishShare();
-        } else {
-            showBlockingProgress("Preparing share file...");
+    private void loadShareWaitAd() {
+        if (shareWaitAd != null) {
+            shareWaitAd.loadAd(new AdRequest.Builder().build());
+        }
+    }
+
+    private void dismissShareWaitScreen() {
+        if (shareAdHandler != null) {
+            shareAdHandler.removeCallbacksAndMessages(null);
+            shareAdHandler = null;
+        }
+        shareAdRefresh = null;
+        if (shareWaitAd != null) {
+            try {
+                shareWaitAd.destroy();
+            } catch (Exception ignored) {
+            }
+            shareWaitAd = null;
+        }
+        if (shareWaitDialog != null) {
+            try {
+                shareWaitDialog.dismiss();
+            } catch (Exception ignored) {
+            }
+            shareWaitDialog = null;
         }
     }
 
     /**
      * Share entry point: encoding starts in the background and the
-     * interstitial covers the wait. When no ad is ready (offline or no
-     * fill), the blocking progress dialog covers it instead, so share
-     * never blocks on ads.
+     * split-screen wait dialog covers it (progress on top, ads below).
      */
     private void shareAudio() {
         if (shareInProgress) {
@@ -2525,18 +2539,11 @@ public class MainActivity extends Activity {
             return;
         }
         shareInProgress = true;
-        shareAdShowing = false;
         shareEncodeDone = false;
         shareMp3Result = null;
         shareEncodeError = null;
+        showShareWaitScreen("Preparing share file...");
         new Thread(() -> encodeShareFile(srcPath)).start();
-        if (shareInterstitial != null) {
-            shareAdShowing = true;
-            shareInterstitial.show(this);
-        } else {
-            loadShareInterstitial();
-            showBlockingProgress("Preparing share file...");
-        }
     }
 
     /** Background MP3 encode for the share flow. */
@@ -2567,20 +2574,16 @@ public class MainActivity extends Activity {
             shareEncodeError = e.getMessage();
         } finally {
             shareEncodeDone = true;
-            runOnUiThread(this::onShareEncodeDone);
+            runOnUiThread(this::finishShare);
         }
     }
 
-    private void onShareEncodeDone() {
-        if (shareAdShowing) {
-            return; // the ad-dismiss handler finishes the flow
-        }
-        finishShare();
-    }
-
-    /** Launches the app picker once the encode is done and no ad is up. */
+    /**
+     * Encoding is done: auto-close the wait screen (and its ad) and
+     * open the app picker.
+     */
     private void finishShare() {
-        dismissBlockingProgress();
+        dismissShareWaitScreen();
         shareInProgress = false;
         if (shareEncodeError != null) {
             setStatus("Share failed: " + shareEncodeError);
@@ -2641,7 +2644,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        dismissBlockingProgress();
+        dismissShareWaitScreen();
         super.onDestroy();
         if (recorder.isRecording()) {
             recorder.stop();
