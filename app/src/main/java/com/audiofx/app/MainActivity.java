@@ -2146,6 +2146,9 @@ public class MainActivity extends Activity {
         });
     }
 
+    /* Standing logging rule (AM-6): never concatenate secrets, tokens, or
+     * user identity into a log string. API keys may live in memory and
+     * request headers only. HTTP failures are logged by status code alone. */
     /** POST the summary request to Groq; returns the response body or "". */
     private String postGroqSummary(String bodyJson, String apiKey) {
         java.net.HttpURLConnection conn = null;
