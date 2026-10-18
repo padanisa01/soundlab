@@ -43,7 +43,7 @@ class RepairTest(unittest.TestCase):
     def test_fade_ends(self):
         # DC signal: the ramp itself must be monotonic.
         sig = [0.8] * int(0.5 * SR)
-        out = repair.fade_ends(sig, SR, fade_sec=0.02)
+        out = list(repair.fade_ends(sig, SR, fade_sec=0.02))
         fade_n = int(0.02 * SR)
         self.assertLess(abs(out[0]), 0.01)
         self.assertLess(abs(out[-1]), 0.01)
@@ -93,7 +93,7 @@ class RepairTest(unittest.TestCase):
 
     def test_declip_leaves_clean_audio_alone(self):
         sig = sine(440, 0.5, 0.5)
-        self.assertEqual(repair.declip(sig), sig)
+        self.assertEqual(list(repair.declip(sig)), sig)
 
     def test_denoise_reduces_hiss(self):
         random.seed(3)

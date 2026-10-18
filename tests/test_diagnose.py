@@ -295,6 +295,96 @@ class TuneUpConvergeTest(unittest.TestCase):
         self.assertEqual(idx, len(calls))
         self.assertIn("fixes", op["params"])
 
+    def test_converge_writes_output_once(self):
+        import json
+        import numpy as np
+        import tempfile
+        from audiofx import android_bridge as ab
+        from audiofx.pipeline import read_wav_mono
+
+        work = tempfile.mkdtemp()
+        src = self._nasty_src(work)
+        fj = ab.diagnose_file(src)
+        out = os.path.join(work, "converged.wav")
+        before = set(os.listdir(work))
+        op = json.loads(ab.tune_up_converge(src, fj, "singing",
+                                            output_path=out))
+        # Single write, no temp files left behind.
+        self.assertEqual(set(os.listdir(work)) - before, {"converged.wav"})
+        self.assertIn("duration_s", op)
+        self.assertGreater(op["duration_s"], 0)
+        # The adopted file decodes to real audio of the right length.
+        got, sr = read_wav_mono(out)
+        self.assertEqual(sr, 44100)
+        self.assertEqual(len(got), len(read_wav_mono(src)[0]))
+        self.assertGreater(float(np.max(np.abs(got))), 0.01)
+
+    def test_incremental_render_matches_full(self):
+        import json
+        import numpy as np
+        import tempfile
+        from audiofx import android_bridge as ab
+        from audiofx.pipeline import read_wav_mono
+
+        work = tempfile.mkdtemp()
+        src = self._nasty_src(work)
+        # Full chain render from pristine...
+        ops = [{"op": "dc_remove", "params": {}},
+               {"op": "hum_notch", "params": {"freq_hz": 60.0}},
+               {"op": "fade_ends", "params": {}}]
+        full = os.path.join(work, "full.wav")
+        ab.render_chain(src, json.dumps(ops), full)
+        # Seed the tip with the chain prefix, then apply the last op from it.
+        ab.render_chain(src, json.dumps(ops[:2]),
+                        os.path.join(work, "tip.wav"), cache_key="e1")
+        inc = os.path.join(work, "inc.wav")
+        r = ab.render_chain_from_tip("e1", json.dumps(ops[2:]), inc)
+        self.assertTrue(r["cache_hit"])
+        a = np.asarray(read_wav_mono(full)[0], dtype=np.float64)
+        b = np.asarray(read_wav_mono(inc)[0], dtype=np.float64)
+        self.assertEqual(a.shape, b.shape)
+        self.assertTrue(np.array_equal(a, b))
+
+    def test_converge_adopt_matches_full_chain(self):
+        import json
+        import numpy as np
+        import tempfile
+        from audiofx import android_bridge as ab
+        from audiofx.pipeline import read_wav_mono
+
+        work = tempfile.mkdtemp()
+        src = self._nasty_src(work)
+        base = [{"op": "dc_remove", "params": {}}]
+        # Seed the tip the way applyLibraryOp does.
+        ab.render_chain(src, json.dumps(base),
+                        os.path.join(work, "tip.wav"), cache_key="e9")
+        fj = ab.diagnose_file(os.path.join(work, "tip.wav"))
+        adopted = os.path.join(work, "adopted.wav")
+        op = json.loads(ab.tune_up_converge(
+            os.path.join(work, "tip.wav"), fj, "singing",
+            output_path=adopted, cache_key="e9"))
+        # The adopted file must equal a full pristine-based chain render:
+        # converge ran on the exact float tip, not the quantized file.
+        ref = os.path.join(work, "ref.wav")
+        ab.render_chain(src, json.dumps(
+            base + [{"op": "tune_up", "params": op["params"]}]), ref)
+        a = np.asarray(read_wav_mono(ref)[0], dtype=np.float64)
+        b = np.asarray(read_wav_mono(adopted)[0], dtype=np.float64)
+        self.assertTrue(np.array_equal(a, b))
+
+    def test_tip_cache_miss_falls_back(self):
+        import json
+        import tempfile
+        from audiofx import android_bridge as ab
+
+        work = tempfile.mkdtemp()
+        src = self._nasty_src(work)
+        r = ab.render_chain_from_tip(
+            "nope", json.dumps([{"op": "fade_ends", "params": {}}]),
+            os.path.join(work, "x.wav"))
+        self.assertFalse(r["ok"])
+        self.assertFalse(r["cache_hit"])
+
     def test_converge_survives_broken_progress(self):
         import json
         import tempfile

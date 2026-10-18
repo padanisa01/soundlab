@@ -76,7 +76,7 @@ def _istft(spectra, n_fft, hop, length):
         wsum[i * hop : i * hop + n_fft] += win
     nz = wsum > 1e-9
     out[nz] /= wsum[nz]
-    return out[:length].tolist()
+    return out[:length]
 
 
 def _freqs(n_fft, sample_rate):
@@ -89,6 +89,11 @@ def _freqs(n_fft, sample_rate):
 
 def dc_remove(samples):
     """Subtract the mean (DC offset)."""
+    if _HAVE_NUMPY:
+        x = _as_np(samples)
+        if x.size == 0:
+            return _np.zeros(0)
+        return x - _np.mean(x)
     if not samples:
         return []
     mean = sum(samples) / len(samples)
@@ -102,8 +107,14 @@ def fade_ends(samples, sample_rate, fade_sec=0.03):
     2/30 < 0.1) while staying inaudible."""
     n = len(samples)
     if n == 0:
-        return []
+        return _np.zeros(0) if _HAVE_NUMPY else []
     fade_n = max(1, min(int(fade_sec * sample_rate), n // 2))
+    if _HAVE_NUMPY:
+        out = _as_np(samples).copy()
+        ramp = (_np.arange(fade_n) + 1) / (fade_n + 1)
+        out[:fade_n] *= ramp
+        out[n - fade_n :] *= ramp[::-1]
+        return out
     out = list(samples)
     for i in range(fade_n):
         t = (i + 1) / (fade_n + 1)
@@ -163,7 +174,7 @@ def silence_trim(samples, sample_rate, threshold_db=-45.0,
         if re - rs >= min_len and re - rs > 2 * keep_n:
             cuts.append((rs + keep_n, re - keep_n))
     if not cuts:
-        return list(samples)
+        return _as_np(samples) if _HAVE_NUMPY else list(samples)
     out = []
     pos = 0
     for cs, ce in cuts:
@@ -180,7 +191,7 @@ def silence_trim(samples, sample_rate, threshold_db=-45.0,
         else:
             pos = ce
     out.extend(samples[pos:])
-    return out
+    return _np.asarray(out, dtype=_np.float64) if _HAVE_NUMPY else out
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +207,7 @@ def _padded_stft_process(x, n_fft, hop, frame_fn):
     spectra, _, _ = _stft(xp, n_fft, hop)
     spectra = frame_fn(spectra)
     out = _np.asarray(_istft(spectra, n_fft, hop, xp.size))
-    return out[pad : pad + x.size].tolist()
+    return out[pad : pad + x.size]
 
 
 def hum_notch(samples, sample_rate, freq_hz):
@@ -238,8 +249,15 @@ def declip(samples, threshold=0.999, context=32):
     harshness of clipping; it cannot recover the original peaks."""
     n = len(samples)
     if n == 0:
-        return []
-    out = list(samples)
+        return _np.zeros(0) if _HAVE_NUMPY else []
+    if _HAVE_NUMPY:
+        x = _as_np(samples)
+        if not _np.any(_np.abs(x) >= threshold):
+            return x.copy()  # common case: single vector pass, no scan
+        work = x.tolist()
+    else:
+        work = list(samples)
+    out = list(work)
     i = 0
     while i < n:
         if abs(out[i]) < threshold:
@@ -264,7 +282,7 @@ def declip(samples, threshold=0.999, context=32):
             h01 = -2 * t3 + 3 * t2
             h11 = t3 - t2
             out[a + k] = h00 * x0 + h10 * run * m0 + h01 * x1 + h11 * run * m1
-    return out
+    return _np.asarray(out, dtype=_np.float64) if _HAVE_NUMPY else out
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +369,7 @@ def deplosive(samples, sample_rate, cutoff_hz=150.0, reduction=0.9):
         m2[lo:hi] = 1.0
         mask = _moving_avg(_np.pad(m2, (sm, sm))[: n + sm], sm)[:n]
     out = x - mask * low * reduction
-    return out.tolist()
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +396,7 @@ def deess(samples, sample_rate, lo_hz=5000.0, hi_hz=9000.0, reduction_db=8.0):
     frame = max(1, int(0.02 * sample_rate))
     nb = n // frame
     if nb == 0:
-        return x.tolist()
+        return x
     b_rms = _np.sqrt(_np.mean(band[: nb * frame].reshape(nb, frame) ** 2,
                               axis=1))
     x_rms = _np.sqrt(_np.mean(x[: nb * frame].reshape(nb, frame) ** 2,
@@ -391,7 +409,7 @@ def deess(samples, sample_rate, lo_hz=5000.0, hi_hz=9000.0, reduction_db=8.0):
     g_full = _np.interp(_np.arange(n), _np.arange(nb) * frame + frame / 2, g,
                         left=g[0], right=g[-1])
     out = x - (1.0 - g_full) * band
-    return out.tolist()
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +443,7 @@ def level(samples, sample_rate, window_sec=0.5, max_gain_db=12.0):
         grid = (_np.arange(nw) + 0.5) * win
         g_full = _np.interp(_np.arange(n), grid, sm, left=sm[0],
                             right=sm[-1])
-        return (x * g_full).tolist()
+        return x * g_full
     # Pure-Python fallback.
     rms = []
     for i in range(0, n, win):
@@ -531,15 +549,15 @@ def loudness_normalize(samples, sample_rate, target_lufs=-16.0,
     n = x.size
     if n == 0:
         return []
-    lufs = measure_lufs(x.tolist(), sample_rate)
+    lufs = measure_lufs(x, sample_rate)
     if lufs == float("-inf"):
-        return x.tolist()
+        return x
     gain = 10.0 ** ((target_lufs - lufs) / 20.0)
     peak = float(_np.max(_np.abs(x)))
     ceiling = 10.0 ** (peak_ceiling_db / 20.0)
     if peak * gain > ceiling and peak > 0:
         gain = ceiling / peak
-    return (x * gain).tolist()
+    return x * gain
 
 
 # ---------------------------------------------------------------------------
@@ -556,9 +574,9 @@ def eq_balance(samples, sample_rate, low_gain_db=0.0, high_gain_db=0.0):
     low_gain_db = max(-6.0, min(6.0, float(low_gain_db)))
     high_gain_db = max(-6.0, min(6.0, float(high_gain_db)))
     if abs(low_gain_db) < 0.05 and abs(high_gain_db) < 0.05:
-        return x.tolist()
+        return x
     freqs = [20, 100, 250, 800, 2000, 5000, 12000, 20000]
     gains = [low_gain_db, low_gain_db, low_gain_db, 0.0, 0.0,
              high_gain_db, high_gain_db, high_gain_db]
     taps = _fir_from_response(sample_rate, freqs, gains)
-    return _fft_convolve_np(x, taps).tolist()
+    return _fft_convolve_np(x, taps)

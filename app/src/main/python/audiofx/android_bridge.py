@@ -12,6 +12,38 @@ import wave
 from . import diagnose as _diagnose
 from . import repair as _repair
 from .effects import Echo, Reverb, Warmth
+
+try:
+    import numpy as _np
+
+    _HAVE_NP = True
+except ImportError:  # pragma: no cover
+    _np = None
+    _HAVE_NP = False
+
+import hashlib as _hashlib
+
+# Chain-tip cache: entry id -> [float samples, sample_rate]. Lets a new op
+# render incrementally from the previous tip instead of re-rendering the
+# whole chain from pristine. The buffer is the exact float chain output:
+# no intermediate 16-bit quantization or clipping (intermediate buffers
+# can legitimately exceed +/-1.0, e.g. hum_notch overshoot). Validity is
+# tracked by the Java caller, which clears it on entry switch; every
+# successful render (full or incremental) re-seeds it. Bounded to a couple
+# of entries; a miss just falls back to a full render.
+_tip_cache = {}
+_TIP_CACHE_MAX = 2
+
+
+def _tip_seed(cache_key, samples, sample_rate):
+    if cache_key is None:
+        return
+    if cache_key in _tip_cache:
+        del _tip_cache[cache_key]
+    while len(_tip_cache) >= _TIP_CACHE_MAX:
+        _tip_cache.pop(next(iter(_tip_cache)))
+    store = samples.copy() if _HAVE_NP else list(samples)
+    _tip_cache[cache_key] = [store, sample_rate]
 from .pipeline import (
     EffectChain,
     encode_mp3,
@@ -40,13 +72,20 @@ def _apply_op(samples, sample_rate, op, params, index):
     """Apply one render_chain op. Shared by the main loop and the tune_up
     expansion so the two can never drift apart."""
     if op == "fx":
-        samples, _, _ = _apply_fx(
-            samples, sample_rate,
+        # The effects module is list-based (Echo's feedback loop is
+        # inherently sequential); convert at the boundary only.
+        fx_in = (samples.tolist()
+                 if _HAVE_NP and isinstance(samples, _np.ndarray)
+                 else samples)
+        processed, _, _ = _apply_fx(
+            fx_in, sample_rate,
             warmth=params.get("warmth", 0.5),
             reverb_preset=params.get("reverb_preset", "studio"),
             echo=params.get("echo", 0.3),
             start_sec=params.get("start_sec"),
             end_sec=params.get("end_sec"))
+        samples = (_np.asarray(processed, dtype=_np.float64)
+                   if _HAVE_NP else processed)
     elif op == "normalize":
         samples, _ = _apply_normalize(
             samples, sample_rate,
@@ -203,16 +242,34 @@ def _apply_normalize(samples, sample_rate, target_db=-1.0, percentile=99.0):
     """
     if not 0.0 < percentile <= 100.0:
         raise ValueError("percentile must be in (0, 100]: %r" % (percentile,))
-    peak = max(abs(s) for s in samples)
-    if peak <= 0:
-        raise ValueError("input is silent: nothing to normalize")
-    mag = sorted(abs(s) for s in samples)
-    ref = mag[min(len(mag) - 1, int(math.ceil(percentile / 100.0 * len(mag))) - 1)]
-    if ref <= 0:
-        raise ValueError("input is silent below the percentile: nothing to normalize")
     target_peak = 10.0 ** (target_db / 20.0)
-    gain = target_peak / ref
-    out = [min(max(s * gain, -target_peak), target_peak) for s in samples]
+    if _HAVE_NP:
+        x = _np.asarray(samples, dtype=_np.float64)
+        n = x.size
+        if n == 0:
+            raise ValueError("input is silent: nothing to normalize")
+        peak = float(_np.max(_np.abs(x)))
+        if peak <= 0:
+            raise ValueError("input is silent: nothing to normalize")
+        k = min(n - 1, int(math.ceil(percentile / 100.0 * n)) - 1)
+        ref = float(_np.partition(_np.abs(x), k)[k])
+        if ref <= 0:
+            raise ValueError(
+                "input is silent below the percentile: nothing to normalize")
+        gain = target_peak / ref
+        out = _np.clip(x * gain, -target_peak, target_peak)
+    else:
+        peak = max(abs(s) for s in samples)
+        if peak <= 0:
+            raise ValueError("input is silent: nothing to normalize")
+        mag = sorted(abs(s) for s in samples)
+        ref = mag[min(len(mag) - 1,
+                      int(math.ceil(percentile / 100.0 * len(mag))) - 1)]
+        if ref <= 0:
+            raise ValueError(
+                "input is silent below the percentile: nothing to normalize")
+        gain = target_peak / ref
+        out = [min(max(s * gain, -target_peak), target_peak) for s in samples]
     info = {
         "peak_before_db": round(20 * math.log10(peak), 2),
         "ref_percentile_db": round(20 * math.log10(ref), 2),
@@ -296,6 +353,16 @@ def _apply_trim(samples, sample_rate, start_sec, end_sec, edge_fade_sec=0.005):
     unchanged. Raises ValueError on a missing/empty selection.
     """
     s, e = _clamp_samples_window(samples, sample_rate, start_sec, end_sec)
+    if _HAVE_NP:
+        x = _np.asarray(samples, dtype=_np.float64)
+        out = x.copy()
+        out[s:e] = 0.0
+        fade_n = min(int(edge_fade_sec * sample_rate), (e - s) // 2)
+        if fade_n > 0:
+            t = 1.0 - (_np.arange(fade_n) + 1) / (fade_n + 1)
+            out[s : s + fade_n] = x[s : s + fade_n] * t
+            out[e - fade_n : e] = x[e - fade_n : e] * t[::-1]
+        return out, s, e
     out = list(samples)
     for i in range(s, e):
         out[i] = 0.0
@@ -340,6 +407,16 @@ def _apply_join(samples, sample_rate, start_sec, end_sec, fade_sec=0.005):
     if s <= 0 and e >= n:
         raise ValueError("selection covers the whole file: nothing to join")
     fade_n = min(int(fade_sec * sample_rate), s, n - e)
+    if _HAVE_NP:
+        x = _np.asarray(samples, dtype=_np.float64)
+        head, tail = x[:s], x[e:]
+        if fade_n > 0:
+            t = (_np.arange(fade_n) + 1) / (fade_n + 1)
+            jx = head[s - fade_n :] * (1 - t) + tail[:fade_n] * t
+            out = _np.concatenate([head[: s - fade_n], jx, tail[fade_n:]])
+        else:
+            out = _np.concatenate([head, tail])
+        return out, s, e
     head, tail = samples[:s], samples[e:]
     if fade_n > 0:
         out = head[:s - fade_n]
@@ -373,7 +450,32 @@ def join_remove(input_path, output_path, start_sec, end_sec, fade_sec=0.005):
     }
 
 
-def render_chain(pristine_path, ops_json, output_path, progress=None):
+def _run_ops(samples, sample_rate, ops, progress=None):
+    """Fold parsed op dicts over an in-memory buffer.
+
+    The buffer stays a NumPy float64 array throughout when NumPy is
+    available, otherwise a Python list; each op accepts array-like input
+    and returns the same kind it runs under. Returns (samples, sample_rate).
+    """
+    if _HAVE_NP:
+        samples = _np.asarray(samples, dtype=_np.float64)
+    else:
+        samples = list(samples)
+    for i, entry in enumerate(ops):
+        if not isinstance(entry, dict):
+            raise ValueError("op #%d is not an object" % i)
+        op = entry.get("op")
+        params = entry.get("params") or {}
+        if not isinstance(params, dict):
+            raise ValueError("op #%d params must be an object" % i)
+        _cb(progress, "tuneUpStepActive", i)
+        samples = _apply_op(samples, sample_rate, op, params, i)
+        _cb(progress, "tuneUpStepDone", i)
+    return samples, sample_rate
+
+
+def render_chain(pristine_path, ops_json, output_path, progress=None,
+                 cache_key=None):
     """Render a library op chain: fold ops over pristine in float, write
     the 16-bit WAV once.
 
@@ -392,6 +494,10 @@ def render_chain(pristine_path, ops_json, output_path, progress=None):
     step protocol (tuneUpStepActive(int) / tuneUpStepDone(int)); it is
     only ever passed by tune_up_converge.
 
+    ``cache_key`` (e.g. the library entry id) seeds the chain-tip cache
+    with the exact float output, so a later render_chain_from_tip can
+    continue incrementally.
+
     Returns {"ok": True, "output_path": ..., "duration_s": ..., "sample_rate": ...}.
     """
     if not os.path.isfile(pristine_path):
@@ -403,20 +509,41 @@ def render_chain(pristine_path, ops_json, output_path, progress=None):
     if not isinstance(ops, list):
         raise ValueError("ops_json must be a JSON array of ops")
     samples, sample_rate = read_wav_mono(pristine_path)
-    samples = list(samples)
-    for i, entry in enumerate(ops):
-        if not isinstance(entry, dict):
-            raise ValueError("op #%d is not an object" % i)
-        op = entry.get("op")
-        params = entry.get("params") or {}
-        if not isinstance(params, dict):
-            raise ValueError("op #%d params must be an object" % i)
-        _cb(progress, "tuneUpStepActive", i)
-        samples = _apply_op(samples, sample_rate, op, params, i)
-        _cb(progress, "tuneUpStepDone", i)
+    samples, sample_rate = _run_ops(samples, sample_rate, ops, progress)
+    _tip_seed(cache_key, samples, sample_rate)
     write_wav(output_path, samples, sample_rate)
     return {
         "ok": True,
+        "output_path": output_path,
+        "duration_s": round(len(samples) / sample_rate, 2),
+        "sample_rate": sample_rate,
+    }
+
+
+def render_chain_from_tip(cache_key, new_ops_json, output_path,
+                           progress=None):
+    """Apply new ops starting from the cached chain tip (see _tip_cache).
+
+    The caller guarantees the cache entry is current for the entry being
+    rendered. On a miss returns {"ok": False, "cache_hit": False} and the
+    caller falls back to a full render_chain. On a hit the tip is exact
+    float, so incremental rendering is bit-identical to a full render.
+    """
+    entry = _tip_cache.get(cache_key)
+    if entry is None:
+        return {"ok": False, "cache_hit": False, "reason": "tip-cache miss"}
+    try:
+        ops = json.loads(new_ops_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("new_ops_json is not valid JSON: %s" % exc)
+    if not isinstance(ops, list):
+        raise ValueError("new_ops_json must be a JSON array of ops")
+    samples, sample_rate = _run_ops(entry[0], entry[1], ops, progress)
+    _tip_seed(cache_key, samples, sample_rate)
+    write_wav(output_path, samples, sample_rate)
+    return {
+        "ok": True,
+        "cache_hit": True,
         "output_path": output_path,
         "duration_s": round(len(samples) / sample_rate, 2),
         "sample_rate": sample_rate,
@@ -453,7 +580,8 @@ def summarize_parse(response_json):
 
 
 def tune_up_converge(input_path, findings_json, profile="podcast",
-                     progress=None, max_passes=3):
+                     progress=None, max_passes=3, output_path=None,
+                     cache_key=None):
     """Iterate the tune-up until no fixable warns remain (or max_passes).
 
     Conservative fixes (denoise, de-esser, EQ) often don't clear their own
@@ -463,6 +591,13 @@ def tune_up_converge(input_path, findings_json, profile="podcast",
     fixes, so it stays a single history entry / single undo. Fixes are
     pure functions, so rendering incrementally per pass equals rendering
     the flat fix list once.
+
+    Passes run on the in-memory buffer (no temp WAVs); the converged audio
+    is written once to ``output_path`` when given, so the caller can adopt
+    it directly instead of re-rendering the chain. The top-level return
+    dict carries duration_s for the adopted render. ``cache_key`` seeds the
+    chain-tip cache with the exact float output for later incremental
+    renders.
 
     ``progress`` is an optional Java callback with methods
     tuneUpPassStarted(passNumber, maxPasses, labelsJson),
@@ -475,37 +610,34 @@ def tune_up_converge(input_path, findings_json, profile="podcast",
         raise ValueError("findings_json is not valid JSON: %s" % exc)
     if not isinstance(findings, list):
         raise ValueError("findings_json must be a JSON array of findings")
+    if not os.path.isfile(input_path):
+        raise ValueError("input file not found: %s" % input_path)
     prof = _diagnose.TUNE_UP_PROFILES.get(
         profile, _diagnose.TUNE_UP_PROFILES[_diagnose.DEFAULT_PROFILE])
     all_fixes = []
-    cur_in = input_path
-    tmps = []
+    # Prefer the exact float chain tip over the 16-bit file when the
+    # caller seeded it: the adopted render is then bit-identical to a
+    # full chain re-render. (The file is only +/-0.5 LSB off, but exact
+    # is free here.)
+    tip = _tip_cache.get(cache_key) if cache_key is not None else None
+    if tip is not None:
+        samples, sample_rate = tip[0].copy(), tip[1]
+    else:
+        samples, sample_rate = read_wav_mono(input_path)
     passes = 0
-    try:
-        for _ in range(max_passes):
-            fixes = _diagnose.tune_up_fixes(findings, profile)
-            if not fixes:
-                break
-            passes += 1
-            _cb(progress, "tuneUpPassStarted", passes, max_passes,
-                json.dumps([f.get("label", f["op"]) for f in fixes]))
-            all_fixes.extend(fixes)
-            tmp = os.path.join(os.path.dirname(os.path.abspath(input_path)),
-                               ".tune_tmp_%d.wav" % len(tmps))
-            tmps.append(tmp)
-            r = render_chain(cur_in, json.dumps(
-                [{"op": f["op"], "params": f["params"]} for f in fixes]),
-                tmp, progress=progress)
-            if not r.get("ok"):
-                break
-            cur_in = tmp
-            findings = json.loads(diagnose_file(tmp))
-    finally:
-        for t in tmps:
-            try:
-                os.unlink(t)
-            except OSError:
-                pass
+    for _ in range(max_passes):
+        fixes = _diagnose.tune_up_fixes(findings, profile)
+        if not fixes:
+            break
+        passes += 1
+        _cb(progress, "tuneUpPassStarted", passes, max_passes,
+            json.dumps([f.get("label", f["op"]) for f in fixes]))
+        all_fixes.extend(fixes)
+        samples, sample_rate = _run_ops(
+            samples, sample_rate,
+            [{"op": f["op"], "params": f["params"]} for f in fixes],
+            progress)
+        findings = _diagnose.analyze(samples, sample_rate)
     labels = []
     seen = set()
     for f in all_fixes:
@@ -518,10 +650,15 @@ def tune_up_converge(input_path, findings_json, profile="podcast",
             summary += " (%d passes)" % passes
     else:
         summary = "Tune Up (%s): nothing to fix" % prof["label"]
+    if output_path is not None:
+        write_wav(output_path, samples, sample_rate)
+    _tip_seed(cache_key, samples, sample_rate)
     return json.dumps({
         "op": "tune_up",
         "params": {"fixes": all_fixes, "summary": summary,
                    "profile": profile, "passes": passes},
+        "duration_s": round(len(samples) / sample_rate, 2),
+        "sample_rate": sample_rate,
     })
 
 

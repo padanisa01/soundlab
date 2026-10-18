@@ -159,6 +159,10 @@ public class MainActivity extends Activity {
     /** Path of the audio file the current diagnosis (and its Tune Up) refers
      * to: currentOutputPath at diagnosis time, else the pristine input. */
     private String diagLastPath;
+    /** Library entry id whose exact float chain tip is cached in Python
+     * (see _tip_cache in android_bridge). Valid only while it equals the
+     * entry being rendered; entry switches invalidate it implicitly. */
+    private String tipCacheKey;
     /** Tune-up step tracker overlay on the waveform (per-pass step list). */
     private LinearLayout tuneupOverlay;
     private LinearLayout tuneupSteps;
@@ -1118,7 +1122,8 @@ public class MainActivity extends Activity {
     /**
      * Render the entry's op chain to the render cache (call on a background
      * thread). Writes to a temp file and atomically renames into place.
-     * Returns the rendered duration in seconds.
+     * Seeds the Python chain-tip cache under the entry id, so the next
+     * apply can render incrementally. Returns the rendered duration.
      */
     private double renderChainToCache(String entryId) throws Exception {
         LibraryDb.LibraryEntry e = libraryDb.getEntry(entryId);
@@ -1133,13 +1138,75 @@ public class MainActivity extends Activity {
         File tmp = new File(render.getParentFile(), render.getName() + ".tmp");
         PyObject result = Python.getInstance().getModule("audiofx.android_bridge")
                 .callAttr("render_chain", e.pristinePath, opsJson,
-                        tmp.getAbsolutePath());
+                        tmp.getAbsolutePath(), null, entryId);
         double dur = Double.parseDouble(
                 result.callAttr("get", "duration_s").toString());
         if (!tmp.renameTo(render)) {
             copyFile(tmp, render);
             tmp.delete();
         }
+        tipCacheKey = entryId;
+        return dur;
+    }
+
+    /**
+     * Render a single new op starting from the cached chain tip (call on a
+     * background thread). Falls back to a full renderChainToCache on a
+     * cache miss. Returns the rendered duration in seconds.
+     */
+    private double renderIncrementalOrFull(String entryId, String opType,
+            String paramsJson) throws Exception {
+        if (tipCacheKey != null && tipCacheKey.equals(entryId)) {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                String opJson = "[{\"op\":" + JSONObject.quote(opType)
+                        + ",\"params\":" + (paramsJson != null ? paramsJson : "{}")
+                        + "}]";
+                File render = libraryDb.renderFile(entryId);
+                File tmp = new File(render.getParentFile(),
+                        render.getName() + ".tmp");
+                PyObject r = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("render_chain_from_tip", entryId, opJson,
+                                tmp.getAbsolutePath());
+                if ("True".equals(r.callAttr("get", "cache_hit").toString())) {
+                    double dur = Double.parseDouble(
+                            r.callAttr("get", "duration_s").toString());
+                    if (!tmp.renameTo(render)) {
+                        copyFile(tmp, render);
+                        tmp.delete();
+                    }
+                    return dur;
+                }
+            } catch (Exception e) {
+                android.util.Log.w("AudioMechanic",
+                        "incremental render failed; full render", e);
+            }
+        }
+        return renderChainToCache(entryId);
+    }
+
+    /**
+     * Adopt a pre-rendered WAV (e.g. the tune-up's converged output) as the
+     * entry's render cache without re-rendering. The Python tip cache was
+     * already seeded by the producer. Returns the adopted duration.
+     */
+    private double adoptPreRendered(String entryId, File preRendered,
+            double dur) throws Exception {
+        if (preRendered == null || !preRendered.exists()) {
+            throw new Exception("pre-rendered audio missing");
+        }
+        File render = libraryDb.renderFile(entryId);
+        if (!preRendered.renameTo(render)) {
+            copyFile(preRendered, render);
+            if (!preRendered.delete()) {
+                android.util.Log.w("AudioMechanic",
+                        "could not delete tune-up temp file");
+            }
+        }
+        tipCacheKey = entryId;
         return dur;
     }
 
@@ -1189,6 +1256,27 @@ public class MainActivity extends Activity {
     private void applyLibraryOp(final String opType, final String paramsJson,
                                 final String label, final String workingMsg,
                                 final String doneMsg, final Runnable onRendered) {
+        applyLibraryOp(opType, paramsJson, label, workingMsg, doneMsg,
+                onRendered, true, null, -1);
+    }
+
+    /**
+     * Apply a tune-up whose converged audio is already rendered (adopt the
+     * file instead of re-rendering the chain).
+     */
+    private void applyTuneUpOp(final String paramsJson, final String label,
+                               final String workingMsg, final String doneMsg,
+                               final Runnable onRendered, final File preRendered,
+                               final double preRenderedDur) {
+        applyLibraryOp("tune_up", paramsJson, label, workingMsg, doneMsg,
+                onRendered, false, preRendered, preRenderedDur);
+    }
+
+    private void applyLibraryOp(final String opType, final String paramsJson,
+                                final String label, final String workingMsg,
+                                final String doneMsg, final Runnable onRendered,
+                                final boolean incremental, final File preRendered,
+                                final double preRenderedDur) {
         final String entryId = currentEntryId;
         if (entryId == null) {
             return;
@@ -1215,7 +1303,14 @@ public class MainActivity extends Activity {
                 cachedDiagPath = null;
                 diagLastPath = null;
                 diagSummaryCache.clear();
-                final double dur = renderChainToCache(entryId);
+                final double dur;
+                if (preRendered != null) {
+                    dur = adoptPreRendered(entryId, preRendered, preRenderedDur);
+                } else if (incremental) {
+                    dur = renderIncrementalOrFull(entryId, opType, paramsJson);
+                } else {
+                    dur = renderChainToCache(entryId);
+                }
                 runOnUiThread(() -> {
                     currentOutputPath =
                             libraryDb.renderFile(entryId).getAbsolutePath();
@@ -1671,7 +1766,7 @@ public class MainActivity extends Activity {
                         fix.optJSONObject("params").toString(),
                         fix.optString("label"),
                         "Applying fix...", "Fix applied.",
-                        () -> onDiagnoseClicked());
+                        () -> loadWaveformForPath(currentOutputPath));
             });
             body.addView(fixBtn);
         }
@@ -2067,9 +2162,15 @@ public class MainActivity extends Activity {
     }
 
     /** One-button Tune Up: converge the profile's fixes over up to 3 passes
-     * inside a single undoable op, so one tap finishes the job. Falls back
-     * to the single-pass build if the diagnosed file is gone. */
+     * and adopt the converged audio directly (no re-render, no automatic
+     * re-diagnosis). Falls back to the single-pass build if the diagnosed
+     * file is gone. */
     private void runTuneUp(final String findingsJson, final String profile) {
+        final String entryId = currentEntryId;
+        if (entryId == null) {
+            setStatus("Open or record audio first.");
+            return;
+        }
         setBusy(true);
         setStatus("Tuning up...");
         waveformView.startProgressAnimation();
@@ -2084,14 +2185,22 @@ public class MainActivity extends Activity {
                 final PyObject bridge = Python.getInstance()
                         .getModule("audiofx.android_bridge");
                 final String tuneUpJson;
+                final File preRendered;
+                final double preRenderedDur;
                 if (convergePath != null
                         && new File(convergePath).exists()) {
-                    tuneUpJson = bridge.callAttr("tune_up_converge",
-                            convergePath, findingsJson, profile,
-                            progress).toString();
+                    preRendered = new File(getCacheDir(), "tune_up_render.wav");
+                    String out = bridge.callAttr("tune_up_converge",
+                            convergePath, findingsJson, profile, progress, 3,
+                            preRendered.getAbsolutePath(), entryId).toString();
+                    tuneUpJson = out;
+                    preRenderedDur = new JSONObject(out)
+                            .optDouble("duration_s", -1);
                 } else {
                     tuneUpJson = bridge.callAttr("tune_up_build",
                             findingsJson, profile).toString();
+                    preRendered = null;
+                    preRenderedDur = -1;
                 }
                 final JSONObject params =
                         new JSONObject(tuneUpJson).getJSONObject("params");
@@ -2100,10 +2209,21 @@ public class MainActivity extends Activity {
                         "^Tune Up \\([^)]*\\): ", "");
                 runOnUiThread(() -> {
                     hideTuneUpOverlay();
-                    applyLibraryOp("tune_up",
-                            params.toString(), summary,
-                            "Tuning up...", "Tune-up complete. " + receipt,
-                            () -> onDiagnoseClicked());
+                    if (preRendered != null) {
+                        applyTuneUpOp(params.toString(), summary,
+                                "Tuning up...",
+                                "Tune-up complete. " + receipt,
+                                () -> loadWaveformForPath(currentOutputPath),
+                                preRendered, preRenderedDur);
+                    } else {
+                        // No converged audio (diagnosed file gone): build
+                        // the single-pass op and render it incrementally.
+                        applyLibraryOp("tune_up",
+                                params.toString(), summary,
+                                "Tuning up...",
+                                "Tune-up complete. " + receipt,
+                                () -> loadWaveformForPath(currentOutputPath));
+                    }
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {

@@ -57,6 +57,12 @@ def read_wav_mono(path):
 
 def _pack_int16(samples):
     """Clamp float samples to [-1, 1] and pack as little-endian int16."""
+    if type(samples).__module__ == "numpy":
+        # Vectorized pack: np.round matches Python round() (round-half-even).
+        import numpy as _np
+
+        q = _np.round(_np.clip(samples, -1.0, 1.0) * 32767).astype("<i2")
+        return q.tobytes()
     return struct.pack(
         "<%dh" % len(samples),
         *[int(round(max(-1.0, min(1.0, s)) * 32767)) for s in samples],
