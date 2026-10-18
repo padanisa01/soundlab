@@ -21,8 +21,11 @@ import java.util.List;
 /**
  * One-time "premium" in-app purchase. Owning it sets the persisted
  * premium flag, which hides every ad in the app (banner + wait-screen
- * ads). Product setup (one-time product with this ID, app published)
- * happens in the Play Console; this class only drives the client side.
+ * ads). restorePurchase() also clears the flag when the Play purchase
+ * list contains no active purchase of this product, so a refunded or
+ * cancelled purchase revokes premium. Product setup (one-time product
+ * with this ID, app published) happens in the Play Console; this class
+ * only drives the client side.
  */
 public class PremiumBilling implements PurchasesUpdatedListener {
 
@@ -133,12 +136,26 @@ public class PremiumBilling implements PurchasesUpdatedListener {
                             || purchases == null) {
                         return;
                     }
+                    boolean hasActivePurchase = false;
                     for (Purchase p : purchases) {
-                        if (p.getProducts().contains(PRODUCT_ID)
+                        boolean active = p.getProducts().contains(PRODUCT_ID)
                                 && p.getPurchaseState()
-                                        == Purchase.PurchaseState.PURCHASED) {
+                                        == Purchase.PurchaseState.PURCHASED;
+                        if (active) {
+                            hasActivePurchase = true;
                             grantPremium(p);
                         }
+                    }
+                    // Revocation half of ticket AM-2: the premium flag is
+                    // persisted on-device, so if no active purchase exists
+                    // (refund, cancellation) and the flag is still set,
+                    // clear it. The MainActivity listener only acts when
+                    // premium is true, so a false notification is safe;
+                    // the cleared flag takes effect for ads on next launch.
+                    if (!hasActivePurchase && isPremium(activity)) {
+                        setPremium(activity, false);
+                        activity.runOnUiThread(
+                                () -> listener.onPremiumChanged(false));
                     }
                 });
     }
@@ -170,6 +187,7 @@ public class PremiumBilling implements PurchasesUpdatedListener {
             client.acknowledgePurchase(params, result -> {
             });
         }
+        // TODO(AM-2): verify purchase authenticity here before granting (Option A: Security.verifyPurchase with the Play Console license key, or Option B: server-side token validation). Decision pending; do not ship a bypass.
         setPremium(activity, true);
         activity.runOnUiThread(() -> listener.onPremiumChanged(true));
     }
