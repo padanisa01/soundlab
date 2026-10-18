@@ -19,6 +19,19 @@ android {
         lpFile.withInputStream { localProps.load(it) }
     }
 
+    signingConfigs {
+        // Debug-key signing for the release build type, strictly for
+        // on-device testing. Off by default; opt in with
+        // sign.release.with.debug=true in the git-ignored local.properties.
+        // Never use for Play uploads: those need the real upload key.
+        debugKeyAsRelease {
+            storeFile file("${System.getProperty('user.home')}/.android/debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
+    }
+
     defaultConfig {
         // URL of the summary proxy (Cloud Run service, ticket AM-1). The
         // user adds summary.proxy.url=<url> to the git-ignored
@@ -67,6 +80,13 @@ android {
             // No Groq key in release: the diagnosis summary goes through
             // the proxy (SUMMARY_PROXY_URL) with an App Check token.
             buildConfigField "String", "GROQ_API_KEY", "\"\""
+            // Optional: sign release with the debug key for on-device
+            // testing, so the IDE can install the release variant directly
+            // from the run button. Opt in via sign.release.with.debug=true
+            // in local.properties. Never use for Play uploads.
+            if (localProps.getProperty("sign.release.with.debug", "false").toBoolean()) {
+                signingConfig signingConfigs.debugKeyAsRelease
+            }
         }
     }
 
