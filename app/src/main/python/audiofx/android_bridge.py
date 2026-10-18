@@ -423,11 +423,17 @@ def list_tune_up_profiles():
     return json.dumps(_diagnose.list_profiles())
 
 
-def summarize_diagnosis(findings_json, profile, api_key):
-    """Plain-language executive summary of the findings via Groq/Qwen.
-    Returns "" on any failure (no key, no network, bad response)."""
+def summarize_request_body(findings_json, profile):
+    """Groq request-body JSON for the executive summary (HTTP is done in
+    Java). Returns "" when the findings are unusable."""
     from audiofx import summarize as _summarize
-    return _summarize.summarize(findings_json, profile, api_key)
+    return _summarize.build_request_body(findings_json, profile)
+
+
+def summarize_parse(response_json):
+    """Extract the summary text from a Groq response body, or ""."""
+    from audiofx import summarize as _summarize
+    return _summarize.parse_response(response_json)
 
 
 def tune_up_build(findings_json, profile="podcast"):

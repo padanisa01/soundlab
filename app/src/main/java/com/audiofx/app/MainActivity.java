@@ -1330,8 +1330,7 @@ public class MainActivity extends Activity {
         // LLM executive summary (Groq/Qwen). Fills in async; the card is
         // hidden entirely when no API key is configured.
         diagFindingsJson = findingsJson;
-        final String groqKey = BuildConfig.GROQ_API_KEY;
-        LinearLayout summaryCard = new LinearLayout(this);
+        final String groqKey = BuildConfig.GROQ_API_KEY;        LinearLayout summaryCard = new LinearLayout(this);
         summaryCard.setOrientation(LinearLayout.VERTICAL);
         summaryCard.setBackgroundResource(R.drawable.bg_card);
         LinearLayout.LayoutParams scLp = new LinearLayout.LayoutParams(
@@ -1352,7 +1351,7 @@ public class MainActivity extends Activity {
         diagSummaryTv.setLineSpacing(0, 1.25f);
         diagSummaryTv.setPadding(0, (int) (4 * dp), 0, 0);
         summaryCard.addView(diagSummaryTv);
-        if (groqKey == null || groqKey.isEmpty()) {
+        if (groqKey == null || groqKey.trim().isEmpty()) {
             summaryCard.setVisibility(android.view.View.GONE);
         } else {
             diagSummaryTv.setText("Summarizing your report…");
@@ -1708,15 +1707,19 @@ public class MainActivity extends Activity {
         fetchDiagSummary();
     }
 
-    /** Fill the executive summary, from cache or Groq/Qwen. */
+    /** Fill the executive summary, from cache or Groq/Qwen. The HTTP is
+     * done here with HttpsURLConnection (Android's system trust store);
+     * Python only builds the request body and parses the response. */
     private void fetchDiagSummary() {
         if (diagSummaryTv == null || diagFindingsJson == null) {
             return;
         }
-        final String groqKey = BuildConfig.GROQ_API_KEY;
-        if (groqKey == null || groqKey.isEmpty()) {
+        String groqKey = BuildConfig.GROQ_API_KEY;
+        groqKey = groqKey == null ? "" : groqKey.trim();
+        if (groqKey.isEmpty()) {
             return;
         }
+        final String key = groqKey;
         final String profile = currentTuneUpProfile();
         final String cacheKey = diagFindingsJson.hashCode() + "|" + profile;
         final String hit = diagSummaryCache.get(cacheKey);
@@ -1732,11 +1735,21 @@ public class MainActivity extends Activity {
                 if (!Python.isStarted()) {
                     Python.start(new AndroidPlatform(this));
                 }
-                summary = Python.getInstance()
+                String body = Python.getInstance()
                         .getModule("audiofx.android_bridge")
-                        .callAttr("summarize_diagnosis", diagFindingsJson,
-                                profile, groqKey).toString();
-            } catch (Exception ignored) {
+                        .callAttr("summarize_request_body", diagFindingsJson,
+                                profile).toString();
+                if (!body.isEmpty()) {
+                    String resp = postGroqSummary(body, key);
+                    if (!resp.isEmpty()) {
+                        summary = Python.getInstance()
+                                .getModule("audiofx.android_bridge")
+                                .callAttr("summarize_parse", resp).toString();
+                    }
+                }
+            } catch (Exception e) {
+                android.util.Log.w("AudioMechanic",
+                        "summarize: failed: " + e);
             }
             final String out = summary;
             runOnUiThread(() -> {
@@ -1751,6 +1764,47 @@ public class MainActivity extends Activity {
                 }
             });
         }).start();
+    }
+
+    /** POST the summary request to Groq; returns the response body or "". */
+    private String postGroqSummary(String bodyJson, String apiKey) {
+        java.net.HttpURLConnection conn = null;
+        try {
+            java.net.URL url = new java.net.URL(
+                    "https://api.groq.com/openai/v1/chat/completions");
+            conn = (java.net.HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("Authorization", "Bearer " + apiKey);
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(20000);
+            conn.setReadTimeout(20000);
+            byte[] body = bodyJson.getBytes(
+                    java.nio.charset.StandardCharsets.UTF_8);
+            conn.setFixedLengthStreamingMode(body.length);
+            try (java.io.OutputStream os = conn.getOutputStream()) {
+                os.write(body);
+            }
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                android.util.Log.w("AudioMechanic",
+                        "summarize: Groq HTTP " + code);
+                return "";
+            }
+            try (java.io.InputStream is = conn.getInputStream();
+                 java.util.Scanner s = new java.util.Scanner(is, "UTF-8")
+                         .useDelimiter("\\A")) {
+                return s.hasNext() ? s.next() : "";
+            }
+        } catch (Exception e) {
+            android.util.Log.w("AudioMechanic",
+                    "summarize: request failed: " + e);
+            return "";
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
     }
 
     /** Sync the segment control, recipe line and Tune Up label. */

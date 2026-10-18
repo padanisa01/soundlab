@@ -7,8 +7,6 @@ so the report never depends on the LLM.
 
 import json
 import re
-import urllib.error
-import urllib.request
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = "qwen/qwen3.8-27b"
@@ -48,17 +46,18 @@ def _strip_thinking(text):
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
-def summarize(findings_json, profile, api_key, timeout_s=20):
-    """Return the executive summary string, or "" on any failure."""
-    if not api_key:
-        return ""
+def build_request_body(findings_json, profile):
+    """Build the Groq chat-completions request body JSON, or "" if the
+    findings are unusable. The HTTP itself is done in Java
+    (HttpsURLConnection uses Android's system trust store; Python's ssl
+    under Chaquopy has unreliable CA verification)."""
     try:
         findings = json.loads(findings_json)
     except (TypeError, ValueError):
         return ""
     if not isinstance(findings, list) or not findings:
         return ""
-    body = json.dumps({
+    return json.dumps({
         "model": MODEL,
         "messages": [
             {"role": "system", "content": SYSTEM},
@@ -67,21 +66,15 @@ def summarize(findings_json, profile, api_key, timeout_s=20):
         ],
         "temperature": 0.7,
         "max_tokens": 150,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        GROQ_URL, data=body,
-        headers={"Authorization": "Bearer " + api_key,
-                 "Content-Type": "application/json"})
+    })
+
+
+def parse_response(response_json):
+    """Extract the summary text from a Groq response body, or ""."""
     try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
+        payload = json.loads(response_json)
         text = payload["choices"][0]["message"]["content"]
-    except urllib.error.HTTPError as e:
-        # Status only, never the key: safe for logcat.
-        print("summarize: Groq HTTP %s" % e.code)
-        return ""
-    except Exception as e:
-        print("summarize: request failed: %r" % e)
+    except (TypeError, ValueError, KeyError, IndexError):
         return ""
     if not isinstance(text, str):
         return ""
