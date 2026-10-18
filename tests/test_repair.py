@@ -161,6 +161,20 @@ class RepairTest(unittest.TestCase):
         repair.level(sig, SR)
         self.assertEqual(sig, snapshot)
 
+    def test_moving_avg_preserves_length(self):
+        import numpy as np
+        for n, win in ((100, 1), (100, 7), (1000, 441), (10, 50)):
+            x = np.arange(n, dtype=float)
+            self.assertEqual(repair._moving_avg(x, win).shape, (n,))
+
+    def test_deplosive_no_plosive_no_crash(self):
+        # Deplosive's internal detector may find nothing even when called;
+        # the mask must still match the signal length (was: off-by-one
+        # broadcast crash).
+        sig = sine(440, 1.0, 0.4)
+        out = repair.deplosive(sig, SR)
+        self.assertEqual(len(out), len(sig))
+
 
 if __name__ == "__main__":
     unittest.main()

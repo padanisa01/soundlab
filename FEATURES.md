@@ -156,10 +156,14 @@ or the plan changes.
   floor are labeled honestly as partial fixes ("reduce", not "remove");
   room reverb is advice-only, never faked.
 - Tune Up applies all observed fixes as one composite `tune_up` op in
-  canonical DSP order (declip, DC, hum, denoise, de-plosive, de-esser,
-  silence trim, leveling, loudness, EQ, fades), stored as a single
-  undoable history entry with a summary label. After each fix the
-  diagnosis re-runs so findings visibly turn green.
+  canonical DSP order (declip, DC, hum, de-plosive, de-esser, silence
+  trim, leveling, EQ, loudness, denoise, fades: each fix placed where it
+  cannot undo an earlier one), stored as a single undoable history
+  entry with a summary label. The op converges internally over up to 3
+  passes (re-diagnose the render, apply what remains), so one tap
+  finishes conservative fixes instead of asking the user to tap again;
+  the summary notes the pass count. After Tune Up the diagnosis
+  re-runs so findings visibly turn green.
 - Tune-up recipes per content type: Singing (free, default: gentle
   de-esser, no leveling or silence trim, -14 LUFS), Podcast (premium:
   full voice chain, -16 LUFS), Music (premium: loudness/balance/fades,
@@ -178,8 +182,8 @@ or the plan changes.
   session and re-fetched when the profile changes.
 - Python: `audiofx/diagnose.py` (checks + `tune_up_fixes`), `audiofx/repair.py`
   (11 fix ops), wired into `render_chain` via a shared `_apply_op`
-  dispatcher; `diagnose_file` / `tune_up_build` entry points in
-  `android_bridge.py`.
+  dispatcher; `diagnose_file` / `tune_up_build` / `tune_up_converge`
+  entry points in `android_bridge.py`.
 
 ### Library of recordings
 - Every recording becomes a durable project in `filesDir/library/`:

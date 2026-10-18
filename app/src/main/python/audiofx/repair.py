@@ -95,8 +95,11 @@ def dc_remove(samples):
     return [s - mean for s in samples]
 
 
-def fade_ends(samples, sample_rate, fade_sec=0.02):
-    """Short linear fades at both ends to remove abrupt starts/stops."""
+def fade_ends(samples, sample_rate, fade_sec=0.03):
+    """Short linear fades at both ends to remove abrupt starts/stops.
+
+    30 ms clears the abrupt_ends check (2 ms edge window at 10% of peak:
+    2/30 < 0.1) while staying inaudible."""
     n = len(samples)
     if n == 0:
         return []
@@ -316,8 +319,11 @@ def _fft_lowpass(x, cutoff_hz, sample_rate):
 
 
 def _moving_avg(x, win):
+    # Causal moving average, length-preserving: out[i] = mean(x[i-win+1..i])
+    # with zero padding at the start.
     c = _np.cumsum(_np.pad(x, (win - 1, 0)))
-    return (c[win:] - c[:-win]) / win
+    prev = _np.concatenate(([0.0], c[:-1]))[:x.size]
+    return (c[win - 1:] - prev) / win
 
 
 def deplosive(samples, sample_rate, cutoff_hz=150.0, reduction=0.9):
@@ -541,14 +547,14 @@ def loudness_normalize(samples, sample_rate, target_lufs=-16.0,
 # ---------------------------------------------------------------------------
 
 def eq_balance(samples, sample_rate, low_gain_db=0.0, high_gain_db=0.0):
-    """Gentle corrective EQ: low shelf at 250 Hz, high shelf at 5 kHz.
-    Gains are clamped to +/-3 dB -- this is polish, not surgery."""
+    """Corrective EQ: low shelf at 250 Hz, high shelf at 5 kHz.
+    Gains clamp to +/-6 dB (matches BALANCE_MAX_CUT_DB)."""
     _need_numpy("eq_balance")
     x = _as_np(samples)
     if x.size == 0:
         return []
-    low_gain_db = max(-3.0, min(3.0, float(low_gain_db)))
-    high_gain_db = max(-3.0, min(3.0, float(high_gain_db)))
+    low_gain_db = max(-6.0, min(6.0, float(low_gain_db)))
+    high_gain_db = max(-6.0, min(6.0, float(high_gain_db)))
     if abs(low_gain_db) < 0.05 and abs(high_gain_db) < 0.05:
         return x.tolist()
     freqs = [20, 100, 250, 800, 2000, 5000, 12000, 20000]

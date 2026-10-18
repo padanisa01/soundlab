@@ -436,6 +436,71 @@ def summarize_parse(response_json):
     return _summarize.parse_response(response_json)
 
 
+def tune_up_converge(input_path, findings_json, profile="podcast",
+                     max_passes=3):
+    """Iterate the tune-up until no fixable warns remain (or max_passes).
+
+    Conservative fixes (denoise, de-esser, EQ) often don't clear their own
+    check in one pass; without this the user has to tap Tune Up repeatedly.
+    Each pass re-diagnoses the previous pass's render and appends that
+    pass's fixes. Returns ONE composite tune_up op containing every pass's
+    fixes, so it stays a single history entry / single undo. Fixes are
+    pure functions, so rendering incrementally per pass equals rendering
+    the flat fix list once.
+    """
+    try:
+        findings = json.loads(findings_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("findings_json is not valid JSON: %s" % exc)
+    if not isinstance(findings, list):
+        raise ValueError("findings_json must be a JSON array of findings")
+    prof = _diagnose.TUNE_UP_PROFILES.get(
+        profile, _diagnose.TUNE_UP_PROFILES[_diagnose.DEFAULT_PROFILE])
+    all_fixes = []
+    cur_in = input_path
+    tmps = []
+    passes = 0
+    try:
+        for _ in range(max_passes):
+            fixes = _diagnose.tune_up_fixes(findings, profile)
+            if not fixes:
+                break
+            passes += 1
+            all_fixes.extend(fixes)
+            tmp = os.path.join(os.path.dirname(os.path.abspath(input_path)),
+                               ".tune_tmp_%d.wav" % len(tmps))
+            tmps.append(tmp)
+            r = render_chain(cur_in, json.dumps(
+                [{"op": f["op"], "params": f["params"]} for f in fixes]), tmp)
+            if not r.get("ok"):
+                break
+            cur_in = tmp
+            findings = json.loads(diagnose_file(tmp))
+    finally:
+        for t in tmps:
+            try:
+                os.unlink(t)
+            except OSError:
+                pass
+    labels = []
+    seen = set()
+    for f in all_fixes:
+        if f["op"] not in seen:
+            seen.add(f["op"])
+            labels.append(f.get("label", f["op"]))
+    if labels:
+        summary = "Tune Up (%s): %s" % (prof["label"], ", ".join(labels))
+        if passes > 1:
+            summary += " (%d passes)" % passes
+    else:
+        summary = "Tune Up (%s): nothing to fix" % prof["label"]
+    return json.dumps({
+        "op": "tune_up",
+        "params": {"fixes": all_fixes, "summary": summary,
+                   "profile": profile, "passes": passes},
+    })
+
+
 def tune_up_build(findings_json, profile="podcast"):
     """Build the composite tune_up op from diagnose_file's findings JSON
     and a profile id ("podcast", "singing", "music"). Returns the op as a

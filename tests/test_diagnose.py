@@ -142,13 +142,94 @@ class DiagnoseTest(unittest.TestCase):
         sig = sine(440, 1.0, 0.05)  # quiet -> warn; most else ok
         findings = diagnose.analyze(sig, SR)
         severities = [f["severity"] for f in findings]
+        # No "ok" may precede a "warn" (info may sit between).
         first_ok = next((i for i, s in enumerate(severities) if s == "ok"),
                         len(severities))
-        self.assertTrue(all(s == "warn" for s in severities[:first_ok]))
+        self.assertNotIn("warn", severities[first_ok:])
+
+    def test_noise_gate_no_false_positive_on_loud_tone(self):
+        # A consistently loud pure tone is signal, not hiss: the quietest
+        # windows are as loud as the whole signal, so no warn.
+        sig = sine(440, 1.0, 0.5)
+        sev = {f["id"]: f["severity"] for f in diagnose.analyze(sig, SR)}
+        self.assertNotEqual(sev["noise_floor"], "warn")
+
+    def test_noise_gate_still_catches_real_hiss(self):
+        import random
+        random.seed(1)
+        # Loud tone, then a quiet gap with real hiss.
+        sig = sine(440, 1.0, 0.5) + [0.02 * (random.random() * 2 - 1)
+                                    for _ in range(int(SR * 1.0))]
+        sev = {f["id"]: f["severity"] for f in diagnose.analyze(sig, SR)}
+        self.assertEqual(sev["noise_floor"], "warn")
+
+    def test_fade_ends_clears_abrupt_ends(self):
+        from audiofx import repair
+        sig = sine(440, 1.0, 0.5)  # cut mid-waveform at both ends
+        ids = [f["id"] for f in diagnose.analyze(sig, SR)
+               if f["severity"] == "warn"]
+        self.assertIn("abrupt_ends", ids)
+        fixed = repair.fade_ends(sig, SR)
+        ids = [f["id"] for f in diagnose.analyze(fixed, SR)
+               if f["severity"] == "warn"]
+        self.assertNotIn("abrupt_ends", ids)
 
     def test_empty_signal(self):
         findings = diagnose.analyze([], SR)
         self.assertIsInstance(findings, list)
+
+
+class TuneUpConvergeTest(unittest.TestCase):
+    """One tune_up op must converge: no re-taps needed."""
+
+    def test_converge_clears_covered_checks(self):
+        import json
+        import random
+        import tempfile
+        from audiofx import android_bridge as ab
+        from audiofx.pipeline import write_wav
+
+        # Realistic bad phone recording: clipped peaks, 60 Hz hum, hiss,
+        # muddy low end (~+10 dB), abrupt ends, off-target loudness.
+        sr = 44100
+        random.seed(7)
+        sig = []
+        for i in range(sr * 4):
+            t = i / sr
+            v = 0.35 * math.sin(2 * math.pi * 220 * t)
+            v += 0.30 * math.sin(2 * math.pi * 110 * t)
+            v += 0.10 * math.sin(2 * math.pi * 1000 * t)
+            v += 0.12 * math.sin(2 * math.pi * 60 * t)
+            v += 0.02 * (random.random() * 2 - 1)
+            sig.append(max(-1.0, min(1.0, v * 1.6)))  # some clipping
+        work = tempfile.mkdtemp()
+        src = os.path.join(work, "in.wav")
+        write_wav(src, sig, sr)
+
+        before = json.loads(ab.diagnose_file(src))
+        n_warn_before = sum(1 for f in before if f["severity"] == "warn")
+        self.assertGreater(n_warn_before, 3)
+
+        op = json.loads(ab.tune_up_converge(
+            src, json.dumps(before), "singing"))
+        self.assertGreaterEqual(op["params"]["passes"], 1)
+        out = os.path.join(work, "out.wav")
+        r = ab.render_chain(src, json.dumps(
+            [{"op": "tune_up", "params": op["params"]}]), out)
+        self.assertTrue(r["ok"])
+
+        after = json.loads(ab.diagnose_file(out))
+        recipe = set(diagnose.TUNE_UP_PROFILES["singing"]["fixes"])
+        for f in after:
+            if f["severity"] != "warn" or not f.get("fix"):
+                continue
+            # Every remaining warn must be outside the singing recipe
+            # (by-design exclusions like uneven_level), never a fix the
+            # recipe promised but failed to clear.
+            self.assertNotIn(f["fix"]["op"], recipe,
+                             "fix did not converge: %s" % f["id"])
+        n_warn_after = sum(1 for f in after if f["severity"] == "warn")
+        self.assertLess(n_warn_after, n_warn_before)
 
 
 if __name__ == "__main__":

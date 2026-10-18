@@ -154,6 +154,9 @@ public class MainActivity extends Activity {
      * applied or the audio changes. Keyed by the diagnosed file path. */
     private String cachedDiagJson;
     private String cachedDiagPath;
+    /** Path of the audio file the current diagnosis (and its Tune Up) refers
+     * to: currentOutputPath at diagnosis time, else the pristine input. */
+    private String diagLastPath;
     /** Tune-up profile metadata JSON (from list_tune_up_profiles). */
     private String cachedProfilesJson;
     /** Live refs to the open diagnosis dialog's profile UI. */
@@ -1001,6 +1004,7 @@ public class MainActivity extends Activity {
         currentOutputPath = null;
         cachedDiagJson = null;
         cachedDiagPath = null;
+        diagLastPath = null;
         diagSummaryCache.clear();
         audioDurationSec = 0;
         selStartSec = null;
@@ -1199,6 +1203,7 @@ public class MainActivity extends Activity {
                 added = true;
                 cachedDiagJson = null;
                 cachedDiagPath = null;
+                diagLastPath = null;
                 diagSummaryCache.clear();
                 final double dur = renderChainToCache(entryId);
                 runOnUiThread(() -> {
@@ -1246,6 +1251,7 @@ public class MainActivity extends Activity {
             return;
         }
         final String diagPath = path;
+        diagLastPath = diagPath;
         if (diagPath.equals(cachedDiagPath) && cachedDiagJson != null) {
             showDiagnosisReport(cachedDiagJson);
             return;
@@ -1903,19 +1909,29 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    /** One-button Tune Up: build the composite op for the profile. */
+    /** One-button Tune Up: converge the profile's fixes over up to 3 passes
+     * inside a single undoable op, so one tap finishes the job. Falls back
+     * to the single-pass build if the diagnosed file is gone. */
     private void runTuneUp(final String findingsJson, final String profile) {
         setBusy(true);
-        setStatus("Building tune-up...");
+        setStatus("Tuning up...");
+        final String convergePath = diagLastPath;
         new Thread(() -> {
             try {
                 if (!Python.isStarted()) {
                     Python.start(new AndroidPlatform(this));
                 }
-                final String tuneUpJson = Python.getInstance()
-                        .getModule("audiofx.android_bridge")
-                        .callAttr("tune_up_build", findingsJson, profile)
-                        .toString();
+                final PyObject bridge = Python.getInstance()
+                        .getModule("audiofx.android_bridge");
+                final String tuneUpJson;
+                if (convergePath != null
+                        && new File(convergePath).exists()) {
+                    tuneUpJson = bridge.callAttr("tune_up_converge",
+                            convergePath, findingsJson, profile).toString();
+                } else {
+                    tuneUpJson = bridge.callAttr("tune_up_build",
+                            findingsJson, profile).toString();
+                }
                 final JSONObject params =
                         new JSONObject(tuneUpJson).getJSONObject("params");
                 final String summary = params.optString("summary", "Tune Up");
@@ -1969,6 +1985,7 @@ public class MainActivity extends Activity {
                 libraryDb.popLastOp(entryId);
                 cachedDiagJson = null;
                 cachedDiagPath = null;
+                diagLastPath = null;
                 diagSummaryCache.clear();
                 final boolean remaining = hasRenderableOps(entryId);
                 final String refreshPath;

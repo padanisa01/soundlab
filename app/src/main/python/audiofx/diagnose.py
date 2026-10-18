@@ -45,7 +45,7 @@ END_ABRUPT_RATIO = 0.1          # edge peak vs overall peak -> abrupt end
 LOUDNESS_TARGET = -16.0         # LUFS target
 LOUDNESS_TOL_DB = 3.0           # outside target +/- tol -> warn
 BALANCE_DB = 6.0                # band vs mid imbalance to warn
-BALANCE_FIX_DB = 2.5            # corrective EQ applied (<= 3 dB)
+BALANCE_MAX_CUT_DB = 6.0        # max corrective EQ per pass
 
 _SEVERITY_ORDER = {"warn": 0, "info": 1, "ok": 2}
 
@@ -266,7 +266,11 @@ def _check_noise_floor(s, sr, ctx):
     k = max(1, int(0.05 * rms.size))
     quiet = _np.partition(rms, k)[:k]
     floor_db = _db(float(_np.mean(quiet)))
-    if floor_db > NOISE_WARN_DB:
+    overall_db = _db(float(_np.sqrt(_np.mean(x[:n] ** 2))))
+    # Gate: if the "quiet" parts are nearly as loud as the whole signal,
+    # there is no quiet part to measure -- it is signal, not hiss. (Without
+    # this, any consistently loud signal false-positives.)
+    if floor_db > NOISE_WARN_DB and (overall_db - floor_db) > 6.0:
         return _finding(
             "noise_floor", "warn", "High noise floor",
             "Background hiss sits at %.0f dBFS." % floor_db,
@@ -376,7 +380,10 @@ def _check_abrupt_ends(s, sr, ctx):
     n = len(s)
     if n == 0:
         return None
-    edge = max(1, int(0.05 * sr))
+    # Look at the very edge (2 ms): with fade_ends' 30 ms fades the edge
+    # sits at ~7% of peak, comfortably under the 10% threshold. (A max
+    # over a wider window can never be cleared by any reasonable fade.)
+    edge = max(1, int(0.002 * sr))
     if _HAVE_NUMPY:
         ax = _np.abs(_arr(s, ctx))
         peak = float(_np.max(ax))
@@ -415,16 +422,32 @@ def _check_loudness(s, sr, ctx):
         return None
     if lufs == float("-inf"):
         return None
-    if abs(lufs - LOUDNESS_TARGET) > LOUDNESS_TOL_DB:
-        return _finding(
-            "loudness", "warn", "Off-target loudness",
-            "Integrated loudness is %.0f LUFS (target %.0f)."
-            % (lufs, LOUDNESS_TARGET),
-            _fix("loudness", {"target_lufs": LOUDNESS_TARGET},
-                 "Normalize loudness"),
-            "")
-    return _finding("loudness", "ok", "Good loudness",
-                    "Integrated loudness is %.0f LUFS." % lufs, None, "")
+    if abs(lufs - LOUDNESS_TARGET) <= LOUDNESS_TOL_DB:
+        return _finding("loudness", "ok", "Good loudness",
+                        "Integrated loudness is %.0f LUFS." % lufs, None, "")
+    # Headroom gate: the fix gains up to the -1 dBFS ceiling but never
+    # clips. If the peaks leave no room for a material gain, the fix would
+    # be a no-op -- report info instead of an unfixable warn, or the
+    # tune-up can never converge.
+    peak = float(_np.max(_np.abs(_arr(s, ctx)))) if len(s) else 0.0
+    ceiling = 10.0 ** (-1.0 / 20.0)
+    if peak > 0:
+        max_gain_db = 20.0 * math.log10(ceiling / peak)
+        applied_db = min(LOUDNESS_TARGET - lufs, max_gain_db)
+        if abs(applied_db) < 0.5:
+            return _finding(
+                "loudness", "info", "Loudness at peak limit",
+                "Integrated loudness is %.0f LUFS (target %.0f); the peaks "
+                "leave no headroom for more gain without clipping."
+                % (lufs, LOUDNESS_TARGET),
+                None, "")
+    return _finding(
+        "loudness", "warn", "Off-target loudness",
+        "Integrated loudness is %.0f LUFS (target %.0f)."
+        % (lufs, LOUDNESS_TARGET),
+        _fix("loudness", {"target_lufs": LOUDNESS_TARGET},
+             "Normalize loudness"),
+        "")
 
 
 def _check_balance(s, sr, ctx):
@@ -439,19 +462,23 @@ def _check_balance(s, sr, ctx):
     low_db = 10.0 * math.log10(low / mid + 1e-18)
     high_db = 10.0 * math.log10(high / mid + 1e-18)
     if low_db > BALANCE_DB:
+        # Cut proportional to the measured imbalance (clamped): a fixed
+        # -2.5 dB can never converge on a +16 dB imbalance.
+        cut = -min(BALANCE_MAX_CUT_DB, low_db - BALANCE_DB + 1.0)
         return _finding(
             "balance", "warn", "Muddy low end",
             "200-400 Hz sits %+.0f dB above the mids." % low_db,
             _fix("eq_balance",
-                 {"low_gain_db": -BALANCE_FIX_DB, "high_gain_db": 0.0},
+                 {"low_gain_db": cut, "high_gain_db": 0.0},
                  "Clear the mud"),
             "Back off the mic slightly and soften the room.")
     if high_db > BALANCE_DB:
+        cut = -min(BALANCE_MAX_CUT_DB, high_db - BALANCE_DB + 1.0)
         return _finding(
             "balance", "warn", "Harsh top end",
             "2-5 kHz sits %+.0f dB above the mids." % high_db,
             _fix("eq_balance",
-                 {"low_gain_db": 0.0, "high_gain_db": -BALANCE_FIX_DB},
+                 {"low_gain_db": 0.0, "high_gain_db": cut},
                  "Tame the harshness"),
             "Angle the mic slightly off-axis.")
     return _finding("balance", "ok", "Balanced tone",
@@ -497,17 +524,23 @@ def analyze(samples, sample_rate):
 # Tune Up: ordered, de-duplicated fix list for the one-button path
 # ---------------------------------------------------------------------------
 
+# Canonical tune-up order. Principle: a fix must not undo an earlier
+# fix's check. So restoration first, then relative/gain-invariant fixes,
+# then dynamics and tone, then loudness (final level), then denoise
+# (final noise floor, after all gains are set), then fades last.
+# The old order (denoise before loudness, loudness before EQ) could never
+# converge: loudness re-raised the noise floor and EQ shifted LUFS.
 _TUNE_UP_ORDER = (
     "declip",
     "dc_remove",
     "hum_notch",
-    "denoise",
     "deplosive",
     "deess",
     "silence_trim",
     "level",
-    "loudness",
     "eq_balance",
+    "loudness",
+    "denoise",
     "fade_ends",
 )
 
