@@ -457,56 +457,6 @@ public class MainActivity extends Activity {
         } else {
             setStatus("Tap the menu to open audio or your library.");
         }
-
-        // DEBUG: LLM hello probe. Temporary; remove once the diagnosis
-        // summary is confirmed working on device.
-        debugLlmHello();
-    }
-
-    /** DEBUG: minimal Groq call on startup; shows the outcome in a popup. */
-    private void debugLlmHello() {
-        new Thread(() -> {
-            String key = BuildConfig.GROQ_API_KEY;
-            key = key == null ? "" : key.trim();
-            final String outcome;
-            if (key.isEmpty()) {
-                outcome = "GROQ_API_KEY is EMPTY in this build.\n\n"
-                        + "Add it to local.properties and rebuild.";
-            } else {
-                String body = "{\"model\":\"qwen/qwen3.8-27b\","
-                        + "\"messages\":[{\"role\":\"user\",\"content\":"
-                        + "\"Reply with exactly: hello ok\"}],"
-                        + "\"max_tokens\":10}";
-                String resp = postGroqSummary(body, key);
-                if (resp.isEmpty()) {
-                    outcome = "Groq call FAILED.\n\nKey present: yes ("
-                            + key.length() + " chars).\n"
-                            + "Check logcat for the 'AudioMechanic' line "
-                            + "with the HTTP status or error.";
-                } else {
-                    String text = "";
-                    try {
-                        if (!Python.isStarted()) {
-                            Python.start(new AndroidPlatform(this));
-                        }
-                        text = Python.getInstance()
-                                .getModule("audiofx.android_bridge")
-                                .callAttr("summarize_parse", resp).toString();
-                    } catch (Exception e) {
-                        text = "(parse error: " + e + ")";
-                    }
-                    outcome = "Groq call SUCCEEDED.\n\nKey chars: "
-                            + key.length() + "\nModel reply: " + text;
-                }
-            }
-            final String msg = outcome;
-            runOnUiThread(() -> new AlertDialog.Builder(
-                    MainActivity.this, R.style.Theme_SoundLab_Dialog)
-                    .setTitle("LLM debug")
-                    .setMessage(msg)
-                    .setPositiveButton("OK", null)
-                    .show());
-        }).start();
     }
 
     @Override
@@ -1053,6 +1003,7 @@ public class MainActivity extends Activity {
         currentOutputPath = null;
         cachedDiagJson = null;
         cachedDiagPath = null;
+        diagSummaryCache.clear();
         audioDurationSec = 0;
         selStartSec = null;
         selEndSec = null;
@@ -1251,6 +1202,7 @@ public class MainActivity extends Activity {
                 added = true;
                 cachedDiagJson = null;
                 cachedDiagPath = null;
+                diagSummaryCache.clear();
                 final double dur = renderChainToCache(entryId);
                 runOnUiThread(() -> {
                     currentOutputPath =
@@ -1315,6 +1267,8 @@ public class MainActivity extends Activity {
                 cachedProfilesJson = Python.getInstance()
                         .getModule("audiofx.android_bridge")
                         .callAttr("list_tune_up_profiles").toString();
+                // Warm the LLM summary alongside the diagnosis cache.
+                warmDiagSummaryCache(findingsJson);
                 runOnUiThread(() -> {
                     setBusy(false);
                     waveformView.finishProgressAnimation();
@@ -1760,25 +1714,25 @@ public class MainActivity extends Activity {
     /** Fill the executive summary, from cache or Groq/Qwen. The HTTP is
      * done here with HttpsURLConnection (Android's system trust store);
      * Python only builds the request body and parses the response. */
-    private void fetchDiagSummary() {
-        if (diagSummaryTv == null || diagFindingsJson == null) {
-            return;
-        }
-        String groqKey = BuildConfig.GROQ_API_KEY;
-        groqKey = groqKey == null ? "" : groqKey.trim();
-        if (groqKey.isEmpty()) {
-            return;
-        }
-        final String key = groqKey;
-        final String profile = currentTuneUpProfile();
-        final String cacheKey = diagFindingsJson.hashCode() + "|" + profile;
-        final String hit = diagSummaryCache.get(cacheKey);
-        final TextView tv = diagSummaryTv;
-        if (hit != null) {
-            tv.setText(hit);
-            return;
-        }
-        tv.setText("Summarizing your report…");
+    /** Trimmed Groq key, or "" when not configured. */
+    private String groqApiKey() {
+        String k = BuildConfig.GROQ_API_KEY;
+        return k == null ? "" : k.trim();
+    }
+
+    private static String summaryCacheKey(String findingsJson, String profile) {
+        return findingsJson.hashCode() + "|" + profile;
+    }
+
+    /** Async Groq summary; the callback runs on the UI thread with "" on
+     * any failure. Shared by the dialog fetch and the cache warmer. */
+    private interface SummaryCallback {
+        void onDone(String summary);
+    }
+
+    private void requestDiagSummary(final String findingsJson,
+            final String profile, final String apiKey,
+            final SummaryCallback cb) {
         new Thread(() -> {
             String summary = "";
             try {
@@ -1787,10 +1741,10 @@ public class MainActivity extends Activity {
                 }
                 String body = Python.getInstance()
                         .getModule("audiofx.android_bridge")
-                        .callAttr("summarize_request_body", diagFindingsJson,
+                        .callAttr("summarize_request_body", findingsJson,
                                 profile).toString();
                 if (!body.isEmpty()) {
-                    String resp = postGroqSummary(body, key);
+                    String resp = postGroqSummary(body, apiKey);
                     if (!resp.isEmpty()) {
                         summary = Python.getInstance()
                                 .getModule("audiofx.android_bridge")
@@ -1802,18 +1756,66 @@ public class MainActivity extends Activity {
                         "summarize: failed: " + e);
             }
             final String out = summary;
-            runOnUiThread(() -> {
-                if (out != null && !out.isEmpty()) {
-                    diagSummaryCache.put(cacheKey, out);
-                }
-                boolean stale = tv != diagSummaryTv || diagFindingsJson == null
-                        || !profile.equals(currentTuneUpProfile());
-                if (!stale) {
-                    tv.setText((out != null && !out.isEmpty()) ? out
-                            : "Summary unavailable.");
-                }
-            });
+            runOnUiThread(() -> cb.onDone(out));
         }).start();
+    }
+
+    /** Pre-fetch the summary when a fresh diagnosis is cached, so the
+     * dialog finds it ready. Never delays the dialog: runs on its own
+     * thread and fills the open dialog live if it is still on this
+     * report and profile. */
+    private void warmDiagSummaryCache(final String findingsJson) {
+        final String apiKey = groqApiKey();
+        if (apiKey.isEmpty()) {
+            return;
+        }
+        final String profile = currentTuneUpProfile();
+        final String cacheKey = summaryCacheKey(findingsJson, profile);
+        if (diagSummaryCache.containsKey(cacheKey)) {
+            return;
+        }
+        requestDiagSummary(findingsJson, profile, apiKey, summary -> {
+            if (summary == null || summary.isEmpty()) {
+                return;
+            }
+            diagSummaryCache.put(cacheKey, summary);
+            if (diagSummaryTv != null && findingsJson.equals(diagFindingsJson)
+                    && profile.equals(currentTuneUpProfile())) {
+                diagSummaryTv.setText(summary);
+            }
+        });
+    }
+
+    /** Fill the executive summary, from cache or Groq/Qwen. */
+    private void fetchDiagSummary() {
+        if (diagSummaryTv == null || diagFindingsJson == null) {
+            return;
+        }
+        final String apiKey = groqApiKey();
+        if (apiKey.isEmpty()) {
+            return;
+        }
+        final String profile = currentTuneUpProfile();
+        final String cacheKey = summaryCacheKey(diagFindingsJson, profile);
+        final String hit = diagSummaryCache.get(cacheKey);
+        final TextView tv = diagSummaryTv;
+        final String findingsJson = diagFindingsJson;
+        if (hit != null) {
+            tv.setText(hit);
+            return;
+        }
+        tv.setText("Summarizing your report…");
+        requestDiagSummary(findingsJson, profile, apiKey, summary -> {
+            if (summary != null && !summary.isEmpty()) {
+                diagSummaryCache.put(cacheKey, summary);
+            }
+            boolean stale = tv != diagSummaryTv || diagFindingsJson == null
+                    || !profile.equals(currentTuneUpProfile());
+            if (!stale) {
+                tv.setText((summary != null && !summary.isEmpty()) ? summary
+                        : "Summary unavailable.");
+            }
+        });
     }
 
     /** POST the summary request to Groq; returns the response body or "". */
@@ -1970,6 +1972,7 @@ public class MainActivity extends Activity {
                 libraryDb.popLastOp(entryId);
                 cachedDiagJson = null;
                 cachedDiagPath = null;
+                diagSummaryCache.clear();
                 final boolean remaining = hasRenderableOps(entryId);
                 final String refreshPath;
                 if (remaining) {
