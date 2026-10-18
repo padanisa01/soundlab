@@ -1374,7 +1374,9 @@ public class MainActivity extends Activity {
             diagSummaryTv.setText("Summarizing your report…");
             fetchDiagSummary();
         }
-        list.addView(summaryCard);
+        // NOTE: summaryCard is added to `list` below, after the recipe
+        // picker, to keep the report order: Score, Tune up as, Summary,
+        // Needs attention, Notes, Passed.
 
         // Score hero: ring + verdict caption.
         LinearLayout hero = new LinearLayout(this);
@@ -1447,6 +1449,7 @@ public class MainActivity extends Activity {
         diagProfileDesc.setPadding(0, (int) (4 * dp), 0, (int) (4 * dp));
         list.addView(diagProfileDesc);
         refreshDiagProfileSegments();
+        list.addView(summaryCard);
 
         // Grouped findings: issues open, notes and passed collapsed.
         if (!warns.isEmpty()) {
