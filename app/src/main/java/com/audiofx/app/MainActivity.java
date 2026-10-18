@@ -161,6 +161,11 @@ public class MainActivity extends Activity {
     private java.util.ArrayList<Button> diagProfileBtns;
     private TextView diagProfileDesc;
     private Button diagTuneUpBtn;
+    private TextView diagSummaryTv;
+    private String diagFindingsJson;
+    /** Executive-summary cache, keyed by findings hash + profile. */
+    private final java.util.HashMap<String, String> diagSummaryCache =
+            new java.util.HashMap<>();
     private TextView saveFolderLabel;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Runnable scheduledStop;
@@ -1322,6 +1327,39 @@ public class MainActivity extends Activity {
         int pad = (int) (16 * dp);
         list.setPadding(pad, pad, pad, (int) (8 * dp));
 
+        // LLM executive summary (Groq/Qwen). Fills in async; the card is
+        // hidden entirely when no API key is configured.
+        diagFindingsJson = findingsJson;
+        final String groqKey = BuildConfig.GROQ_API_KEY;
+        LinearLayout summaryCard = new LinearLayout(this);
+        summaryCard.setOrientation(LinearLayout.VERTICAL);
+        summaryCard.setBackgroundResource(R.drawable.bg_card);
+        LinearLayout.LayoutParams scLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        scLp.setMargins(0, 0, 0, (int) (12 * dp));
+        summaryCard.setLayoutParams(scLp);
+        summaryCard.setPadding((int) (14 * dp), (int) (11 * dp),
+                (int) (14 * dp), (int) (12 * dp));
+        TextView summaryLabel = new TextView(this);
+        summaryLabel.setText("SUMMARY");
+        summaryLabel.setTextColor(getColor(R.color.sl_mut));
+        summaryLabel.setTextSize(10.5f);
+        summaryCard.addView(summaryLabel);
+        diagSummaryTv = new TextView(this);
+        diagSummaryTv.setTextColor(getColor(R.color.sl_txt));
+        diagSummaryTv.setTextSize(13.5f);
+        diagSummaryTv.setLineSpacing(0, 1.25f);
+        diagSummaryTv.setPadding(0, (int) (4 * dp), 0, 0);
+        summaryCard.addView(diagSummaryTv);
+        if (groqKey == null || groqKey.isEmpty()) {
+            summaryCard.setVisibility(android.view.View.GONE);
+        } else {
+            diagSummaryTv.setText("Summarizing your report…");
+            fetchDiagSummary();
+        }
+        list.addView(summaryCard);
+
         // Score hero: ring + verdict caption.
         LinearLayout hero = new LinearLayout(this);
         hero.setOrientation(LinearLayout.HORIZONTAL);
@@ -1451,10 +1489,15 @@ public class MainActivity extends Activity {
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT));
             diagTuneUpBtn.setOnClickListener(v -> {
+                final String profile = currentTuneUpProfile();
+                if (isProfileLocked(profile)) {
+                    showProfileUpsell(profile);
+                    return;
+                }
                 if (diagDialog != null) {
                     diagDialog.dismiss();
                 }
-                runTuneUp(findingsJson, currentTuneUpProfile());
+                runTuneUp(findingsJson, profile);
             });
             bar.addView(diagTuneUpBtn);
             root.addView(bar);
@@ -1471,6 +1514,8 @@ public class MainActivity extends Activity {
                     diagProfileBtns = null;
                     diagProfileDesc = null;
                     diagTuneUpBtn = null;
+                    diagSummaryTv = null;
+                    diagFindingsJson = null;
                 })
                 .show();
         diagDialog.getButton(AlertDialog.BUTTON_NEGATIVE)
@@ -1645,16 +1690,67 @@ public class MainActivity extends Activity {
         return new JSONObject();
     }
 
+    /** True when the recipe is premium-gated and not owned. */
+    private boolean isProfileLocked(String pid) {
+        JSONObject meta = tuneUpProfiles().optJSONObject(pid);
+        return meta != null && meta.optBoolean("premium", false) && !isPremium();
+    }
+
     /** Profile segment tap: locked Pro recipes open the upsell instead. */
     private void onProfileSelected(String pid) {
-        JSONObject meta = tuneUpProfiles().optJSONObject(pid);
-        if (meta != null && meta.optBoolean("premium", false) && !isPremium()) {
+        if (isProfileLocked(pid)) {
             showProfileUpsell(pid);
             return;
         }
         getSharedPreferences("soundlab", MODE_PRIVATE).edit()
                 .putString("tuneup_profile", pid).apply();
         refreshDiagProfileSegments();
+        fetchDiagSummary();
+    }
+
+    /** Fill the executive summary, from cache or Groq/Qwen. */
+    private void fetchDiagSummary() {
+        if (diagSummaryTv == null || diagFindingsJson == null) {
+            return;
+        }
+        final String groqKey = BuildConfig.GROQ_API_KEY;
+        if (groqKey == null || groqKey.isEmpty()) {
+            return;
+        }
+        final String profile = currentTuneUpProfile();
+        final String cacheKey = diagFindingsJson.hashCode() + "|" + profile;
+        final String hit = diagSummaryCache.get(cacheKey);
+        final TextView tv = diagSummaryTv;
+        if (hit != null) {
+            tv.setText(hit);
+            return;
+        }
+        tv.setText("Summarizing your report…");
+        new Thread(() -> {
+            String summary = "";
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                summary = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("summarize_diagnosis", diagFindingsJson,
+                                profile, groqKey).toString();
+            } catch (Exception ignored) {
+            }
+            final String out = summary;
+            runOnUiThread(() -> {
+                if (out != null && !out.isEmpty()) {
+                    diagSummaryCache.put(cacheKey, out);
+                }
+                boolean stale = tv != diagSummaryTv || diagFindingsJson == null
+                        || !profile.equals(currentTuneUpProfile());
+                if (!stale) {
+                    tv.setText((out != null && !out.isEmpty()) ? out
+                            : "Summary unavailable.");
+                }
+            });
+        }).start();
     }
 
     /** Sync the segment control, recipe line and Tune Up label. */

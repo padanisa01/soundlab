@@ -522,7 +522,7 @@ TUNE_UP_PROFILES = {
         "label": "Podcast",
         "description": "Voice recipe: de-plosive, de-esser, leveling, "
                        "-16 LUFS",
-        "premium": False,
+        "premium": True,
         "fixes": ("declip", "dc_remove", "hum_notch", "denoise",
                   "deplosive", "deess", "silence_trim", "level",
                   "loudness", "eq_balance", "fade_ends"),
@@ -536,7 +536,7 @@ TUNE_UP_PROFILES = {
         "label": "Singing",
         "description": "Vocal recipe: gentle de-esser, no leveling, "
                        "-14 LUFS (dynamics preserved)",
-        "premium": True,
+        "premium": False,
         "fixes": ("declip", "dc_remove", "hum_notch", "denoise",
                   "deplosive", "deess", "loudness", "eq_balance",
                   "fade_ends"),

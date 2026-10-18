@@ -134,8 +134,9 @@ class DiagnoseTest(unittest.TestCase):
     def test_list_profiles(self):
         profiles = diagnose.list_profiles()
         self.assertEqual(set(profiles), {"podcast", "singing", "music"})
-        self.assertFalse(profiles["podcast"]["premium"])
-        self.assertTrue(profiles["singing"]["premium"])
+        self.assertTrue(profiles["podcast"]["premium"])
+        self.assertFalse(profiles["singing"]["premium"])
+        self.assertTrue(profiles["music"]["premium"])
 
     def test_warn_first_ordering(self):
         sig = sine(440, 1.0, 0.05)  # quiet -> warn; most else ok

@@ -423,6 +423,13 @@ def list_tune_up_profiles():
     return json.dumps(_diagnose.list_profiles())
 
 
+def summarize_diagnosis(findings_json, profile, api_key):
+    """Plain-language executive summary of the findings via Groq/Qwen.
+    Returns "" on any failure (no key, no network, bad response)."""
+    from audiofx import summarize as _summarize
+    return _summarize.summarize(findings_json, profile, api_key)
+
+
 def tune_up_build(findings_json, profile="podcast"):
     """Build the composite tune_up op from diagnose_file's findings JSON
     and a profile id ("podcast", "singing", "music"). Returns the op as a
