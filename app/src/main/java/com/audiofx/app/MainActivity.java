@@ -23,6 +23,8 @@ import android.provider.OpenableColumns;
 import android.util.Log;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.animation.AlphaAnimation;
+import android.view.animation.Animation;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageButton;
@@ -46,6 +48,7 @@ import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
 
 import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -81,6 +84,7 @@ public class MainActivity extends Activity {
     private Button btnOpen;
     private Button btnSave2;
     private Button btnShare;
+    private Button btnDiagnose;
     private TextView toastView;
     private final Runnable hideToast = () -> {
         toastView.animate().alpha(0f).setDuration(250)
@@ -126,7 +130,6 @@ public class MainActivity extends Activity {
     private Button btnJoin;
     private TextView tvTimeCur;
     private TextView tvTimeTot;
-    private TextView tvSource;
 
     private String inputPath;   // cached WAV picked by the user, or a library pristine
     private String inputFileName = "audio.wav";
@@ -148,6 +151,34 @@ public class MainActivity extends Activity {
     /** Peak accumulator fed by the capture threads; drained by recTick. */
     private volatile float livePeakAcc;
     private android.app.AlertDialog saveDialog;
+    private android.app.AlertDialog diagDialog;
+    /** Session-scoped diagnosis cache: re-show instantly until an op is
+     * applied or the audio changes. Keyed by the diagnosed file path. */
+    private String cachedDiagJson;
+    private String cachedDiagPath;
+    /** Path of the audio file the current diagnosis (and its Tune Up) refers
+     * to: currentOutputPath at diagnosis time, else the pristine input. */
+    private String diagLastPath;
+    /** Library entry id whose exact float chain tip is cached in Python
+     * (see _tip_cache in android_bridge). Valid only while it equals the
+     * entry being rendered; entry switches invalidate it implicitly. */
+    private String tipCacheKey;
+    /** Tune-up step tracker overlay on the waveform (per-pass step list). */
+    private LinearLayout tuneupOverlay;
+    private LinearLayout tuneupSteps;
+    private TextView tuneupPassTitle;
+    private String tuneupProfileLabel = "";
+    /** Tune-up profile metadata JSON (from list_tune_up_profiles). */
+    private String cachedProfilesJson;
+    /** Live refs to the open diagnosis dialog's profile UI. */
+    private java.util.ArrayList<Button> diagProfileBtns;
+    private TextView diagProfileDesc;
+    private Button diagTuneUpBtn;
+    private TextView diagSummaryTv;
+    private String diagFindingsJson;
+    /** Executive-summary cache, keyed by findings hash + profile. */
+    private final java.util.HashMap<String, String> diagSummaryCache =
+            new java.util.HashMap<>();
     private TextView saveFolderLabel;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Runnable scheduledStop;
@@ -308,9 +339,11 @@ public class MainActivity extends Activity {
         btnOpen = findViewById(R.id.btn_open);
         btnSave2 = findViewById(R.id.btn_save2);
         btnShare = findViewById(R.id.btn_share);
+        btnDiagnose = findViewById(R.id.btn_diagnose);
         btnOpen.setOnClickListener(v -> pickAudio());
         btnSave2.setOnClickListener(v -> onSaveClicked());
         btnShare.setOnClickListener(v -> shareAudio());
+        btnDiagnose.setOnClickListener(v -> onDiagnoseClicked());
         updateTrackActions();
         btnNormalize = findViewById(R.id.btn_normalize);
         btnNormalize.setOnClickListener(v -> normalizeAudio());
@@ -361,6 +394,9 @@ public class MainActivity extends Activity {
         histList = findViewById(R.id.hist_list);
         tvHistCount = findViewById(R.id.tv_hist_count);
         waveformView = findViewById(R.id.waveform);
+        tuneupOverlay = findViewById(R.id.tuneup_overlay);
+        tuneupSteps = findViewById(R.id.tuneup_steps);
+        tuneupPassTitle = findViewById(R.id.tuneup_pass_title);
         selChipRow = findViewById(R.id.sel_chip_row);
         selChipText = findViewById(R.id.sel_chip_text);
         btnSelClear = findViewById(R.id.btn_sel_clear);
@@ -370,7 +406,6 @@ public class MainActivity extends Activity {
         btnJoin.setOnClickListener(v -> joinSelection());
         tvTimeCur = findViewById(R.id.tv_time_cur);
         tvTimeTot = findViewById(R.id.tv_time_tot);
-        tvSource = findViewById(R.id.tv_source);
         waveformView.setOnSelectionListener(this::onSelectionChanged);
 
         selectReverb(reverbPreset);
@@ -423,6 +458,10 @@ public class MainActivity extends Activity {
             if (premium && adView != null) {
                 adView.setVisibility(View.GONE);
                 setStatus("Premium activated — all ads removed.");
+            }
+            if (premium) {
+                // Unlock any Pro tune-up recipes in the open report.
+                refreshDiagProfileSegments();
             }
         });
         premiumBilling.start();
@@ -494,6 +533,8 @@ public class MainActivity extends Activity {
         btnSave2.setAlpha(hasTrack ? 1f : 0.4f);
         btnShare.setEnabled(hasTrack);
         btnShare.setAlpha(hasTrack ? 1f : 0.4f);
+        btnDiagnose.setEnabled(hasTrack);
+        btnDiagnose.setAlpha(hasTrack ? 1f : 0.4f);
     }
 
     /** Project status bar: entry/file name, or an untitled placeholder. */
@@ -975,6 +1016,10 @@ public class MainActivity extends Activity {
         releasePlayer();
         btnStop.setEnabled(false);
         currentOutputPath = null;
+        cachedDiagJson = null;
+        cachedDiagPath = null;
+        diagLastPath = null;
+        diagSummaryCache.clear();
         audioDurationSec = 0;
         selStartSec = null;
         selEndSec = null;
@@ -984,7 +1029,6 @@ public class MainActivity extends Activity {
         waveformView.setDuration(0);
         tvTimeCur.setText("0:00");
         tvTimeTot.setText("0:00");
-        tvSource.setVisibility(View.GONE);
         updateTrackActions();
         updateProjectName();
         int depth = undoDepth();
@@ -1018,7 +1062,13 @@ public class MainActivity extends Activity {
     /** True for ops that render_chain executes (display-only ops excluded). */
     private static boolean isRenderableOp(String opType) {
         return "fx".equals(opType) || "normalize".equals(opType)
-                || "trim".equals(opType) || "join".equals(opType);
+                || "trim".equals(opType) || "join".equals(opType)
+                || "dc_remove".equals(opType) || "fade_ends".equals(opType)
+                || "silence_trim".equals(opType) || "hum_notch".equals(opType)
+                || "declip".equals(opType) || "denoise".equals(opType)
+                || "deplosive".equals(opType) || "deess".equals(opType)
+                || "level".equals(opType) || "loudness".equals(opType)
+                || "eq_balance".equals(opType) || "tune_up".equals(opType);
     }
 
     private boolean hasRenderableOps(String entryId) {
@@ -1072,7 +1122,8 @@ public class MainActivity extends Activity {
     /**
      * Render the entry's op chain to the render cache (call on a background
      * thread). Writes to a temp file and atomically renames into place.
-     * Returns the rendered duration in seconds.
+     * Seeds the Python chain-tip cache under the entry id, so the next
+     * apply can render incrementally. Returns the rendered duration.
      */
     private double renderChainToCache(String entryId) throws Exception {
         LibraryDb.LibraryEntry e = libraryDb.getEntry(entryId);
@@ -1087,13 +1138,75 @@ public class MainActivity extends Activity {
         File tmp = new File(render.getParentFile(), render.getName() + ".tmp");
         PyObject result = Python.getInstance().getModule("audiofx.android_bridge")
                 .callAttr("render_chain", e.pristinePath, opsJson,
-                        tmp.getAbsolutePath());
+                        tmp.getAbsolutePath(), null, entryId);
         double dur = Double.parseDouble(
                 result.callAttr("get", "duration_s").toString());
         if (!tmp.renameTo(render)) {
             copyFile(tmp, render);
             tmp.delete();
         }
+        tipCacheKey = entryId;
+        return dur;
+    }
+
+    /**
+     * Render a single new op starting from the cached chain tip (call on a
+     * background thread). Falls back to a full renderChainToCache on a
+     * cache miss. Returns the rendered duration in seconds.
+     */
+    private double renderIncrementalOrFull(String entryId, String opType,
+            String paramsJson) throws Exception {
+        if (tipCacheKey != null && tipCacheKey.equals(entryId)) {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                String opJson = "[{\"op\":" + JSONObject.quote(opType)
+                        + ",\"params\":" + (paramsJson != null ? paramsJson : "{}")
+                        + "}]";
+                File render = libraryDb.renderFile(entryId);
+                File tmp = new File(render.getParentFile(),
+                        render.getName() + ".tmp");
+                PyObject r = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("render_chain_from_tip", entryId, opJson,
+                                tmp.getAbsolutePath());
+                if ("True".equals(r.callAttr("get", "cache_hit").toString())) {
+                    double dur = Double.parseDouble(
+                            r.callAttr("get", "duration_s").toString());
+                    if (!tmp.renameTo(render)) {
+                        copyFile(tmp, render);
+                        tmp.delete();
+                    }
+                    return dur;
+                }
+            } catch (Exception e) {
+                android.util.Log.w("AudioMechanic",
+                        "incremental render failed; full render", e);
+            }
+        }
+        return renderChainToCache(entryId);
+    }
+
+    /**
+     * Adopt a pre-rendered WAV (e.g. the tune-up's converged output) as the
+     * entry's render cache without re-rendering. The Python tip cache was
+     * already seeded by the producer. Returns the adopted duration.
+     */
+    private double adoptPreRendered(String entryId, File preRendered,
+            double dur) throws Exception {
+        if (preRendered == null || !preRendered.exists()) {
+            throw new Exception("pre-rendered audio missing");
+        }
+        File render = libraryDb.renderFile(entryId);
+        if (!preRendered.renameTo(render)) {
+            copyFile(preRendered, render);
+            if (!preRendered.delete()) {
+                android.util.Log.w("AudioMechanic",
+                        "could not delete tune-up temp file");
+            }
+        }
+        tipCacheKey = entryId;
         return dur;
     }
 
@@ -1143,6 +1256,27 @@ public class MainActivity extends Activity {
     private void applyLibraryOp(final String opType, final String paramsJson,
                                 final String label, final String workingMsg,
                                 final String doneMsg, final Runnable onRendered) {
+        applyLibraryOp(opType, paramsJson, label, workingMsg, doneMsg,
+                onRendered, true, null, -1);
+    }
+
+    /**
+     * Apply a tune-up whose converged audio is already rendered (adopt the
+     * file instead of re-rendering the chain).
+     */
+    private void applyTuneUpOp(final String paramsJson, final String label,
+                               final String workingMsg, final String doneMsg,
+                               final Runnable onRendered, final File preRendered,
+                               final double preRenderedDur) {
+        applyLibraryOp("tune_up", paramsJson, label, workingMsg, doneMsg,
+                onRendered, false, preRendered, preRenderedDur);
+    }
+
+    private void applyLibraryOp(final String opType, final String paramsJson,
+                                final String label, final String workingMsg,
+                                final String doneMsg, final Runnable onRendered,
+                                final boolean incremental, final File preRendered,
+                                final double preRenderedDur) {
         final String entryId = currentEntryId;
         if (entryId == null) {
             return;
@@ -1165,7 +1299,18 @@ public class MainActivity extends Activity {
             try {
                 libraryDb.addOp(entryId, opType, paramsJson, label);
                 added = true;
-                final double dur = renderChainToCache(entryId);
+                cachedDiagJson = null;
+                cachedDiagPath = null;
+                diagLastPath = null;
+                diagSummaryCache.clear();
+                final double dur;
+                if (preRendered != null) {
+                    dur = adoptPreRendered(entryId, preRendered, preRenderedDur);
+                } else if (incremental) {
+                    dur = renderIncrementalOrFull(entryId, opType, paramsJson);
+                } else {
+                    dur = renderChainToCache(entryId);
+                }
                 runOnUiThread(() -> {
                     currentOutputPath =
                             libraryDb.renderFile(entryId).getAbsolutePath();
@@ -1193,6 +1338,899 @@ public class MainActivity extends Activity {
                     setBusy(false);
                     waveformView.clearProgress();
                     updateUndoBadge();
+                });
+            }
+        }).start();
+    }
+
+    /** Run the diagnostics on the current output, then show the report. */
+    private void onDiagnoseClicked() {
+        final String entryId = currentEntryId;
+        // Same fallback playback uses: the render when there is one,
+        // otherwise the pristine input (fresh picks have no render yet).
+        String path = (currentOutputPath != null
+                && new File(currentOutputPath).exists()) ? currentOutputPath
+                        : inputPath;
+        if (entryId == null || path == null || !new File(path).exists()) {
+            setStatus("Open or record audio first.");
+            return;
+        }
+        final String diagPath = path;
+        diagLastPath = diagPath;
+        if (diagPath.equals(cachedDiagPath) && cachedDiagJson != null) {
+            showDiagnosisReport(cachedDiagJson);
+            return;
+        }
+        setBusy(true);
+        setStatus("Diagnosing...");
+        waveformView.startProgressAnimation();
+        new Thread(() -> {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                final String findingsJson = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("diagnose_file", diagPath).toString();
+                cachedProfilesJson = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("list_tune_up_profiles").toString();
+                // Warm the LLM summary alongside the diagnosis cache.
+                warmDiagSummaryCache(findingsJson);
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    waveformView.finishProgressAnimation();
+                    cachedDiagPath = diagPath;
+                    cachedDiagJson = findingsJson;
+                    showDiagnosisReport(findingsJson);
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    waveformView.clearProgress();
+                    setStatus("Diagnosis failed: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    /** The mechanic's report card (Option A): score hero, grouped findings,
+     * profile picker, sticky Tune Up bar. */
+    private void showDiagnosisReport(final String findingsJson) {
+        final float dp = getResources().getDisplayMetrics().density;
+        JSONArray findings;
+        try {
+            findings = new JSONArray(findingsJson);
+        } catch (Exception e) {
+            setStatus("Diagnosis failed: bad report.");
+            return;
+        }
+        java.util.ArrayList<JSONObject> warns = new java.util.ArrayList<>();
+        java.util.ArrayList<JSONObject> infos = new java.util.ArrayList<>();
+        java.util.ArrayList<JSONObject> oks = new java.util.ArrayList<>();
+        boolean hasFixable = false;
+        for (int i = 0; i < findings.length(); i++) {
+            JSONObject f = findings.optJSONObject(i);
+            if (f == null) {
+                continue;
+            }
+            String sev = f.optString("severity", "info");
+            if ("warn".equals(sev)) {
+                warns.add(f);
+                if (!f.isNull("fix")) {
+                    hasFixable = true;
+                }
+            } else if ("ok".equals(sev)) {
+                oks.add(f);
+            } else {
+                infos.add(f);
+                if (!f.isNull("fix")) {
+                    hasFixable = true;
+                }
+            }
+        }
+
+        int score = Math.max(0, 100 - 10 * warns.size() - 2 * infos.size());
+        String verdict = score >= 85 ? "Excellent" : score >= 70 ? "Good"
+                : score >= 50 ? "Needs work" : "Rough";
+
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (16 * dp);
+        list.setPadding(pad, pad, pad, (int) (8 * dp));
+
+        // LLM executive summary (Groq/Qwen). Fills in async; the card is
+        // hidden entirely when no API key is configured.
+        diagFindingsJson = findingsJson;
+        final String groqKey = BuildConfig.GROQ_API_KEY;        LinearLayout summaryCard = new LinearLayout(this);
+        summaryCard.setOrientation(LinearLayout.VERTICAL);
+        summaryCard.setBackgroundResource(R.drawable.bg_card);
+        LinearLayout.LayoutParams scLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        scLp.setMargins(0, 0, 0, (int) (12 * dp));
+        summaryCard.setLayoutParams(scLp);
+        summaryCard.setPadding((int) (14 * dp), (int) (11 * dp),
+                (int) (14 * dp), (int) (12 * dp));
+        TextView summaryLabel = new TextView(this);
+        summaryLabel.setText("SUMMARY");
+        summaryLabel.setTextColor(getColor(R.color.sl_mut));
+        summaryLabel.setTextSize(10.5f);
+        summaryCard.addView(summaryLabel);
+        diagSummaryTv = new TextView(this);
+        diagSummaryTv.setTextColor(getColor(R.color.sl_txt));
+        diagSummaryTv.setTextSize(13.5f);
+        diagSummaryTv.setLineSpacing(0, 1.25f);
+        diagSummaryTv.setPadding(0, (int) (4 * dp), 0, 0);
+        summaryCard.addView(diagSummaryTv);
+        if (groqKey == null || groqKey.trim().isEmpty()) {
+            summaryCard.setVisibility(android.view.View.GONE);
+        } else {
+            diagSummaryTv.setText("Summarizing your report…");
+            fetchDiagSummary();
+        }
+        // NOTE: summaryCard is added to `list` below, after the recipe
+        // picker, to keep the report order: Score, Tune up as, Summary,
+        // Needs attention, Notes, Passed.
+
+        // Score hero: ring + verdict caption.
+        LinearLayout hero = new LinearLayout(this);
+        hero.setOrientation(LinearLayout.HORIZONTAL);
+        hero.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        hero.setPadding(0, 0, 0, (int) (12 * dp));
+        ScoreRingView ring = new ScoreRingView(this);
+        int ringSize = (int) (96 * dp);
+        ring.setLayoutParams(new LinearLayout.LayoutParams(ringSize, ringSize));
+        ring.setScore(score);
+        hero.addView(ring);
+        LinearLayout cap = new LinearLayout(this);
+        cap.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams capLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        capLp.setMargins((int) (16 * dp), 0, 0, 0);
+        cap.setLayoutParams(capLp);
+        TextView verdictTv = new TextView(this);
+        verdictTv.setText(verdict);
+        verdictTv.setTextColor(getColor(R.color.sl_txt));
+        verdictTv.setTextSize(17);
+        verdictTv.setTypeface(null, android.graphics.Typeface.BOLD);
+        cap.addView(verdictTv);
+        TextView subTv = new TextView(this);
+        String sub = warns.size() + (warns.size() == 1 ? " issue" : " issues")
+                + " · " + oks.size() + " passed";
+        if (!infos.isEmpty()) {
+            sub += " · " + infos.size() + " notes";
+        }
+        subTv.setText(sub);
+        subTv.setTextColor(getColor(R.color.sl_mut));
+        subTv.setTextSize(12.5f);
+        subTv.setPadding(0, (int) (3 * dp), 0, 0);
+        cap.addView(subTv);
+        hero.addView(cap);
+        list.addView(hero);
+
+        // Tune-up recipe picker: segmented control + recipe description.
+        TextView tuneAsLabel = new TextView(this);
+        tuneAsLabel.setText("Tune up as");
+        tuneAsLabel.setTextColor(getColor(R.color.sl_mut));
+        tuneAsLabel.setTextSize(12);
+        list.addView(tuneAsLabel);
+
+        LinearLayout segments = new LinearLayout(this);
+        segments.setOrientation(LinearLayout.HORIZONTAL);
+        segments.setPadding(0, (int) (4 * dp), 0, 0);
+        diagProfileBtns = new java.util.ArrayList<>();
+        for (String pid : TUNE_UP_PROFILE_ORDER) {
+            Button seg = new Button(this);
+            seg.setTag(pid);
+            seg.setTextSize(12);
+            seg.setBackgroundResource(R.drawable.bg_ghost);
+            LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            if (!diagProfileBtns.isEmpty()) {
+                slp.setMargins((int) (6 * dp), 0, 0, 0);
+            }
+            seg.setLayoutParams(slp);
+            seg.setOnClickListener(v -> onProfileSelected((String) v.getTag()));
+            segments.addView(seg);
+            diagProfileBtns.add(seg);
+        }
+        list.addView(segments);
+
+        diagProfileDesc = new TextView(this);
+        diagProfileDesc.setTextColor(getColor(R.color.sl_mut));
+        diagProfileDesc.setTextSize(12);
+        diagProfileDesc.setPadding(0, (int) (4 * dp), 0, (int) (4 * dp));
+        list.addView(diagProfileDesc);
+        refreshDiagProfileSegments();
+        list.addView(summaryCard);
+
+        // Grouped findings: issues open, notes and passed collapsed.
+        if (!warns.isEmpty()) {
+            LinearLayout warnBody =
+                    addDiagSection(list, "Needs attention", warns, true, dp);
+            boolean first = true;
+            for (JSONObject f : warns) {
+                addDiagIssueCard(warnBody, f, first, dp);
+                first = false;
+            }
+        }
+        if (!infos.isEmpty()) {
+            LinearLayout infoBody =
+                    addDiagSection(list, "Notes", infos, false, dp);
+            for (JSONObject f : infos) {
+                addDiagIssueCard(infoBody, f, false, dp);
+            }
+        }
+        LinearLayout passedBody = addDiagSection(list, "Passed", oks, false, dp);
+        for (JSONObject f : oks) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            row.setPadding(0, (int) (7 * dp), 0, (int) (7 * dp));
+            TextView dot = new TextView(this);
+            dot.setText("\u25cf ");
+            dot.setTextColor(getColor(R.color.sl_teal2));
+            dot.setTextSize(11);
+            row.addView(dot);
+            TextView title = new TextView(this);
+            title.setText(f.optString("title", ""));
+            title.setTextColor(getColor(R.color.sl_mut));
+            title.setTextSize(13.5f);
+            row.addView(title);
+            passedBody.addView(row);
+        }
+
+        // Root: scrollable report with a sticky Tune Up bar.
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        scroll.addView(list);
+        root.addView(scroll);
+        if (hasFixable) {
+            LinearLayout bar = new LinearLayout(this);
+            bar.setPadding(pad, (int) (8 * dp), pad, (int) (4 * dp));
+            diagTuneUpBtn = new Button(this);
+            diagTuneUpBtn.setBackgroundResource(R.drawable.bg_apply);
+            diagTuneUpBtn.setTextColor(getColor(R.color.sl_txt));
+            diagTuneUpBtn.setTextSize(15.5f);
+            diagTuneUpBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+            diagTuneUpBtn.setPadding(0, (int) (13 * dp), 0, (int) (13 * dp));
+            diagTuneUpBtn.setLayoutParams(new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT));
+            diagTuneUpBtn.setOnClickListener(v -> {
+                final String profile = currentTuneUpProfile();
+                if (isProfileLocked(profile)) {
+                    showProfileUpsell(profile);
+                    return;
+                }
+                if (diagDialog != null) {
+                    diagDialog.dismiss();
+                }
+                runTuneUp(findingsJson, profile);
+            });
+            bar.addView(diagTuneUpBtn);
+            root.addView(bar);
+        } else {
+            diagTuneUpBtn = null;
+        }
+
+        diagDialog = new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+                .setTitle("Diagnosis")
+                .setView(root)
+                .setNegativeButton("Close", null)
+                .setOnDismissListener(d -> {
+                    diagDialog = null;
+                    diagProfileBtns = null;
+                    diagProfileDesc = null;
+                    diagTuneUpBtn = null;
+                    diagSummaryTv = null;
+                    diagFindingsJson = null;
+                })
+                .show();
+        diagDialog.getButton(AlertDialog.BUTTON_NEGATIVE)
+                .setTextColor(getColor(R.color.sl_mut));
+        refreshDiagProfileSegments();
+    }
+
+    /** Collapsible report section; returns the body container to fill. */
+    private LinearLayout addDiagSection(LinearLayout parent, String title,
+            java.util.ArrayList<JSONObject> items, boolean openByDefault,
+            final float dp) {
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        head.setPadding(0, (int) (10 * dp), 0, (int) (6 * dp));
+        TextView titleTv = new TextView(this);
+        titleTv.setText(title + " (" + items.size() + ")");
+        titleTv.setTextColor(getColor(R.color.sl_txt));
+        titleTv.setTextSize(14);
+        titleTv.setTypeface(null, android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        titleTv.setLayoutParams(tlp);
+        head.addView(titleTv);
+        final TextView chev = new TextView(this);
+        chev.setTextColor(getColor(R.color.sl_mut));
+        chev.setTextSize(13);
+        head.addView(chev);
+        parent.addView(head);
+
+        final LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        parent.addView(body);
+
+        final boolean[] isOpen = {openByDefault};
+        Runnable sync = () -> {
+            body.setVisibility(isOpen[0] ? android.view.View.VISIBLE
+                    : android.view.View.GONE);
+            chev.setText(isOpen[0] ? "\u25be" : "\u25b8");
+        };
+        sync.run();
+        head.setOnClickListener(v -> {
+            isOpen[0] = !isOpen[0];
+            sync.run();
+        });
+        return body;
+    }
+
+    /** Expandable issue card with detail, tip and Fix button. */
+    private void addDiagIssueCard(LinearLayout parent, final JSONObject f,
+            boolean openByDefault, final float dp) {
+        String severity = f.optString("severity", "info");
+        final int dotColor = "warn".equals(severity) ? R.color.sl_red
+                : R.color.sl_org;
+
+        final LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackgroundResource(R.drawable.bg_card);
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        clp.setMargins(0, 0, 0, (int) (10 * dp));
+        card.setLayoutParams(clp);
+
+        LinearLayout headRow = new LinearLayout(this);
+        headRow.setOrientation(LinearLayout.HORIZONTAL);
+        headRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        headRow.setPadding((int) (14 * dp), (int) (12 * dp),
+                (int) (14 * dp), (int) (12 * dp));
+        TextView dot = new TextView(this);
+        dot.setText("\u25cf ");
+        dot.setTextColor(getColor(dotColor));
+        dot.setTextSize(12);
+        headRow.addView(dot);
+        TextView title = new TextView(this);
+        title.setText(f.optString("title", ""));
+        title.setTextColor(getColor(R.color.sl_txt));
+        title.setTextSize(14);
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        title.setLayoutParams(tlp);
+        headRow.addView(title);
+        final TextView chev = new TextView(this);
+        chev.setTextColor(getColor(R.color.sl_mut));
+        chev.setTextSize(12);
+        headRow.addView(chev);
+        card.addView(headRow);
+
+        final LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding((int) (14 * dp), 0, (int) (14 * dp), (int) (13 * dp));
+        TextView detail = new TextView(this);
+        detail.setText(f.optString("detail", ""));
+        detail.setTextColor(getColor(R.color.sl_mut));
+        detail.setTextSize(13);
+        detail.setLineSpacing(0, 1.15f);
+        body.addView(detail);
+        String advice = f.optString("advice", "");
+        if (!advice.isEmpty()) {
+            TextView tip = new TextView(this);
+            tip.setText(advice);
+            tip.setTextColor(getColor(R.color.sl_mut));
+            tip.setTextSize(12.5f);
+            tip.setLineSpacing(0, 1.15f);
+            LinearLayout.LayoutParams tipLp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            tipLp.setMargins((int) (10 * dp), (int) (8 * dp), 0, 0);
+            tip.setLayoutParams(tipLp);
+            tip.setPadding((int) (8 * dp), 0, 0, 0);
+            tip.setBackgroundResource(R.drawable.bg_ghost);
+            body.addView(tip);
+        }
+        final JSONObject fix = f.optJSONObject("fix");
+        if (fix != null) {
+            Button fixBtn = new Button(this);
+            fixBtn.setText(fix.optString("label", "Fix"));
+            fixBtn.setTextSize(12.5f);
+            fixBtn.setTextColor(getColor(R.color.sl_teal2));
+            fixBtn.setBackgroundResource(R.drawable.bg_ghost);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(0, (int) (10 * dp), 0, 0);
+            fixBtn.setLayoutParams(lp);
+            fixBtn.setPadding((int) (16 * dp), (int) (6 * dp),
+                    (int) (16 * dp), (int) (6 * dp));
+            fixBtn.setOnClickListener(v -> {
+                if (diagDialog != null) {
+                    diagDialog.dismiss();
+                }
+                applyLibraryOp(fix.optString("op"),
+                        fix.optJSONObject("params").toString(),
+                        fix.optString("label"),
+                        "Applying fix...", "Fix applied.",
+                        () -> loadWaveformForPath(currentOutputPath));
+            });
+            body.addView(fixBtn);
+        }
+        card.addView(body);
+
+        final boolean[] isOpen = {openByDefault};
+        Runnable sync = () -> {
+            body.setVisibility(isOpen[0] ? android.view.View.VISIBLE
+                    : android.view.View.GONE);
+            chev.setText(isOpen[0] ? "\u25be" : "\u25b8");
+        };
+        sync.run();
+        headRow.setOnClickListener(v -> {
+            isOpen[0] = !isOpen[0];
+            sync.run();
+        });
+        parent.addView(card);
+    }
+
+    private static final String[] TUNE_UP_PROFILE_ORDER =
+            {"podcast", "singing", "music"};
+
+    private String currentTuneUpProfile() {
+        return getSharedPreferences("soundlab", MODE_PRIVATE)
+                .getString("tuneup_profile", "podcast");
+    }
+
+    private JSONObject tuneUpProfiles() {
+        try {
+            if (cachedProfilesJson != null) {
+                return new JSONObject(cachedProfilesJson);
+            }
+        } catch (Exception ignored) {
+        }
+        return new JSONObject();
+    }
+
+    /** True when the recipe is premium-gated and not owned. */
+    private boolean isProfileLocked(String pid) {
+        JSONObject meta = tuneUpProfiles().optJSONObject(pid);
+        return meta != null && meta.optBoolean("premium", false) && !isPremium();
+    }
+
+    /** Profile segment tap: locked Pro recipes open the upsell instead. */
+    private void onProfileSelected(String pid) {
+        if (isProfileLocked(pid)) {
+            showProfileUpsell(pid);
+            return;
+        }
+        getSharedPreferences("soundlab", MODE_PRIVATE).edit()
+                .putString("tuneup_profile", pid).apply();
+        refreshDiagProfileSegments();
+        fetchDiagSummary();
+    }
+
+    /** Fill the executive summary, from cache or Groq/Qwen. The HTTP is
+     * done here with HttpsURLConnection (Android's system trust store);
+     * Python only builds the request body and parses the response. */
+    /** Trimmed Groq key, or "" when not configured. */
+    private String groqApiKey() {
+        String k = BuildConfig.GROQ_API_KEY;
+        return k == null ? "" : k.trim();
+    }
+
+    private static String summaryCacheKey(String findingsJson, String profile) {
+        return findingsJson.hashCode() + "|" + profile;
+    }
+
+    /** Async Groq summary; the callback runs on the UI thread with "" on
+     * any failure. Shared by the dialog fetch and the cache warmer. */
+    private interface SummaryCallback {
+        void onDone(String summary);
+    }
+
+    private void requestDiagSummary(final String findingsJson,
+            final String profile, final String apiKey,
+            final SummaryCallback cb) {
+        new Thread(() -> {
+            String summary = "";
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                String body = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("summarize_request_body", findingsJson,
+                                profile).toString();
+                if (!body.isEmpty()) {
+                    String resp = postGroqSummary(body, apiKey);
+                    if (!resp.isEmpty()) {
+                        summary = Python.getInstance()
+                                .getModule("audiofx.android_bridge")
+                                .callAttr("summarize_parse", resp).toString();
+                    }
+                }
+            } catch (Exception e) {
+                android.util.Log.w("AudioMechanic",
+                        "summarize: failed: " + e);
+            }
+            final String out = summary;
+            runOnUiThread(() -> cb.onDone(out));
+        }).start();
+    }
+
+    /** Pre-fetch the summary when a fresh diagnosis is cached, so the
+     * dialog finds it ready. Never delays the dialog: runs on its own
+     * thread and fills the open dialog live if it is still on this
+     * report and profile. */
+    private void warmDiagSummaryCache(final String findingsJson) {
+        final String apiKey = groqApiKey();
+        if (apiKey.isEmpty()) {
+            return;
+        }
+        final String profile = currentTuneUpProfile();
+        final String cacheKey = summaryCacheKey(findingsJson, profile);
+        if (diagSummaryCache.containsKey(cacheKey)) {
+            return;
+        }
+        requestDiagSummary(findingsJson, profile, apiKey, summary -> {
+            if (summary == null || summary.isEmpty()) {
+                return;
+            }
+            diagSummaryCache.put(cacheKey, summary);
+            if (diagSummaryTv != null && findingsJson.equals(diagFindingsJson)
+                    && profile.equals(currentTuneUpProfile())) {
+                diagSummaryTv.setText(summary);
+            }
+        });
+    }
+
+    /** Fill the executive summary, from cache or Groq/Qwen. */
+    private void fetchDiagSummary() {
+        if (diagSummaryTv == null || diagFindingsJson == null) {
+            return;
+        }
+        final String apiKey = groqApiKey();
+        if (apiKey.isEmpty()) {
+            return;
+        }
+        final String profile = currentTuneUpProfile();
+        final String cacheKey = summaryCacheKey(diagFindingsJson, profile);
+        final String hit = diagSummaryCache.get(cacheKey);
+        final TextView tv = diagSummaryTv;
+        final String findingsJson = diagFindingsJson;
+        if (hit != null) {
+            tv.setText(hit);
+            return;
+        }
+        tv.setText("Summarizing your report…");
+        requestDiagSummary(findingsJson, profile, apiKey, summary -> {
+            if (summary != null && !summary.isEmpty()) {
+                diagSummaryCache.put(cacheKey, summary);
+            }
+            boolean stale = tv != diagSummaryTv || diagFindingsJson == null
+                    || !profile.equals(currentTuneUpProfile());
+            if (!stale) {
+                tv.setText((summary != null && !summary.isEmpty()) ? summary
+                        : "Summary unavailable.");
+            }
+        });
+    }
+
+    /** POST the summary request to Groq; returns the response body or "". */
+    private String postGroqSummary(String bodyJson, String apiKey) {
+        java.net.HttpURLConnection conn = null;
+        try {
+            java.net.URL url = new java.net.URL(
+                    "https://api.groq.com/openai/v1/chat/completions");
+            conn = (java.net.HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("Authorization", "Bearer " + apiKey);
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(20000);
+            conn.setReadTimeout(20000);
+            byte[] body = bodyJson.getBytes(
+                    java.nio.charset.StandardCharsets.UTF_8);
+            conn.setFixedLengthStreamingMode(body.length);
+            try (java.io.OutputStream os = conn.getOutputStream()) {
+                os.write(body);
+            }
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                android.util.Log.w("AudioMechanic",
+                        "summarize: Groq HTTP " + code);
+                return "";
+            }
+            try (java.io.InputStream is = conn.getInputStream();
+                 java.util.Scanner s = new java.util.Scanner(is, "UTF-8")
+                         .useDelimiter("\\A")) {
+                return s.hasNext() ? s.next() : "";
+            }
+        } catch (Exception e) {
+            android.util.Log.w("AudioMechanic",
+                    "summarize: request failed: " + e);
+            return "";
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+    }
+
+    /** Sync the segment control, recipe line and Tune Up label. */
+    private void refreshDiagProfileSegments() {
+        if (diagProfileBtns == null) {
+            return;
+        }
+        String current = currentTuneUpProfile();
+        JSONObject profiles = tuneUpProfiles();
+        boolean premium = isPremium();
+        for (Button seg : diagProfileBtns) {
+            String pid = (String) seg.getTag();
+            JSONObject meta = profiles.optJSONObject(pid);
+            String label = meta != null ? meta.optString("label", pid) : pid;
+            boolean locked = meta != null && meta.optBoolean("premium", false)
+                    && !premium;
+            seg.setText(label + (locked ? " \uD83D\uDD12" : ""));
+            boolean selected = pid.equals(current);
+            seg.setTextColor(getColor(
+                    selected ? R.color.sl_teal2 : R.color.sl_mut));
+            seg.setTypeface(null, selected ? android.graphics.Typeface.BOLD
+                    : android.graphics.Typeface.NORMAL);
+        }
+        JSONObject cur = profiles.optJSONObject(current);
+        if (diagProfileDesc != null) {
+            diagProfileDesc.setText(
+                    cur != null ? cur.optString("description", "") : "");
+        }
+        if (diagTuneUpBtn != null) {
+            String label = cur != null ? cur.optString("label", current)
+                    : current;
+            diagTuneUpBtn.setText("Tune Up as " + label);
+        }
+    }
+
+    /** Upsell for the premium tune-up recipes. */
+    private void showProfileUpsell(final String pid) {
+        JSONObject meta = tuneUpProfiles().optJSONObject(pid);
+        String label = meta != null ? meta.optString("label", pid) : pid;
+        new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+                .setTitle(label + " is a Pro recipe")
+                .setMessage("The " + label
+                        + " tune-up recipe comes with Premium, our one-time "
+                        + "purchase. It also removes all ads.")
+                .setPositiveButton("Buy premium", (d, w) -> buyPremium())
+                .setNegativeButton("Not now", null)
+                .show();
+    }
+
+    /** One row of the tune-up step tracker: label + per-step bar. */
+    private static class TuneUpRow {
+        TextView label;
+        ProgressBar bar;
+        ObjectAnimator fill;
+    }
+
+    /** Progress callbacks invoked from Python during tune_up_converge, on
+     * the tune-up worker thread; each hops to the UI thread. Methods must
+     * stay public for Chaquopy reflection. */
+    public class TuneUpProgress {
+        public void tuneUpPassStarted(int passNumber, int maxPasses,
+                String labelsJson) {
+            runOnUiThread(() -> showTuneUpPass(passNumber, maxPasses,
+                    labelsJson));
+        }
+
+        public void tuneUpStepActive(int stepIndex) {
+            runOnUiThread(() -> setTuneUpStepActive(stepIndex));
+        }
+
+        public void tuneUpStepDone(int stepIndex) {
+            runOnUiThread(() -> setTuneUpStepDone(stepIndex));
+        }
+    }
+
+    /** Resolve the display label for a tune-up profile id. */
+    private String tuneUpProfileLabel(String profile) {
+        if (cachedProfilesJson != null) {
+            try {
+                org.json.JSONObject all =
+                        new org.json.JSONObject(cachedProfilesJson);
+                org.json.JSONObject p = all.optJSONObject(profile);
+                if (p != null) {
+                    return p.optString("label", profile);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return profile.substring(0, 1).toUpperCase()
+                + profile.substring(1);
+    }
+
+    /** Show this pass's steps on the waveform overlay, all grey (pending). */
+    private void showTuneUpPass(int passNumber, int maxPasses,
+            String labelsJson) {
+        if (tuneupOverlay == null) {
+            return;
+        }
+        tuneupSteps.removeAllViews();
+        try {
+            JSONArray labels = new JSONArray(labelsJson);
+            for (int i = 0; i < labels.length(); i++) {
+                tuneupSteps.addView(makeTuneUpStepRow(
+                        labels.optString(i, "")));
+            }
+        } catch (Exception ignored) {
+        }
+        tuneupPassTitle.setText("Tune Up (" + tuneupProfileLabel + ") - pass "
+                + passNumber + " of " + maxPasses);
+        tuneupOverlay.setVisibility(View.VISIBLE);
+        tuneupOverlay.bringToFront();
+    }
+
+    private View makeTuneUpStepRow(String label) {
+        final float dp = getResources().getDisplayMetrics().density;
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        int vpad = (int) (3 * dp);
+        row.setPadding(0, vpad, 0, vpad);
+        TextView tv = new TextView(this);
+        tv.setText(label);
+        tv.setTextSize(12.5f);
+        tv.setTextColor(getColor(R.color.sl_mut));
+        ProgressBar bar = new ProgressBar(this, null,
+                android.R.attr.progressBarStyleHorizontal);
+        bar.setMax(100);
+        bar.setProgress(0);
+        bar.setProgressTintList(android.content.res.ColorStateList.valueOf(
+                getColor(R.color.sl_green)));
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                (int) (90 * dp), LinearLayout.LayoutParams.WRAP_CONTENT);
+        blp.setMarginStart((int) (8 * dp));
+        row.addView(tv, tlp);
+        row.addView(bar, blp);
+        TuneUpRow holder = new TuneUpRow();
+        holder.label = tv;
+        holder.bar = bar;
+        row.setTag(holder);
+        return row;
+    }
+
+    /** Mark a step in-progress: blinking green label, bar filling. */
+    private void setTuneUpStepActive(int stepIndex) {
+        View row = tuneupSteps == null ? null
+                : tuneupSteps.getChildAt(stepIndex);
+        if (!(row != null && row.getTag() instanceof TuneUpRow)) {
+            return;
+        }
+        TuneUpRow h = (TuneUpRow) row.getTag();
+        h.label.setTextColor(getColor(R.color.sl_green));
+        AlphaAnimation blink = new AlphaAnimation(1.0f, 0.35f);
+        blink.setDuration(550);
+        blink.setRepeatMode(Animation.REVERSE);
+        blink.setRepeatCount(Animation.INFINITE);
+        h.label.startAnimation(blink);
+        if (h.fill != null) {
+            h.fill.cancel();
+        }
+        h.fill = ObjectAnimator.ofInt(h.bar, "progress", 0, 90);
+        h.fill.setDuration(3000);
+        h.fill.start();
+    }
+
+    /** Mark a step done: solid green label, bar to 100%. */
+    private void setTuneUpStepDone(int stepIndex) {
+        View row = tuneupSteps == null ? null
+                : tuneupSteps.getChildAt(stepIndex);
+        if (!(row != null && row.getTag() instanceof TuneUpRow)) {
+            return;
+        }
+        TuneUpRow h = (TuneUpRow) row.getTag();
+        if (h.fill != null) {
+            h.fill.cancel();
+            h.fill = null;
+        }
+        h.label.clearAnimation();
+        h.label.setAlpha(1f);
+        h.label.setTextColor(getColor(R.color.sl_green));
+        h.bar.setProgress(100);
+    }
+
+    /** Remove the step tracker from the waveform. */
+    private void hideTuneUpOverlay() {
+        if (tuneupOverlay == null) {
+            return;
+        }
+        tuneupOverlay.setVisibility(View.GONE);
+        tuneupSteps.removeAllViews();
+    }
+
+    /** One-button Tune Up: converge the profile's fixes over up to 3 passes
+     * and adopt the converged audio directly (no re-render, no automatic
+     * re-diagnosis). Falls back to the single-pass build if the diagnosed
+     * file is gone. */
+    private void runTuneUp(final String findingsJson, final String profile) {
+        final String entryId = currentEntryId;
+        if (entryId == null) {
+            setStatus("Open or record audio first.");
+            return;
+        }
+        setBusy(true);
+        setStatus("Tuning up...");
+        waveformView.startProgressAnimation();
+        tuneupProfileLabel = tuneUpProfileLabel(profile);
+        final String convergePath = diagLastPath;
+        final TuneUpProgress progress = new TuneUpProgress();
+        new Thread(() -> {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                final PyObject bridge = Python.getInstance()
+                        .getModule("audiofx.android_bridge");
+                final String tuneUpJson;
+                final File preRendered;
+                final double preRenderedDur;
+                if (convergePath != null
+                        && new File(convergePath).exists()) {
+                    preRendered = new File(getCacheDir(), "tune_up_render.wav");
+                    String out = bridge.callAttr("tune_up_converge",
+                            convergePath, findingsJson, profile, progress, 3,
+                            preRendered.getAbsolutePath(), entryId).toString();
+                    tuneUpJson = out;
+                    preRenderedDur = new JSONObject(out)
+                            .optDouble("duration_s", -1);
+                } else {
+                    tuneUpJson = bridge.callAttr("tune_up_build",
+                            findingsJson, profile).toString();
+                    preRendered = null;
+                    preRenderedDur = -1;
+                }
+                final JSONObject params =
+                        new JSONObject(tuneUpJson).getJSONObject("params");
+                final String summary = params.optString("summary", "Tune Up");
+                final String receipt = summary.replaceFirst(
+                        "^Tune Up \\([^)]*\\): ", "");
+                runOnUiThread(() -> {
+                    hideTuneUpOverlay();
+                    if (preRendered != null) {
+                        applyTuneUpOp(params.toString(), summary,
+                                "Tuning up...",
+                                "Tune-up complete. " + receipt,
+                                () -> loadWaveformForPath(currentOutputPath),
+                                preRendered, preRenderedDur);
+                    } else {
+                        // No converged audio (diagnosed file gone): build
+                        // the single-pass op and render it incrementally.
+                        applyLibraryOp("tune_up",
+                                params.toString(), summary,
+                                "Tuning up...",
+                                "Tune-up complete. " + receipt,
+                                () -> loadWaveformForPath(currentOutputPath));
+                    }
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    hideTuneUpOverlay();
+                    setBusy(false);
+                    waveformView.clearProgress();
+                    setStatus("Tune-up failed: " + e.getMessage());
                 });
             }
         }).start();
@@ -1231,6 +2269,10 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 libraryDb.popLastOp(entryId);
+                cachedDiagJson = null;
+                cachedDiagPath = null;
+                diagLastPath = null;
+                diagSummaryCache.clear();
                 final boolean remaining = hasRenderableOps(entryId);
                 final String refreshPath;
                 if (remaining) {
@@ -1460,9 +2502,6 @@ public class MainActivity extends Activity {
             chipBath.setEnabled(false);
             chipCave.setEnabled(false);
         }
-        tvSource.setVisibility(View.VISIBLE);
-        tvSource.setText("REC");
-        tvSource.setTextColor(getColor(R.color.sl_red));
         tvTimeCur.setText("0:00");
         tvTimeTot.setText("--:--");
         mainHandler.post(recTick);
@@ -1476,8 +2515,6 @@ public class MainActivity extends Activity {
         }
         btnRecord.setAlpha(1f);
         btnRecord.setImageResource(0);
-        tvSource.setVisibility(View.GONE);
-        tvSource.setTextColor(getColor(R.color.sl_org));
         btnProcess.setEnabled(true);
         btnProcess.setAlpha(1f);
         btnTrim.setEnabled(true);
@@ -2007,14 +3044,7 @@ public class MainActivity extends Activity {
         startPositionUpdates();
         setPlayPauseEnabled(true);
         refreshPlayPause();
-        showSourcePill();
         setStatus(playbackStatus(startMs, stopMs));
-    }
-
-    /** Orange pill: INPUT when auditioning raw audio, PROCESSED otherwise. */
-    private void showSourcePill() {
-        tvSource.setVisibility(View.VISIBLE);
-        tvSource.setText(isPlayingInput() ? "INPUT" : "PROCESSED");
     }
 
     /**
@@ -2141,7 +3171,6 @@ public class MainActivity extends Activity {
             setStatus(playbackStatus(startMs, stopMs));
             setPlayPauseEnabled(true);
             refreshPlayPause();
-            showSourcePill();
             btnStop.setEnabled(true);
             return;
         }
@@ -2173,7 +3202,6 @@ public class MainActivity extends Activity {
                 setStatus(playbackStatus(startMs, stopMs));
                 setPlayPauseEnabled(true);
                 refreshPlayPause();
-                showSourcePill();
                 btnStop.setEnabled(true);
             });
             player.setOnCompletionListener(mp -> {
@@ -2183,7 +3211,6 @@ public class MainActivity extends Activity {
                 setStatus("Playback finished.");
                 setPlayPauseEnabled(true);
                 refreshPlayPause();
-                tvSource.setVisibility(View.GONE);
                 tvTimeCur.setText(fmtTime(audioDurationSec));
                 btnStop.setEnabled(false);
             });
@@ -2192,7 +3219,6 @@ public class MainActivity extends Activity {
                 releasePlayer();
                 setPlayPauseEnabled(true);
                 refreshPlayPause();
-                tvSource.setVisibility(View.GONE);
                 btnStop.setEnabled(false);
                 return true;
             });
@@ -2216,7 +3242,6 @@ public class MainActivity extends Activity {
         releasePlayer();
         setPlayPauseEnabled(currentOutputPath != null || inputPath != null);
         refreshPlayPause();
-        tvSource.setVisibility(View.GONE);
         tvTimeCur.setText("0:00");
         btnStop.setEnabled(false);
         setStatus("Playback stopped.");

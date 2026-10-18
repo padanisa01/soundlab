@@ -7,7 +7,21 @@ android {
     namespace "com.audiofx.app"
     compileSdk 34
 
+    buildFeatures {
+        buildConfig true
+    }
+
     defaultConfig {
+        // Groq API key for the diagnosis summary (qwen via Groq). The user
+        // adds GROQ_API_KEY=<key> to the git-ignored local.properties on
+        // their build machine; empty means the summary is skipped.
+        def localProps = new Properties()
+        def lpFile = rootProject.file("local.properties")
+        if (lpFile.exists()) {
+            lpFile.withInputStream { localProps.load(it) }
+        }
+        buildConfigField "String", "GROQ_API_KEY",
+                "\"${localProps.getProperty('GROQ_API_KEY', '')}\""
         applicationId "com.audiofx.app"
         minSdk 24
         targetSdk 34
