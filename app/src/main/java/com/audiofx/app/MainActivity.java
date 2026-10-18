@@ -457,6 +457,56 @@ public class MainActivity extends Activity {
         } else {
             setStatus("Tap the menu to open audio or your library.");
         }
+
+        // DEBUG: LLM hello probe. Temporary; remove once the diagnosis
+        // summary is confirmed working on device.
+        debugLlmHello();
+    }
+
+    /** DEBUG: minimal Groq call on startup; shows the outcome in a popup. */
+    private void debugLlmHello() {
+        new Thread(() -> {
+            String key = BuildConfig.GROQ_API_KEY;
+            key = key == null ? "" : key.trim();
+            final String outcome;
+            if (key.isEmpty()) {
+                outcome = "GROQ_API_KEY is EMPTY in this build.\n\n"
+                        + "Add it to local.properties and rebuild.";
+            } else {
+                String body = "{\"model\":\"qwen/qwen3.8-27b\","
+                        + "\"messages\":[{\"role\":\"user\",\"content\":"
+                        + "\"Reply with exactly: hello ok\"}],"
+                        + "\"max_tokens\":10}";
+                String resp = postGroqSummary(body, key);
+                if (resp.isEmpty()) {
+                    outcome = "Groq call FAILED.\n\nKey present: yes ("
+                            + key.length() + " chars).\n"
+                            + "Check logcat for the 'AudioMechanic' line "
+                            + "with the HTTP status or error.";
+                } else {
+                    String text = "";
+                    try {
+                        if (!Python.isStarted()) {
+                            Python.start(new AndroidPlatform(this));
+                        }
+                        text = Python.getInstance()
+                                .getModule("audiofx.android_bridge")
+                                .callAttr("summarize_parse", resp).toString();
+                    } catch (Exception e) {
+                        text = "(parse error: " + e + ")";
+                    }
+                    outcome = "Groq call SUCCEEDED.\n\nKey chars: "
+                            + key.length() + "\nModel reply: " + text;
+                }
+            }
+            final String msg = outcome;
+            runOnUiThread(() -> new AlertDialog.Builder(
+                    MainActivity.this, R.style.Theme_SoundLab_Dialog)
+                    .setTitle("LLM debug")
+                    .setMessage(msg)
+                    .setPositiveButton("OK", null)
+                    .show());
+        }).start();
     }
 
     @Override
