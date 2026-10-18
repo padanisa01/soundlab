@@ -29,11 +29,12 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
-        <!-- Test AdMob app ID: replace with the real one from the AdMob
-             account before release. -->
+        <!-- AdMob app ID comes from the admobAppId manifest placeholder: the
+             Google test ID applies to debug builds only; release builds
+             inject the real ID from local.properties (see app/build.gradle). -->
         <meta-data
             android:name="com.google.android.gms.ads.APPLICATION_ID"
-            android:value="ca-app-pub-3940256099942544~3347511713" />
+            android:value="${admobAppId}" />
     </application>
 
 </manifest>

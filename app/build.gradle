@@ -11,15 +11,18 @@ android {
         buildConfig true
     }
 
+    // local.properties carries build-machine secrets (Groq key for debug,
+    // AdMob IDs for release). Hoisted here so every build type can use it.
+    def localProps = new Properties()
+    def lpFile = rootProject.file("local.properties")
+    if (lpFile.exists()) {
+        lpFile.withInputStream { localProps.load(it) }
+    }
+
     defaultConfig {
         // Groq API key for the diagnosis summary (qwen via Groq). The user
         // adds GROQ_API_KEY=<key> to the git-ignored local.properties on
         // their build machine; empty means the summary is skipped.
-        def localProps = new Properties()
-        def lpFile = rootProject.file("local.properties")
-        if (lpFile.exists()) {
-            lpFile.withInputStream { localProps.load(it) }
-        }
         buildConfigField "String", "GROQ_API_KEY",
                 "\"${localProps.getProperty('GROQ_API_KEY', '')}\""
         applicationId "com.audiofx.app"
@@ -35,9 +38,26 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Google test AdMob IDs: safe for development and sideloaded
+            // test builds. Release builds (below) inject the real IDs.
+            manifestPlaceholders = [admobAppId: "ca-app-pub-3940256099942544~3347511713"]
+            resValue "string", "banner_ad_unit_id",
+                    "ca-app-pub-3940256099942544/6300978111"
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            // Real AdMob IDs are mandatory for release: the user adds
+            // admob.app.id and admob.banner.id to the git-ignored
+            // local.properties on their build machine.
+            def admobAppId = localProps.getProperty("admob.app.id", "").trim()
+            def admobBannerId = localProps.getProperty("admob.banner.id", "").trim()
+            if (admobAppId.isEmpty() || admobBannerId.isEmpty()) {
+                throw new GradleException("Release build requires admob.app.id and admob.banner.id in local.properties. Add your real AdMob IDs from https://apps.admob.com.");
+            }
+            manifestPlaceholders = [admobAppId: admobAppId]
+            resValue "string", "banner_ad_unit_id", admobBannerId
         }
     }
 

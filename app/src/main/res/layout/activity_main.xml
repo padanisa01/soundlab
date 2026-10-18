@@ -1108,13 +1108,14 @@
         android:textSize="13sp"
         android:visibility="gone" />
 
-    <!-- AdMob banner: test ad unit ID, swap for the real one at release -->
+    <!-- AdMob banner: ad unit ID comes from the banner_ad_unit_id string
+         resource (test ID in debug builds, real ID in release builds) -->
     <com.google.android.gms.ads.AdView
         android:id="@+id/ad_view"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
         ads:adSize="BANNER"
-        ads:adUnitId="ca-app-pub-3940256099942544/6300978111" />
+        ads:adUnitId="@string/banner_ad_unit_id" />
 
 </FrameLayout>

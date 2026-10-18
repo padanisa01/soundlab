@@ -5295,9 +5295,6 @@ public class MainActivity extends Activity {
     private volatile File shareMp3Result;
     private volatile String shareEncodeError;
 
-    /** Test banner unit for the wait screen: swap for the real one at release. */
-    private static final String ENCODE_WAIT_AD_UNIT =
-            "ca-app-pub-3940256099942544/6300978111";
     /** Fresh ad request every interval while encoding is still running. */
     private static final long ENCODE_AD_REFRESH_MS = 15000;
 
@@ -5342,7 +5339,7 @@ public class MainActivity extends Activity {
             adPanel.setPadding(0, (int) (12 * density), 0, (int) (4 * density));
             encodeWaitAd = new AdView(this);
             encodeWaitAd.setAdSize(AdSize.MEDIUM_RECTANGLE);
-            encodeWaitAd.setAdUnitId(ENCODE_WAIT_AD_UNIT);
+            encodeWaitAd.setAdUnitId(getString(R.string.banner_ad_unit_id));
             adPanel.addView(encodeWaitAd);
             root.addView(adPanel);
         }
