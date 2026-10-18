@@ -23,6 +23,8 @@ import android.provider.OpenableColumns;
 import android.util.Log;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.animation.AlphaAnimation;
+import android.view.animation.Animation;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageButton;
@@ -157,6 +159,11 @@ public class MainActivity extends Activity {
     /** Path of the audio file the current diagnosis (and its Tune Up) refers
      * to: currentOutputPath at diagnosis time, else the pristine input. */
     private String diagLastPath;
+    /** Tune-up step tracker overlay on the waveform (per-pass step list). */
+    private LinearLayout tuneupOverlay;
+    private LinearLayout tuneupSteps;
+    private TextView tuneupPassTitle;
+    private String tuneupProfileLabel = "";
     /** Tune-up profile metadata JSON (from list_tune_up_profiles). */
     private String cachedProfilesJson;
     /** Live refs to the open diagnosis dialog's profile UI. */
@@ -383,6 +390,9 @@ public class MainActivity extends Activity {
         histList = findViewById(R.id.hist_list);
         tvHistCount = findViewById(R.id.tv_hist_count);
         waveformView = findViewById(R.id.waveform);
+        tuneupOverlay = findViewById(R.id.tuneup_overlay);
+        tuneupSteps = findViewById(R.id.tuneup_steps);
+        tuneupPassTitle = findViewById(R.id.tuneup_pass_title);
         selChipRow = findViewById(R.id.sel_chip_row);
         selChipText = findViewById(R.id.sel_chip_text);
         btnSelClear = findViewById(R.id.btn_sel_clear);
@@ -1909,13 +1919,160 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    /** One row of the tune-up step tracker: label + per-step bar. */
+    private static class TuneUpRow {
+        TextView label;
+        ProgressBar bar;
+        ObjectAnimator fill;
+    }
+
+    /** Progress callbacks invoked from Python during tune_up_converge, on
+     * the tune-up worker thread; each hops to the UI thread. Methods must
+     * stay public for Chaquopy reflection. */
+    public class TuneUpProgress {
+        public void tuneUpPassStarted(int passNumber, int maxPasses,
+                String labelsJson) {
+            runOnUiThread(() -> showTuneUpPass(passNumber, maxPasses,
+                    labelsJson));
+        }
+
+        public void tuneUpStepActive(int stepIndex) {
+            runOnUiThread(() -> setTuneUpStepActive(stepIndex));
+        }
+
+        public void tuneUpStepDone(int stepIndex) {
+            runOnUiThread(() -> setTuneUpStepDone(stepIndex));
+        }
+    }
+
+    /** Resolve the display label for a tune-up profile id. */
+    private String tuneUpProfileLabel(String profile) {
+        if (cachedProfilesJson != null) {
+            try {
+                org.json.JSONObject all =
+                        new org.json.JSONObject(cachedProfilesJson);
+                org.json.JSONObject p = all.optJSONObject(profile);
+                if (p != null) {
+                    return p.optString("label", profile);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return profile.substring(0, 1).toUpperCase()
+                + profile.substring(1);
+    }
+
+    /** Show this pass's steps on the waveform overlay, all grey (pending). */
+    private void showTuneUpPass(int passNumber, int maxPasses,
+            String labelsJson) {
+        if (tuneupOverlay == null) {
+            return;
+        }
+        tuneupSteps.removeAllViews();
+        try {
+            JSONArray labels = new JSONArray(labelsJson);
+            for (int i = 0; i < labels.length(); i++) {
+                tuneupSteps.addView(makeTuneUpStepRow(
+                        labels.optString(i, "")));
+            }
+        } catch (Exception ignored) {
+        }
+        tuneupPassTitle.setText("Tune Up (" + tuneupProfileLabel + ") - pass "
+                + passNumber + " of " + maxPasses);
+        tuneupOverlay.setVisibility(View.VISIBLE);
+        tuneupOverlay.bringToFront();
+    }
+
+    private View makeTuneUpStepRow(String label) {
+        final float dp = getResources().getDisplayMetrics().density;
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        int vpad = (int) (3 * dp);
+        row.setPadding(0, vpad, 0, vpad);
+        TextView tv = new TextView(this);
+        tv.setText(label);
+        tv.setTextSize(12.5f);
+        tv.setTextColor(getColor(R.color.sl_mut));
+        ProgressBar bar = new ProgressBar(this, null,
+                android.R.attr.progressBarStyleHorizontal);
+        bar.setMax(100);
+        bar.setProgress(0);
+        bar.setProgressTintList(android.content.res.ColorStateList.valueOf(
+                getColor(R.color.sl_green)));
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                (int) (90 * dp), LinearLayout.LayoutParams.WRAP_CONTENT);
+        blp.setMarginStart((int) (8 * dp));
+        row.addView(tv, tlp);
+        row.addView(bar, blp);
+        TuneUpRow holder = new TuneUpRow();
+        holder.label = tv;
+        holder.bar = bar;
+        row.setTag(holder);
+        return row;
+    }
+
+    /** Mark a step in-progress: blinking green label, bar filling. */
+    private void setTuneUpStepActive(int stepIndex) {
+        View row = tuneupSteps == null ? null
+                : tuneupSteps.getChildAt(stepIndex);
+        if (!(row != null && row.getTag() instanceof TuneUpRow)) {
+            return;
+        }
+        TuneUpRow h = (TuneUpRow) row.getTag();
+        h.label.setTextColor(getColor(R.color.sl_green));
+        AlphaAnimation blink = new AlphaAnimation(1.0f, 0.35f);
+        blink.setDuration(550);
+        blink.setRepeatMode(Animation.REVERSE);
+        blink.setRepeatCount(Animation.INFINITE);
+        h.label.startAnimation(blink);
+        if (h.fill != null) {
+            h.fill.cancel();
+        }
+        h.fill = ObjectAnimator.ofInt(h.bar, "progress", 0, 90);
+        h.fill.setDuration(3000);
+        h.fill.start();
+    }
+
+    /** Mark a step done: solid green label, bar to 100%. */
+    private void setTuneUpStepDone(int stepIndex) {
+        View row = tuneupSteps == null ? null
+                : tuneupSteps.getChildAt(stepIndex);
+        if (!(row != null && row.getTag() instanceof TuneUpRow)) {
+            return;
+        }
+        TuneUpRow h = (TuneUpRow) row.getTag();
+        if (h.fill != null) {
+            h.fill.cancel();
+            h.fill = null;
+        }
+        h.label.clearAnimation();
+        h.label.setAlpha(1f);
+        h.label.setTextColor(getColor(R.color.sl_green));
+        h.bar.setProgress(100);
+    }
+
+    /** Remove the step tracker from the waveform. */
+    private void hideTuneUpOverlay() {
+        if (tuneupOverlay == null) {
+            return;
+        }
+        tuneupOverlay.setVisibility(View.GONE);
+        tuneupSteps.removeAllViews();
+    }
+
     /** One-button Tune Up: converge the profile's fixes over up to 3 passes
      * inside a single undoable op, so one tap finishes the job. Falls back
      * to the single-pass build if the diagnosed file is gone. */
     private void runTuneUp(final String findingsJson, final String profile) {
         setBusy(true);
         setStatus("Tuning up...");
+        waveformView.startProgressAnimation();
+        tuneupProfileLabel = tuneUpProfileLabel(profile);
         final String convergePath = diagLastPath;
+        final TuneUpProgress progress = new TuneUpProgress();
         new Thread(() -> {
             try {
                 if (!Python.isStarted()) {
@@ -1927,7 +2084,8 @@ public class MainActivity extends Activity {
                 if (convergePath != null
                         && new File(convergePath).exists()) {
                     tuneUpJson = bridge.callAttr("tune_up_converge",
-                            convergePath, findingsJson, profile).toString();
+                            convergePath, findingsJson, profile,
+                            progress).toString();
                 } else {
                     tuneUpJson = bridge.callAttr("tune_up_build",
                             findingsJson, profile).toString();
@@ -1937,13 +2095,18 @@ public class MainActivity extends Activity {
                 final String summary = params.optString("summary", "Tune Up");
                 final String receipt = summary.replaceFirst(
                         "^Tune Up \\([^)]*\\): ", "");
-                runOnUiThread(() -> applyLibraryOp("tune_up",
-                        params.toString(), summary,
-                        "Tuning up...", "Tune-up complete. " + receipt,
-                        () -> onDiagnoseClicked()));
+                runOnUiThread(() -> {
+                    hideTuneUpOverlay();
+                    applyLibraryOp("tune_up",
+                            params.toString(), summary,
+                            "Tuning up...", "Tune-up complete. " + receipt,
+                            () -> onDiagnoseClicked());
+                });
             } catch (Exception e) {
                 runOnUiThread(() -> {
+                    hideTuneUpOverlay();
                     setBusy(false);
+                    waveformView.clearProgress();
                     setStatus("Tune-up failed: " + e.getMessage());
                 });
             }

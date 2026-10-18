@@ -231,6 +231,90 @@ class TuneUpConvergeTest(unittest.TestCase):
         n_warn_after = sum(1 for f in after if f["severity"] == "warn")
         self.assertLess(n_warn_after, n_warn_before)
 
+    def _nasty_src(self, work):
+        import json
+        import random
+        from audiofx import android_bridge as ab
+        from audiofx.pipeline import write_wav
+
+        sr = 44100
+        random.seed(7)
+        sig = []
+        for i in range(sr * 4):
+            t = i / sr
+            v = 0.35 * math.sin(2 * math.pi * 220 * t)
+            v += 0.30 * math.sin(2 * math.pi * 110 * t)
+            v += 0.10 * math.sin(2 * math.pi * 1000 * t)
+            v += 0.12 * math.sin(2 * math.pi * 60 * t)
+            v += 0.02 * (random.random() * 2 - 1)
+            sig.append(max(-1.0, min(1.0, v * 1.6)))
+        src = os.path.join(work, "in.wav")
+        write_wav(src, sig, sr)
+        return src
+
+    def test_converge_progress_callbacks(self):
+        import json
+        import tempfile
+        from audiofx import android_bridge as ab
+
+        work = tempfile.mkdtemp()
+        src = self._nasty_src(work)
+        fj = ab.diagnose_file(src)
+
+        calls = []
+
+        class FakeProgress:
+            def tuneUpPassStarted(self, n, max_n, labels_json):
+                calls.append(("pass", n, max_n, json.loads(labels_json)))
+
+            def tuneUpStepActive(self, i):
+                calls.append(("active", i))
+
+            def tuneUpStepDone(self, i):
+                calls.append(("done", i))
+
+        op = json.loads(ab.tune_up_converge(src, fj, "singing",
+                                            FakeProgress()))
+        self.assertTrue(calls, "no progress callbacks fired")
+        # Every pass announces its step labels up front...
+        passes = [c for c in calls if c[0] == "pass"]
+        self.assertTrue(passes)
+        for _, n, max_n, labels in passes:
+            self.assertLessEqual(n, max_n)
+            self.assertTrue(labels)
+        # ...then each step goes active -> done in order, per pass.
+        idx = 0
+        for _, n, max_n, labels in passes:
+            self.assertEqual(calls[idx][0], "pass")
+            self.assertEqual(calls[idx][1], n)
+            idx += 1
+            for step in range(len(labels)):
+                self.assertEqual(calls[idx], ("active", step))
+                self.assertEqual(calls[idx + 1], ("done", step))
+                idx += 2
+        self.assertEqual(idx, len(calls))
+        self.assertIn("fixes", op["params"])
+
+    def test_converge_survives_broken_progress(self):
+        import json
+        import tempfile
+        from audiofx import android_bridge as ab
+
+        work = tempfile.mkdtemp()
+        src = self._nasty_src(work)
+        fj = ab.diagnose_file(src)
+
+        class BrokenProgress:
+            def __getattr__(self, name):
+                def boom(*a):
+                    raise RuntimeError("ui gone")
+                return boom
+
+        # A failing UI callback must never break the render.
+        op = json.loads(ab.tune_up_converge(src, fj, "singing",
+                                            BrokenProgress()))
+        self.assertIn("fixes", op["params"])
+
 
 if __name__ == "__main__":
     unittest.main()

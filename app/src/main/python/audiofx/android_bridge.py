@@ -26,6 +26,16 @@ from .pipeline import (
 DSP_VERSION = "1"
 
 
+def _cb(progress, name, *args):
+    """Fire a Java progress callback; never let UI failures break DSP."""
+    if progress is None:
+        return
+    try:
+        getattr(progress, name)(*args)
+    except Exception:
+        pass
+
+
 def _apply_op(samples, sample_rate, op, params, index):
     """Apply one render_chain op. Shared by the main loop and the tune_up
     expansion so the two can never drift apart."""
@@ -363,7 +373,7 @@ def join_remove(input_path, output_path, start_sec, end_sec, fade_sec=0.005):
     }
 
 
-def render_chain(pristine_path, ops_json, output_path):
+def render_chain(pristine_path, ops_json, output_path, progress=None):
     """Render a library op chain: fold ops over pristine in float, write
     the 16-bit WAV once.
 
@@ -377,6 +387,10 @@ def render_chain(pristine_path, ops_json, output_path):
     ``livefx`` ops are never passed in (display-only): they raise
     ValueError, as do unknown ops and invalid parameters (same validation
     as the file-level functions).
+
+    ``progress`` is an optional Java callback implementing the tune-up
+    step protocol (tuneUpStepActive(int) / tuneUpStepDone(int)); it is
+    only ever passed by tune_up_converge.
 
     Returns {"ok": True, "output_path": ..., "duration_s": ..., "sample_rate": ...}.
     """
@@ -397,7 +411,9 @@ def render_chain(pristine_path, ops_json, output_path):
         params = entry.get("params") or {}
         if not isinstance(params, dict):
             raise ValueError("op #%d params must be an object" % i)
+        _cb(progress, "tuneUpStepActive", i)
         samples = _apply_op(samples, sample_rate, op, params, i)
+        _cb(progress, "tuneUpStepDone", i)
     write_wav(output_path, samples, sample_rate)
     return {
         "ok": True,
@@ -437,7 +453,7 @@ def summarize_parse(response_json):
 
 
 def tune_up_converge(input_path, findings_json, profile="podcast",
-                     max_passes=3):
+                     progress=None, max_passes=3):
     """Iterate the tune-up until no fixable warns remain (or max_passes).
 
     Conservative fixes (denoise, de-esser, EQ) often don't clear their own
@@ -447,6 +463,11 @@ def tune_up_converge(input_path, findings_json, profile="podcast",
     fixes, so it stays a single history entry / single undo. Fixes are
     pure functions, so rendering incrementally per pass equals rendering
     the flat fix list once.
+
+    ``progress`` is an optional Java callback with methods
+    tuneUpPassStarted(passNumber, maxPasses, labelsJson),
+    tuneUpStepActive(stepIndex) and tuneUpStepDone(stepIndex); each call
+    is exception-guarded so UI failures can never break the render.
     """
     try:
         findings = json.loads(findings_json)
@@ -466,12 +487,15 @@ def tune_up_converge(input_path, findings_json, profile="podcast",
             if not fixes:
                 break
             passes += 1
+            _cb(progress, "tuneUpPassStarted", passes, max_passes,
+                json.dumps([f.get("label", f["op"]) for f in fixes]))
             all_fixes.extend(fixes)
             tmp = os.path.join(os.path.dirname(os.path.abspath(input_path)),
                                ".tune_tmp_%d.wav" % len(tmps))
             tmps.append(tmp)
             r = render_chain(cur_in, json.dumps(
-                [{"op": f["op"], "params": f["params"]} for f in fixes]), tmp)
+                [{"op": f["op"], "params": f["params"]} for f in fixes]),
+                tmp, progress=progress)
             if not r.get("ok"):
                 break
             cur_in = tmp

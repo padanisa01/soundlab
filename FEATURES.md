@@ -162,7 +162,10 @@ or the plan changes.
   entry with a summary label. The op converges internally over up to 3
   passes (re-diagnose the render, apply what remains), so one tap
   finishes conservative fixes instead of asking the user to tap again;
-  the summary notes the pass count. After Tune Up the diagnosis
+  the summary notes the pass count. During the tune-up the waveform
+  shows a step tracker overlay: each pass's steps listed grey (pending),
+  the active step blinking green with its own 0-100 bar, finished steps
+  solid green; the overlay clears when done. After Tune Up the diagnosis
   re-runs so findings visibly turn green.
 - Tune-up recipes per content type: Singing (free, default: gentle
   de-esser, no leveling or silence trim, -14 LUFS), Podcast (premium:
