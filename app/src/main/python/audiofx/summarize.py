@@ -7,6 +7,7 @@ so the report never depends on the LLM.
 
 import json
 import re
+import urllib.error
 import urllib.request
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -75,7 +76,12 @@ def summarize(findings_json, profile, api_key, timeout_s=20):
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
         text = payload["choices"][0]["message"]["content"]
-    except Exception:
+    except urllib.error.HTTPError as e:
+        # Status only, never the key: safe for logcat.
+        print("summarize: Groq HTTP %s" % e.code)
+        return ""
+    except Exception as e:
+        print("summarize: request failed: %r" % e)
         return ""
     if not isinstance(text, str):
         return ""
