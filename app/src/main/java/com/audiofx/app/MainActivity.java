@@ -80,6 +80,11 @@ public class MainActivity extends Activity {
     private static final int PICK_FOLDER = 1002;
     private static final int REQ_RECORD_AUDIO = 2001;
 
+    // Import caps (ticket AM-3): oversized WAVs risk OOM in the float64
+    // render pipeline, so imports are capped at 500 MB or 2 hours.
+    private static final long MAX_IMPORT_BYTES = 500L * 1024 * 1024;
+    private static final double MAX_IMPORT_SECONDS = 2 * 3600;
+
     private TextView tvProjectName;
     private ImageButton btnMenu;
     private AdView adView;
@@ -907,6 +912,11 @@ public class MainActivity extends Activity {
                 }).start();
                 return;
             }
+            long size = contentSize(uri);
+            if (size > MAX_IMPORT_BYTES) {
+                setStatus("This file is too large to import (limit 500 MB or 2 hours).");
+                return;
+            }
             try {
                 File dest = new File(getCacheDir(), "input.wav");
                 copyUriToFile(uri, dest);
@@ -948,6 +958,23 @@ public class MainActivity extends Activity {
         }
         String seg = uri.getLastPathSegment();
         return seg != null ? seg : "audio.wav";
+    }
+
+    /** Byte size of a content Uri from OpenableColumns.SIZE, or -1 when
+     * the provider does not report one. Used for the AM-3 import cap on
+     * the WAV branch (MP3s are checked after decoding in adoptAudioFile). */
+    private long contentSize(Uri uri) {
+        try (Cursor c = getContentResolver().query(
+                uri, new String[]{OpenableColumns.SIZE}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(OpenableColumns.SIZE);
+                if (idx >= 0 && !c.isNull(idx)) {
+                    return c.getLong(idx);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return -1;
     }
 
     private static String toMp3Name(String audioName) {
@@ -1019,6 +1046,14 @@ public class MainActivity extends Activity {
         try {
             copyFile(wavFile, dest);
             double[] info = wavInfo(dest);
+            // AM-3 import cap, enforced here too so MP3s that decode to an
+            // oversized WAV are rejected as well.
+            if (dest.length() > MAX_IMPORT_BYTES
+                    || info[2] > MAX_IMPORT_SECONDS) {
+                dest.delete();
+                setStatus("This file is too large to import (limit 500 MB or 2 hours).");
+                return;
+            }
             String name = displayName;
             int dot = name.lastIndexOf('.');
             if (dot > 0) {
