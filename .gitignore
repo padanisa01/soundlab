@@ -39,5 +39,9 @@ venv/
 # machine-specific JDK). Never commit this; every machine differs.
 gradle.properties
 
+# Firebase Android config (needed only when the app is registered in the
+# Firebase console, e.g. for App Check). Machine-specific: never commit.
+app/google-services.json
+
 # Test render outputs
 output/

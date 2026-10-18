@@ -385,6 +385,19 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        // App Check for the summary proxy (ticket AM-1): defensive, since
+        // Firebase may not be configured on this build machine. Never crash.
+        try {
+            if (com.google.firebase.FirebaseApp.initializeApp(this) != null) {
+                com.google.firebase.appcheck.FirebaseAppCheck.getInstance()
+                        .installAppCheckProviderFactory(
+                                com.google.firebase.appcheck.playintegrity
+                                        .PlayIntegrityAppCheckProviderFactory
+                                        .getInstance());
+            }
+        } catch (Exception ignored) {
+        }
+
         tvProjectName = findViewById(R.id.tv_project_name);
         btnMenu = findViewById(R.id.btn_menu);
         btnMenu.setOnClickListener(v -> showMainMenu());
@@ -1571,9 +1584,12 @@ public class MainActivity extends Activity {
         list.setPadding(pad, pad, pad, (int) (8 * dp));
 
         // LLM executive summary (Groq/Qwen). Fills in async; the card is
-        // hidden entirely when no API key is configured.
+        // hidden entirely when neither a Groq key (debug) nor the summary
+        // proxy (release) is configured.
         diagFindingsJson = findingsJson;
-        final String groqKey = BuildConfig.GROQ_API_KEY;        LinearLayout summaryCard = new LinearLayout(this);
+        final boolean summaryAvailable = !groqApiKey().isEmpty()
+                || !summaryProxyUrl().isEmpty();
+        LinearLayout summaryCard = new LinearLayout(this);
         summaryCard.setOrientation(LinearLayout.VERTICAL);
         summaryCard.setBackgroundResource(R.drawable.bg_card);
         LinearLayout.LayoutParams scLp = new LinearLayout.LayoutParams(
@@ -1594,7 +1610,7 @@ public class MainActivity extends Activity {
         diagSummaryTv.setLineSpacing(0, 1.25f);
         diagSummaryTv.setPadding(0, (int) (4 * dp), 0, 0);
         summaryCard.addView(diagSummaryTv);
-        if (groqKey == null || groqKey.trim().isEmpty()) {
+        if (!summaryAvailable) {
             summaryCard.setVisibility(android.view.View.GONE);
         } else {
             diagSummaryTv.setText("Summarizing your report…");
@@ -1962,6 +1978,33 @@ public class MainActivity extends Activity {
         return k == null ? "" : k.trim();
     }
 
+    /** Summary proxy URL from BuildConfig (release builds), or "" when not
+     * configured. The proxy calls Groq server-side so the API key never
+     * ships in the APK (ticket AM-1). */
+    private String summaryProxyUrl() {
+        String u = BuildConfig.SUMMARY_PROXY_URL;
+        return u == null ? "" : u.trim();
+    }
+
+    /** Current App Check token for the summary proxy, or "" when Firebase
+     * is unconfigured or the token fetch fails. Blocks up to 10 seconds:
+     * call from a worker thread only. */
+    private String appCheckToken() {
+        try {
+            com.google.android.gms.tasks.Task<
+                    com.google.firebase.appcheck.AppCheckToken> task =
+                    com.google.firebase.appcheck.FirebaseAppCheck.getInstance()
+                            .getAppCheckToken(false);
+            com.google.firebase.appcheck.AppCheckToken token =
+                    com.google.android.gms.tasks.Tasks.await(task, 10,
+                            java.util.concurrent.TimeUnit.SECONDS);
+            String t = token == null ? null : token.getToken();
+            return t == null ? "" : t;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
     private static String summaryCacheKey(String findingsJson, String profile) {
         return findingsJson.hashCode() + "|" + profile;
     }
@@ -1978,19 +2021,27 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             String summary = "";
             try {
-                if (!Python.isStarted()) {
-                    Python.start(new AndroidPlatform(this));
-                }
-                String body = Python.getInstance()
-                        .getModule("audiofx.android_bridge")
-                        .callAttr("summarize_request_body", findingsJson,
-                                profile).toString();
-                if (!body.isEmpty()) {
-                    String resp = postGroqSummary(body, apiKey);
-                    if (!resp.isEmpty()) {
-                        summary = Python.getInstance()
-                                .getModule("audiofx.android_bridge")
-                                .callAttr("summarize_parse", resp).toString();
+                String proxyUrl = summaryProxyUrl();
+                if (!proxyUrl.isEmpty()) {
+                    // Release builds: the proxy calls Groq server-side; no
+                    // API key or Authorization header leaves the device.
+                    summary = postProxySummary(proxyUrl, findingsJson,
+                            profile);
+                } else {
+                    if (!Python.isStarted()) {
+                        Python.start(new AndroidPlatform(this));
+                    }
+                    String body = Python.getInstance()
+                            .getModule("audiofx.android_bridge")
+                            .callAttr("summarize_request_body", findingsJson,
+                                    profile).toString();
+                    if (!body.isEmpty()) {
+                        String resp = postGroqSummary(body, apiKey);
+                        if (!resp.isEmpty()) {
+                            summary = Python.getInstance()
+                                    .getModule("audiofx.android_bridge")
+                                    .callAttr("summarize_parse", resp).toString();
+                        }
                     }
                 }
             } catch (Exception e) {
@@ -2008,7 +2059,7 @@ public class MainActivity extends Activity {
      * report and profile. */
     private void warmDiagSummaryCache(final String findingsJson) {
         final String apiKey = groqApiKey();
-        if (apiKey.isEmpty()) {
+        if (apiKey.isEmpty() && summaryProxyUrl().isEmpty()) {
             return;
         }
         final String profile = currentTuneUpProfile();
@@ -2034,7 +2085,7 @@ public class MainActivity extends Activity {
             return;
         }
         final String apiKey = groqApiKey();
-        if (apiKey.isEmpty()) {
+        if (apiKey.isEmpty() && summaryProxyUrl().isEmpty()) {
             return;
         }
         final String profile = currentTuneUpProfile();
@@ -2093,6 +2144,56 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             android.util.Log.w("AudioMechanic",
                     "summarize: request failed: " + e);
+            return "";
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+    }
+
+    /** POST the summary request to the proxy (ticket AM-1); returns the
+     * "summary" from {"summary"} or "". No Authorization header and no API
+     * key: the proxy identifies the app by its App Check token. */
+    private String postProxySummary(String proxyUrl, String findingsJson,
+            String profile) {
+        java.net.HttpURLConnection conn = null;
+        try {
+            java.net.URL url = new java.net.URL(proxyUrl);
+            conn = (java.net.HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(20000);
+            conn.setReadTimeout(20000);
+            org.json.JSONObject payload = new org.json.JSONObject();
+            payload.put("findings_json", findingsJson);
+            payload.put("profile", profile);
+            payload.put("app_check_token", appCheckToken());
+            byte[] body = payload.toString().getBytes(
+                    java.nio.charset.StandardCharsets.UTF_8);
+            conn.setFixedLengthStreamingMode(body.length);
+            try (java.io.OutputStream os = conn.getOutputStream()) {
+                os.write(body);
+            }
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                android.util.Log.w("AudioMechanic",
+                        "summarize: proxy HTTP " + code);
+                return "";
+            }
+            String resp;
+            try (java.io.InputStream is = conn.getInputStream();
+                 java.util.Scanner s = new java.util.Scanner(is, "UTF-8")
+                         .useDelimiter("\\A")) {
+                resp = s.hasNext() ? s.next() : "";
+            }
+            String summary = new org.json.JSONObject(resp)
+                    .optString("summary", "");
+            return summary == null ? "" : summary;
+        } catch (Exception e) {
+            android.util.Log.w("AudioMechanic",
+                    "summarize: proxy request failed: " + e);
             return "";
         } finally {
             if (conn != null) {
