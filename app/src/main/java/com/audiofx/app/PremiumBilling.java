@@ -2,6 +2,7 @@ package com.audiofx.app;
 
 import android.app.Activity;
 import android.content.Context;
+import android.util.Log;
 
 import com.android.billingclient.api.AcknowledgePurchaseParams;
 import com.android.billingclient.api.BillingClient;
@@ -179,6 +180,24 @@ public class PremiumBilling implements PurchasesUpdatedListener {
     }
 
     private void grantPremium(Purchase purchase) {
+        // Ticket AM-2, on-device verification: reject purchases whose
+        // Google signature does not verify against the Play Console
+        // license key. The key comes from local.properties
+        // (play.license.key) via BuildConfig; it only exists once the Play
+        // Console app is created, so until then verification is skipped
+        // with a warning and behavior is unchanged.
+        String licenseKey = BuildConfig.PLAY_LICENSE_KEY;
+        if (licenseKey == null || licenseKey.isEmpty()) {
+            Log.w("AudioMechanic",
+                    "Play license key not configured: skipping purchase "
+                    + "signature verification (set play.license.key in "
+                    + "local.properties after creating the Play listing).");
+        } else if (!Security.verifyPurchase(licenseKey,
+                purchase.getOriginalJson(), purchase.getSignature())) {
+            Log.w("AudioMechanic",
+                    "Rejecting purchase: signature verification failed.");
+            return;
+        }
         if (!purchase.isAcknowledged()) {
             AcknowledgePurchaseParams params = AcknowledgePurchaseParams
                     .newBuilder()
@@ -187,7 +206,6 @@ public class PremiumBilling implements PurchasesUpdatedListener {
             client.acknowledgePurchase(params, result -> {
             });
         }
-        // TODO(AM-2): verify purchase authenticity here before granting (Option A: Security.verifyPurchase with the Play Console license key, or Option B: server-side token validation). Decision pending; do not ship a bypass.
         setPremium(activity, true);
         activity.runOnUiThread(() -> listener.onPremiumChanged(true));
     }

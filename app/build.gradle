@@ -63,6 +63,11 @@ android {
             // developer's machine.
             buildConfigField "String", "GROQ_API_KEY",
                     "\"${localProps.getProperty('GROQ_API_KEY', '')}\""
+            // Play Console license key for on-device purchase signature
+            // verification (ticket AM-2). Empty until the Play Console app
+            // is created; verification is skipped with a warning then.
+            buildConfigField "String", "PLAY_LICENSE_KEY",
+                    "\"${localProps.getProperty('play.license.key', '')}\""
         }
         release {
             minifyEnabled false
@@ -80,6 +85,11 @@ android {
             // No Groq key in release: the diagnosis summary goes through
             // the proxy (SUMMARY_PROXY_URL) with an App Check token.
             buildConfigField "String", "GROQ_API_KEY", "\"\""
+            // Play Console license key for on-device purchase signature
+            // verification (ticket AM-2). Empty until the Play Console app
+            // is created; verification is skipped with a warning then.
+            buildConfigField "String", "PLAY_LICENSE_KEY",
+                    "\"${localProps.getProperty('play.license.key', '')}\""
             // Optional: sign release with the debug key for on-device
             // testing, so the IDE can install the release variant directly
             // from the run button. Opt in via sign.release.with.debug=true
