@@ -744,3 +744,158 @@ def waveform_peaks(input_path, n_buckets=240):
         "bit_depth": bit_depth,
         "duration_s": round(len(samples) / sample_rate, 2),
     }
+
+
+def resample_linear(samples, from_rate, to_rate):
+    """Resample a mono buffer to a new sample rate by linear interpolation.
+
+    Each output sample is the weighted average of the two input samples
+    bracketing its source position (pure linear interpolation, no
+    filtering). When the rates are equal the input is returned as float64
+    unchanged. Returns a float64 buffer (NumPy array when NumPy is
+    available, otherwise a Python list).
+    """
+    if from_rate <= 0 or to_rate <= 0:
+        raise ValueError("sample rates must be positive: %r -> %r"
+                         % (from_rate, to_rate))
+    if _HAVE_NP:
+        x = _np.asarray(samples, dtype=_np.float64)
+    else:
+        x = [float(s) for s in samples]
+    n_in = len(x)
+    if from_rate == to_rate:
+        return x
+    n_out = int(round(n_in * to_rate / from_rate))
+    if n_in == 0 or n_out <= 0:
+        return _np.zeros(0, dtype=_np.float64) if _HAVE_NP else []
+    ratio = from_rate / to_rate
+    if _HAVE_NP:
+        pos = _np.arange(n_out, dtype=_np.float64) * ratio
+        base = _np.floor(pos)
+        lo = _np.clip(base.astype(_np.int64), 0, n_in - 1)
+        hi = _np.clip(lo + 1, 0, n_in - 1)
+        frac = pos - base
+        return x[lo] * (1.0 - frac) + x[hi] * frac
+    out = []
+    for i in range(n_out):
+        pos = i * ratio
+        base = math.floor(pos)
+        lo = max(0, min(n_in - 1, base))
+        hi = min(n_in - 1, lo + 1)
+        frac = pos - base
+        out.append(x[lo] * (1.0 - frac) + x[hi] * frac)
+    return out
+
+
+def mixdown(track_wavs_json, output_path, target_sample_rate):
+    """Mix rendered track WAVs down to one mono file.
+
+    ``track_wavs_json`` is a JSON array of WAV file paths (each track's
+    rendered output). Empty tracks are skipped: a path that is missing,
+    cannot be decoded, or holds no frames contributes nothing to the
+    mix. Locked tracks are included in the mix (lock blocks changes, not
+    playback). Tracks at other sample rates are resampled with linear
+    interpolation (see resample_linear). Shorter tracks are zero-padded
+    to the longest, then summed in float64. The mix is true-peak
+    normalized to -1 dBFS: gain = 10**(-1/20) / peak, and the output is
+    hard-clipped to +/-10**(-1/20) (true peak, not a percentile).
+
+    Writes the 16-bit WAV to ``output_path`` and returns {"ok": True,
+    "output_path": ..., "sample_rate": ..., "duration_s": ...,
+    "tracks_mixed": N}. Raises ValueError("no audible tracks to mix")
+    when no track yields audio.
+    """
+    try:
+        paths = json.loads(track_wavs_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("track_wavs_json is not valid JSON: %s" % exc)
+    if not isinstance(paths, list):
+        raise ValueError("track_wavs_json must be a JSON array of paths")
+    target_rate = int(target_sample_rate)
+    if target_rate <= 0:
+        raise ValueError("target_sample_rate must be positive: %r"
+                         % (target_sample_rate,))
+    target = 10.0 ** (-1.0 / 20.0)
+    tracks = []
+    for p in paths:
+        if not isinstance(p, str) or not os.path.isfile(p):
+            continue
+        try:
+            samples, rate = read_wav_mono(p)
+        except Exception:
+            continue
+        if len(samples) == 0:
+            continue
+        if rate != target_rate:
+            samples = resample_linear(samples, rate, target_rate)
+        tracks.append(samples)
+    if not tracks:
+        raise ValueError("no audible tracks to mix")
+    n = max(len(t) for t in tracks)
+    if _HAVE_NP:
+        mix = _np.zeros(n, dtype=_np.float64)
+        for t in tracks:
+            mix[: len(t)] += _np.asarray(t, dtype=_np.float64)
+        peak = float(_np.max(_np.abs(mix))) if n else 0.0
+        if peak > 0:
+            out = _np.clip(mix * (target / peak), -target, target)
+        else:
+            out = mix
+    else:
+        mix = [0.0] * n
+        for t in tracks:
+            for i, s in enumerate(t):
+                mix[i] += float(s)
+        peak = max(abs(s) for s in mix) if mix else 0.0
+        if peak > 0:
+            gain = target / peak
+            out = [min(max(s * gain, -target), target) for s in mix]
+        else:
+            out = mix
+    write_wav(output_path, out, target_rate)
+    return {
+        "ok": True,
+        "output_path": output_path,
+        "sample_rate": target_rate,
+        "duration_s": round(len(out) / target_rate, 2),
+        "tracks_mixed": len(tracks),
+    }
+
+
+def resolve_record_target(tracks_json):
+    """Decide which track a new recording goes to. Returns a JSON string.
+
+    Input is a JSON array of {"id": str, "locked": bool, "has_audio":
+    bool, "position": int, "selected": bool}. The rule, in order:
+
+    1. If the selected track exists, is not locked, and has no audio,
+       record there.
+    2. Else record on the first track by position with locked=false and
+       has_audio=false.
+    3. Else create a new track (Java auto-creates "Track N").
+
+    A locked selected track is skipped. Recording never targets a track
+    with has_audio=true. An empty input array resolves to create.
+
+    Output is {"action": "record", "track_id": <id>} or
+    {"action": "create"}.
+    """
+    try:
+        tracks = json.loads(tracks_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("tracks_json is not valid JSON: %s" % exc)
+    if not isinstance(tracks, list):
+        raise ValueError("tracks_json must be a JSON array of tracks")
+    dicts = [t for t in tracks if isinstance(t, dict)]
+
+    def recordable(t):
+        return not t.get("locked", False) and not t.get("has_audio", False)
+
+    selected = next((t for t in dicts if t.get("selected", False)), None)
+    if selected is not None and recordable(selected):
+        return json.dumps({"action": "record",
+                           "track_id": selected.get("id")})
+    for t in sorted(dicts, key=lambda t: t.get("position", 0)):
+        if recordable(t):
+            return json.dumps({"action": "record", "track_id": t.get("id")})
+    return json.dumps({"action": "create"})
