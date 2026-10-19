@@ -29,12 +29,23 @@ import android.view.animation.DecelerateInterpolator;
  *
  * A translucent left-to-right gradient fill can overlay the bars to
  * indicate background progress (e.g. while Apply effects is running).
+ *
+ * <p>For multitrack lanes, {@link #setProjectDuration(double)} puts the
+ * view on a shared project timeline: the lane's own audio is drawn
+ * scaled into [0, duration/project] of the width, and touch, trim
+ * selection, and the playback cursor all work in project-time
+ * fractions so lanes align.
  */
 public class WaveformView extends View {
 
     /** Fractions are 0..1 across the whole audio; null clears. */
     public interface OnSelectionListener {
         void onSelectionChanged(Float startFraction, Float endFraction);
+    }
+
+    /** Fired on a confirmed single tap, before any selection marker logic. */
+    public interface OnTapListener {
+        void onTap(float fraction);
     }
 
     private static final int BAR_COLOR = 0xFF4DB6AC;
@@ -71,6 +82,17 @@ public class WaveformView extends View {
     private Float selStartFrac;
     private Float selEndFrac;
     private OnSelectionListener selectionListener;
+    private OnTapListener tapListener;
+
+    /**
+     * Shared project timeline in seconds. When positive, the lane's own
+     * audio (durationSec) is drawn scaled into
+     * [0, durationSec/projectDurationSec] of the width, so lanes of
+     * different lengths align; touch, selection, and the playback
+     * cursor all work in project-time fractions. Zero (default) keeps
+     * the legacy behavior: the content fills the full width.
+     */
+    private double projectDurationSec;
 
     // Playback progress: a track spanning [pbStartFrac, pbEndFrac] that
     // fills up to pbPositionFrac. Null start hides the indicator.
@@ -101,6 +123,10 @@ public class WaveformView extends View {
     private final Paint pbHeadPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint liveHeadPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF pbRect = new RectF();
+
+    public WaveformView(Context context) {
+        this(context, null);
+    }
 
     public WaveformView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -238,6 +264,25 @@ public class WaveformView extends View {
         invalidate();
     }
 
+    /** Shared project timeline in seconds; 0 restores legacy full-width. */
+    public void setProjectDuration(double seconds) {
+        this.projectDurationSec = Math.max(0, seconds);
+        invalidate();
+    }
+
+    /** Fraction of the project width this lane's content occupies. */
+    private float contentFrac() {
+        if (projectDurationSec > 0 && durationSec > 0
+                && durationSec < projectDurationSec) {
+            return (float) (durationSec / projectDurationSec);
+        }
+        return 1f;
+    }
+
+    public void setOnTapListener(OnTapListener listener) {
+        this.tapListener = listener;
+    }
+
     public void setOnSelectionListener(OnSelectionListener listener) {
         this.selectionListener = listener;
     }
@@ -260,7 +305,8 @@ public class WaveformView extends View {
         }
     }
 
-    private void placeMarkerTap(float frac) {
+    /** Place a trim-marker tap at a project-time fraction (0..1). */
+    public void placeMarkerTap(float frac) {
         if (selStartFrac == null || selEndFrac != null) {
             // Fresh start (or replace a completed window).
             selStartFrac = frac;
@@ -281,10 +327,10 @@ public class WaveformView extends View {
         }
     }
 
-    /** Audio fraction (0..1) under view x-coordinate. */
+    /** Project-time fraction (0..1) under view x-coordinate. */
     private float xToFraction(float x) {
         float frac = viewStart + (x / getWidth()) / zoom;
-        return Math.max(0f, Math.min(1f, frac));
+        return Math.max(0f, Math.min(contentFrac(), frac));
     }
 
     /** View x-coordinate for an audio fraction. */
@@ -385,7 +431,12 @@ public class WaveformView extends View {
             if (liveMode || getWidth() <= 0) {
                 return true; // no selection markers while recording
             }
-            placeMarkerTap(xToFraction(e.getX()));
+            float frac = xToFraction(e.getX());
+            if (tapListener != null) {
+                tapListener.onTap(frac);
+                return true;
+            }
+            placeMarkerTap(frac);
             return true;
         }
 
@@ -473,14 +524,19 @@ public class WaveformView extends View {
             canvas.drawLine(0, midY, w, midY, placeholderPaint);
         } else {
             float maxAmp = midY * 0.95f;
+            // Peaks cover the lane's own audio: draw them scaled into
+            // [0, contentFrac] of the project width so lanes align.
+            float cf = contentFrac();
             float startF = viewStart;
-            int i0 = (int) (startF * drawPeaks.length);
+            int i0 = (int) ((startF / cf) * drawPeaks.length);
             int i1 = Math.min(drawPeaks.length,
-                    (int) Math.ceil((viewStart + 1f / zoom) * drawPeaks.length) + 1);
-            float pxPerBucket = zoom * w / drawPeaks.length;
+                    (int) Math.ceil(((viewStart + 1f / zoom) / cf)
+                            * drawPeaks.length) + 1);
+            float pxPerBucket = zoom * w * cf / drawPeaks.length;
             float drawnW = Math.max(1f, pxPerBucket * 0.7f);
             for (int i = Math.max(0, i0); i < i1; i++) {
-                float left = (i / (float) drawPeaks.length - startF) * zoom * w;
+                float left = (i / (float) drawPeaks.length * cf - startF)
+                        * zoom * w;
                 float amp = drawPeaks[i] * maxAmp;
                 canvas.drawRect(left, midY - amp, left + drawnW, midY + amp, barPaint);
             }
@@ -536,16 +592,19 @@ public class WaveformView extends View {
             }
         }
 
-        // Time axis in seconds, over the visible range.
-        if (durationSec > 0) {
-            double visStartSec = viewStart * durationSec;
-            double visEndSec = Math.min(durationSec, (viewStart + 1f / zoom) * durationSec);
+        // Time axis in seconds, over the visible range. On the shared
+        // project timeline the ticks read in project seconds so lanes
+        // align; otherwise they read in the lane's own seconds.
+        double axisSec = projectDurationSec > 0 ? projectDurationSec : durationSec;
+        if (axisSec > 0) {
+            double visStartSec = viewStart * axisSec;
+            double visEndSec = Math.min(axisSec, (viewStart + 1f / zoom) * axisSec);
             textPaint.setTextSize(11 * density);
             textPaint.setTextAlign(Paint.Align.CENTER);
             double interval = niceInterval(visEndSec - visStartSec);
             double t0 = Math.ceil(visStartSec / interval) * interval;
             for (double t = t0; t <= visEndSec + 1e-6; t += interval) {
-                float x = (float) ((t / durationSec - viewStart) * zoom * w);
+                float x = (float) ((t / axisSec - viewStart) * zoom * w);
                 canvas.drawLine(x, barH, x, barH + 5 * density, tickPaint);
                 String label = formatSeconds(t);
                 float half = textPaint.measureText(label) / 2f;
