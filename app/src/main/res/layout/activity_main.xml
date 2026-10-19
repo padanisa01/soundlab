@@ -151,43 +151,50 @@
                     android:textSize="12.5sp" />
             </LinearLayout>
 
-            <!-- Track panel: take lanes for the open project -->
+            <!-- Slim TRACKS bar: label + add-track button -->
             <LinearLayout
-                android:id="@+id/track_panel"
+                android:id="@+id/tracks_bar"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="14dp"
                 android:background="@drawable/bg_card"
-                android:orientation="vertical"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
                 android:padding="14dp"
                 android:visibility="gone">
 
-                <LinearLayout
-                    android:layout_width="match_parent"
+                <TextView
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
+                    android:layout_weight="1"
+                    android:text="@string/tracks_title"
+                    android:textColor="@color/sl_mut"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:letterSpacing="0.08" />
 
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="@string/tracks_title"
-                        android:textColor="@color/sl_mut"
-                        android:textSize="13sp"
-                        android:textStyle="bold"
-                        android:letterSpacing="0.08" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:id="@+id/track_list"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:orientation="vertical" />
+                <Button
+                    android:id="@+id/btn_add_track"
+                    android:layout_width="32dp"
+                    android:layout_height="32dp"
+                    android:background="@drawable/bg_zoom_btn"
+                    android:contentDescription="@string/add_track"
+                    android:padding="0dp"
+                    android:text="+"
+                    android:textColor="@color/sl_txt"
+                    android:textSize="16sp" />
             </LinearLayout>
 
-            <!-- Waveform card -->
+            <!-- Per-track waveform lanes, built programmatically -->
+            <LinearLayout
+                android:id="@+id/lane_list"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+
+            <!-- Transport card: selection chip, transport, hint.
+                 The waveform itself now lives in the per-track lanes
+                 above; playback here is always the mix. -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -195,105 +202,6 @@
                 android:background="@drawable/bg_card"
                 android:orientation="vertical"
                 android:padding="14dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <TextView
-                        android:id="@+id/waveform_track_title"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="WAVEFORM"
-                        android:textColor="@color/sl_mut"
-                        android:textSize="13sp"
-                        android:textStyle="bold"
-                        android:letterSpacing="0.08"
-                        android:singleLine="true"
-                        android:ellipsize="end" />
-
-                    <Button
-                        android:id="@+id/btn_hdr_lock"
-                        android:layout_width="28dp"
-                        android:layout_height="28dp"
-                        android:background="@drawable/bg_zoom_btn"
-                        android:text="🔓"
-                        android:textColor="@color/sl_txt"
-                        android:textSize="14sp"
-                        android:padding="0dp" />
-
-                    <Button
-                        android:id="@+id/btn_hdr_mute"
-                        android:layout_width="28dp"
-                        android:layout_height="28dp"
-                        android:layout_marginStart="6dp"
-                        android:background="@drawable/bg_zoom_btn"
-                        android:text="🔊"
-                        android:textColor="@color/sl_txt"
-                        android:textSize="14sp"
-                        android:padding="0dp" />
-
-                    <Button
-                        android:id="@+id/btn_hdr_add_track"
-                        android:layout_width="28dp"
-                        android:layout_height="28dp"
-                        android:layout_marginStart="6dp"
-                        android:background="@drawable/bg_zoom_btn"
-                        android:contentDescription="@string/add_track"
-                        android:text="+"
-                        android:textColor="@color/sl_txt"
-                        android:textSize="16sp"
-                        android:padding="0dp" />
-                </LinearLayout>
-
-                <FrameLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="170dp"
-                    android:layout_marginTop="8dp">
-
-                    <com.audiofx.app.WaveformView
-                        android:id="@+id/waveform"
-                        android:layout_width="match_parent"
-                        android:layout_height="match_parent"
-                        android:background="@drawable/bg_wave" />
-
-                    <!-- Tune-up step tracker: listed grey, active blinking
-                         green, done solid green; hidden when finished. -->
-                    <LinearLayout
-                        android:id="@+id/tuneup_overlay"
-                        android:layout_width="match_parent"
-                        android:layout_height="match_parent"
-                        android:orientation="vertical"
-                        android:gravity="center"
-                        android:padding="10dp"
-                        android:background="#D8141316"
-                        android:visibility="gone">
-
-                        <TextView
-                            android:id="@+id/tuneup_pass_title"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:layout_marginBottom="6dp"
-                            android:textColor="@color/sl_txt"
-                            android:textSize="13sp"
-                            android:textStyle="bold" />
-
-                        <ScrollView
-                            android:layout_width="match_parent"
-                            android:layout_height="0dp"
-                            android:layout_weight="1">
-
-                            <LinearLayout
-                                android:id="@+id/tuneup_steps"
-                                android:layout_width="match_parent"
-                                android:layout_height="wrap_content"
-                                android:orientation="vertical" />
-                        </ScrollView>
-                    </LinearLayout>
-                </FrameLayout>
 
                 <LinearLayout
                     android:id="@+id/sel_chip_row"
@@ -457,7 +365,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:text="Tap waveform: start marker · tap again: end marker · double-tap: clear · scroll or pinch: zoom · drag: pan when zoomed"
+                    android:text="Tap a track's waveform to select it; tap again for trim markers · double-tap: clear · pinch: zoom · drag: pan when zoomed"
                     android:textColor="@color/sl_dim"
                     android:textSize="11.5sp" />
             </LinearLayout>
