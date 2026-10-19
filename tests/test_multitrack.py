@@ -165,17 +165,69 @@ class TestMixdown(unittest.TestCase):
                     self.path("mix.wav"), self.rate)
         self.assertIn("no audible tracks to mix", str(ctx.exception))
 
-    def test_resample_mixes_rates(self):
-        pa = self.write_track("a8k.wav", [i * 0.001 for i in range(80)],
-                              rate=8000)
-        pb = self.write_track("b16k.wav", [0.2] * 160, rate=16000)
+    def test_muted_track_excluded_bit_identical(self):
+        pa = self.write_track("a.wav", [0.3] * 64)
+        pb = self.write_track("b.wav", [0.15] * 64)
         out = self.path("mix.wav")
-        res = mixdown(json.dumps([pa, pb]), out, 16000)
+        out_alone = self.path("mix_alone.wav")
+        res = mixdown(
+            json.dumps([{"id": "a", "path": pa}, {"id": "b", "path": pb}]),
+            out, self.rate, json.dumps(["b"]),
+        )
+        self.assertEqual(res["tracks_mixed"], 1)
+        mixdown(json.dumps([{"id": "a", "path": pa}]), out_alone, self.rate)
+        self.assertEqual(read_int16(out), read_int16(out_alone))
+        self.assertEqual(read_int16(out), expected_mix_int16([pa], self.rate))
+
+    def test_unknown_muted_id_ignored(self):
+        pa = self.write_track("a.wav", [0.3] * 64)
+        pb = self.write_track("b.wav", [0.15] * 64)
+        out = self.path("mix.wav")
+        res = mixdown(
+            json.dumps([{"id": "a", "path": pa}, {"id": "b", "path": pb}]),
+            out, self.rate, json.dumps(["zzz-no-such-track"]),
+        )
         self.assertEqual(res["tracks_mixed"], 2)
-        self.assertEqual(res["sample_rate"], 16000)
-        got = read_int16(out)
-        self.assertEqual(len(got), 160)
-        self.assertEqual(res["duration_s"], round(160 / 16000, 2))
+        self.assertEqual(read_int16(out),
+                         expected_mix_int16([pa, pb], self.rate))
+
+    def test_all_muted_raises(self):
+        pa = self.write_track("a.wav", [0.3] * 64)
+        pb = self.write_track("b.wav", [0.15] * 64)
+        with self.assertRaises(ValueError) as ctx:
+            mixdown(
+                json.dumps([{"id": "a", "path": pa}, {"id": "b", "path": pb}]),
+                self.path("mix.wav"), self.rate, json.dumps(["a", "b"]),
+            )
+        self.assertEqual(str(ctx.exception), "no audible tracks to mix")
+
+    def test_bare_path_strings_still_work(self):
+        pa = self.write_track("a.wav", [0.3] * 64)
+        pb = self.write_track("b.wav", [0.15] * 64)
+        out = self.path("mix.wav")
+        res = mixdown(json.dumps([pa, pb]), out, self.rate)
+        self.assertEqual(res["tracks_mixed"], 2)
+        self.assertEqual(read_int16(out),
+                         expected_mix_int16([pa, pb], self.rate))
+        # Bare strings are never muted, even if a muted id would collide
+        # with something else.
+        out2 = self.path("mix2.wav")
+        res2 = mixdown(json.dumps([pa, pb]), out2, self.rate,
+                       json.dumps(["a", "b"]))
+        self.assertEqual(res2["tracks_mixed"], 2)
+        self.assertEqual(read_int16(out2), read_int16(out))
+
+    def test_muted_track_with_missing_file_does_not_error(self):
+        pa = self.write_track("a.wav", [0.3] * 64)
+        missing = self.path("nope.wav")
+        out = self.path("mix.wav")
+        res = mixdown(
+            json.dumps([{"id": "a", "path": pa}, {"id": "b", "path": missing}]),
+            out, self.rate, json.dumps(["b"]),
+        )
+        self.assertEqual(res["tracks_mixed"], 1)
+        self.assertEqual(read_int16(out), expected_mix_int16([pa], self.rate))
+
 
 
 class TestResolveRecordTarget(unittest.TestCase):

@@ -787,14 +787,19 @@ def resample_linear(samples, from_rate, to_rate):
     return out
 
 
-def mixdown(track_wavs_json, output_path, target_sample_rate):
+def mixdown(tracks_json, output_path, target_sample_rate, muted_ids_json="[]"):
     """Mix rendered track WAVs down to one mono file.
 
-    ``track_wavs_json`` is a JSON array of WAV file paths (each track's
-    rendered output). Empty tracks are skipped: a path that is missing,
-    cannot be decoded, or holds no frames contributes nothing to the
-    mix. Locked tracks are included in the mix (lock blocks changes, not
-    playback). Tracks at other sample rates are resampled with linear
+    ``tracks_json`` is a JSON array where each item is either a
+    {"id": <str>, "path": <str>} object or (back-compat) a bare WAV
+    file path string, which is treated as {"id": None, "path": <string>}
+    and is never muted. ``muted_ids_json`` is a JSON array of track id
+    strings to skip; a muted id skips its track even if its file is
+    fine, unknown ids are ignored, and bare path strings are never
+    muted. Empty tracks are skipped: a path that is missing, cannot be
+    decoded, or holds no frames contributes nothing to the mix. Locked
+    tracks are included in the mix (lock blocks changes, not playback).
+    Tracks at other sample rates are resampled with linear
     interpolation (see resample_linear). Shorter tracks are zero-padded
     to the longest, then summed in float64. The mix is true-peak
     normalized to -1 dBFS: gain = 10**(-1/20) / peak, and the output is
@@ -806,18 +811,32 @@ def mixdown(track_wavs_json, output_path, target_sample_rate):
     when no track yields audio.
     """
     try:
-        paths = json.loads(track_wavs_json)
+        items = json.loads(tracks_json)
     except (TypeError, ValueError) as exc:
-        raise ValueError("track_wavs_json is not valid JSON: %s" % exc)
-    if not isinstance(paths, list):
-        raise ValueError("track_wavs_json must be a JSON array of paths")
+        raise ValueError("tracks_json is not valid JSON: %s" % exc)
+    if not isinstance(items, list):
+        raise ValueError("tracks_json must be a JSON array of tracks")
+    try:
+        muted_ids = json.loads(muted_ids_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("muted_ids_json is not valid JSON: %s" % exc)
+    if not isinstance(muted_ids, list):
+        raise ValueError("muted_ids_json must be a JSON array of ids")
+    muted = set(m for m in muted_ids if isinstance(m, str))
     target_rate = int(target_sample_rate)
     if target_rate <= 0:
         raise ValueError("target_sample_rate must be positive: %r"
                          % (target_sample_rate,))
     target = 10.0 ** (-1.0 / 20.0)
     tracks = []
-    for p in paths:
+    for item in items:
+        if isinstance(item, dict):
+            track_id = item.get("id")
+            p = item.get("path")
+        else:
+            track_id, p = None, item
+        if track_id is not None and track_id in muted:
+            continue
         if not isinstance(p, str) or not os.path.isfile(p):
             continue
         try:
