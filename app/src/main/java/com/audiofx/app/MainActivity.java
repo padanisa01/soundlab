@@ -2824,6 +2824,9 @@ public class MainActivity extends Activity {
         lane.lockBtn.setText(t.locked ? "\uD83D\uDD12" : "\uD83D\uDD13");
         lane.lockBtn.setTextColor(getColor(
                 t.locked ? R.color.sl_teal2 : R.color.sl_mut));
+        // Locked is unmistakable: teal-tinted background, not just a tint.
+        lane.lockBtn.setBackgroundResource(t.locked
+                ? R.drawable.bg_chip_selected : R.drawable.bg_zoom_btn);
         lane.muteBtn.setText(t.muted ? "\uD83D\uDD07" : "\uD83D\uDD0A");
         lane.muteBtn.setTextColor(getColor(
                 t.muted ? R.color.sl_teal2 : R.color.sl_mut));
@@ -3540,6 +3543,9 @@ public class MainActivity extends Activity {
                 return;
             }
             pendingRecordTrackId = target.id;
+            // The target may be freshly auto-created: make sure its lane
+            // exists before capture, or the live peaks have nowhere to go.
+            refreshLanes();
         } else {
             pendingRecordTrackId = null;
         }
