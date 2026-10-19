@@ -27,10 +27,12 @@ import android.view.animation.AlphaAnimation;
 import android.view.animation.Animation;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.Switch;
 import android.widget.TextView;
@@ -123,7 +125,18 @@ public class MainActivity extends Activity {
     private LinearLayout histCard;
     private LinearLayout histList;
     private TextView tvHistCount;
+    /**
+     * Selected lane's waveform. Null when no lane exists. Most call
+     * sites use this alias; background ops capture their lane's view
+     * directly so a mid-op selection change can't misroute progress.
+     */
     private WaveformView waveformView;
+    /** Per-track waveform lanes, in track position order. */
+    private final List<TrackLane> lanes = new ArrayList<>();
+    private final Map<String, TrackLane> laneById = new HashMap<>();
+    private LinearLayout laneList;
+    private LinearLayout tracksBar;
+    private Button btnAddTrack;
     private LinearLayout selChipRow;
     private TextView selChipText;
     private Button btnSelClear;
@@ -135,21 +148,14 @@ public class MainActivity extends Activity {
     private List<LibraryDb.Track> mTracks = new ArrayList<>();
     /** Id of the selected track; null when no entry is open. */
     private String selectedTrackId;
-    private LinearLayout trackPanel;
-    private LinearLayout trackList;
-    private TextView waveformTrackTitle;
-    private Button btnHdrLock;
-    private Button btnHdrMute;
-    private Button btnHdrAddTrack;
 
     private String inputPath;   // cached WAV picked by the user, or a library pristine
     private String inputFileName = "audio.wav";
     private String currentOutputPath;  // mix file backing Play/Share; null until first render
     /**
      * True when the mix file is stale or missing relative to the tracks.
-     * refreshMix() updates only the waveform peaks (lazy) and sets this;
-     * ensureMixFile() writes the file on demand (playback, overdub,
-     * share) and clears it.
+     * Lane peak refreshes set this; ensureMixFile() writes the file on
+     * demand (playback, overdub, share) and clears it.
      */
     private boolean mixDirty = false;
     private String playerOutputPath;   // file the live player was built for
@@ -194,13 +200,11 @@ public class MainActivity extends Activity {
      * mismatch falls back to a full render, so switching tracks or
      * entries invalidates it implicitly. */
     private String tipCacheKey;
-    /** Tune-up step tracker overlay on the waveform (per-pass step list). */
-    private LinearLayout tuneupOverlay;
-    private LinearLayout tuneupSteps;
-    private TextView tuneupPassTitle;
-    private String tuneupProfileLabel = "";
     /** Tune-up profile metadata JSON (from list_tune_up_profiles). */
     private String cachedProfilesJson;
+    /** Track id whose lane hosts the active tune-up step overlay. */
+    private String tuneUpLaneId;
+    private String tuneupProfileLabel = "";
     /** Live refs to the open diagnosis dialog's profile UI. */
     private java.util.ArrayList<Button> diagProfileBtns;
     private TextView diagProfileDesc;
@@ -225,8 +229,13 @@ public class MainActivity extends Activity {
                 tvTimeCur.setText(fmtTime(elapsed));
                 float peak = livePeakAcc;
                 livePeakAcc = 0f;
-                waveformView.addLivePeak(peak);
-                waveformView.setDuration(elapsed);
+                // Live growth shows on the record target's lane; with no
+                // project open yet there is no lane and only the timer runs.
+                TrackLane recLane = laneById.get(pendingRecordTrackId);
+                if (recLane != null) {
+                    recLane.wave.addLivePeak(peak);
+                    recLane.wave.setDuration(elapsed);
+                }
                 mainHandler.postDelayed(this, 200);
             }
         }
@@ -246,7 +255,12 @@ public class MainActivity extends Activity {
             if (player != null && audioDurationSec > 0) {
                 try {
                     int ms = player.getCurrentPosition();
-                    waveformView.setPlaybackPosition((float) (ms / 1000.0 / audioDurationSec));
+                    // Project-time position on every lane; each lane
+                    // clamps to its own content.
+                    float pos = (float) (ms / 1000.0 / audioDurationSec);
+                    for (TrackLane lane : lanes) {
+                        lane.wave.setPlaybackPosition(pos);
+                    }
                     tvTimeCur.setText(fmtTime(ms / 1000.0));
                 } catch (Exception ignored) {
                 }
@@ -424,10 +438,6 @@ public class MainActivity extends Activity {
         histCard = findViewById(R.id.hist_card);
         histList = findViewById(R.id.hist_list);
         tvHistCount = findViewById(R.id.tv_hist_count);
-        waveformView = findViewById(R.id.waveform);
-        tuneupOverlay = findViewById(R.id.tuneup_overlay);
-        tuneupSteps = findViewById(R.id.tuneup_steps);
-        tuneupPassTitle = findViewById(R.id.tuneup_pass_title);
         selChipRow = findViewById(R.id.sel_chip_row);
         selChipText = findViewById(R.id.sel_chip_text);
         btnSelClear = findViewById(R.id.btn_sel_clear);
@@ -437,14 +447,19 @@ public class MainActivity extends Activity {
         btnJoin.setOnClickListener(v -> joinSelection());
         tvTimeCur = findViewById(R.id.tv_time_cur);
         tvTimeTot = findViewById(R.id.tv_time_tot);
-        waveformView.setOnSelectionListener(this::onSelectionChanged);
+        // Lanes are built programmatically per track; each lane wires its
+        // own tap/selection listeners in buildLane().
 
         selectReverb(reverbPreset);
 
         seekWarmth.setOnSeekBarChangeListener(sliderListener());
         seekEcho.setOnSeekBarChangeListener(sliderListener());
         updateSliderLabels();
-        btnSelClear.setOnClickListener(v -> waveformView.clearSelection());
+        btnSelClear.setOnClickListener(v -> {
+            if (waveformView != null) {
+                waveformView.clearSelection();
+            }
+        });
         chipStudio.setOnClickListener(v -> selectReverb("studio"));
         chipHall.setOnClickListener(v -> selectReverb("concert_hall"));
         chipBath.setOnClickListener(v -> selectReverb("bathroom"));
@@ -466,32 +481,10 @@ public class MainActivity extends Activity {
         btnUndo.setOnClickListener(v -> undoLastEffect());
         btnPlayPause.setOnClickListener(v -> togglePlayPause());
         btnRecord.setOnClickListener(v -> onRecordClicked());
-        trackPanel = findViewById(R.id.track_panel);
-        trackList = findViewById(R.id.track_list);
-        waveformTrackTitle = findViewById(R.id.waveform_track_title);
-        btnHdrLock = findViewById(R.id.btn_hdr_lock);
-        btnHdrMute = findViewById(R.id.btn_hdr_mute);
-        btnHdrAddTrack = findViewById(R.id.btn_hdr_add_track);
-        waveformTrackTitle.setOnClickListener(v -> {
-            LibraryDb.Track t = getSelectedTrack();
-            if (t == null || isRecordingSession()) {
-                return;
-            }
-            showRenameTrackDialog(t);
-        });
-        btnHdrLock.setOnClickListener(v -> {
-            LibraryDb.Track t = getSelectedTrack();
-            if (t != null) {
-                toggleTrackLock(t.id, !t.locked);
-            }
-        });
-        btnHdrMute.setOnClickListener(v -> {
-            LibraryDb.Track t = getSelectedTrack();
-            if (t != null) {
-                toggleTrackMute(t.id, !t.muted);
-            }
-        });
-        btnHdrAddTrack.setOnClickListener(v -> onAddTrackClicked());
+        tracksBar = findViewById(R.id.tracks_bar);
+        laneList = findViewById(R.id.lane_list);
+        btnAddTrack = findViewById(R.id.btn_add_track);
+        btnAddTrack.setOnClickListener(v -> onAddTrackClicked());
         btnStop.setOnClickListener(v -> {
             if (isRecordingSession()) {
                 // During a recording session btnStop is the pause button.
@@ -944,44 +937,6 @@ public class MainActivity extends Activity {
         return audioName + ".mp3";
     }
 
-    private void loadWaveform() {
-        loadWaveformForPath(inputPath);
-    }
-
-    /** Reload peaks/duration for any file: the input or an edited output. */
-    private void loadWaveformForPath(String path) {
-        new Thread(() -> {
-            try {
-                if (!Python.isStarted()) {
-                    Python.start(new AndroidPlatform(this));
-                }
-                PyObject result = Python.getInstance().getModule("audiofx.android_bridge")
-                        .callAttr("waveform_peaks", path, 1200);
-                // peaks_json is a Python str; PyObject.toString() gives str().
-                JSONArray arr = new JSONArray(result.callAttr("get", "peaks_json").toString());
-                final float[] peaks = new float[arr.length()];
-                for (int i = 0; i < arr.length(); i++) {
-                    peaks[i] = (float) arr.getDouble(i);
-                }
-                final double dur = Double.parseDouble(
-                        result.callAttr("get", "duration_s").toString());
-                final int bitDepth = Integer.parseInt(
-                        result.callAttr("get", "bit_depth").toString());
-                runOnUiThread(() -> {
-                    waveformView.setPeaks(peaks);
-                    waveformView.setDuration(dur);
-                    audioDurationSec = dur;
-                    tvTimeCur.setText("0:00");
-                    tvTimeTot.setText(fmtTime(dur));
-                    // The raw input can be auditioned before any Apply.
-                    setPlayPauseEnabled(true);
-                });
-            } catch (Exception e) {
-                runOnUiThread(() -> setStatus("Waveform failed: " + e.getMessage()));
-            }
-        }).start();
-    }
-
     private void showProgress(boolean show) {
         progressBar.setVisibility(show ? View.VISIBLE : View.GONE);
     }
@@ -1098,15 +1053,13 @@ public class MainActivity extends Activity {
         selEndSec = null;
         setPlayPauseEnabled(false);
         refreshPlayPause(); // the take is savable as-is, no Apply needed
-        waveformView.setPeaks(new float[0]);
-        waveformView.setDuration(0);
         tvTimeCur.setText("0:00");
         tvTimeTot.setText("0:00");
         updateTrackActions();
         updateProjectName();
         // ---- Multitrack: every open entry shows its tracks ----
         ensureTracksForEntry(entryId);
-        refreshTrackPanel();
+        refreshLanes();
         int depth = undoDepth(selectedTrackId);
         setStatus(depth > 0
                 ? "Loaded from library — " + depth + " effects in history."
@@ -1115,7 +1068,7 @@ public class MainActivity extends Activity {
         if (!loadNow) {
             return; // the caller chains straight into an op that loads
         }
-        refreshMix();
+        refreshAllLanePeaks();
         boolean engineOk = LibraryDb.DSP_VERSION.equals(e.dspVersion);
         if (!engineOk) {
             setStatus("Note: engine updated since this take — re-rendering.");
@@ -1133,7 +1086,7 @@ public class MainActivity extends Activity {
         if (anyAudio) {
             reRenderEntry("Rendering...");
         } else {
-            refreshMix();
+            refreshAllLanePeaks();
         }
     }
 
@@ -1272,7 +1225,7 @@ public class MainActivity extends Activity {
             return;
         }
         setBusy(true);
-        waveformView.startProgressAnimation();
+        lanesProgressStart();
         setStatus(workingMsg);
         new Thread(() -> {
             try {
@@ -1283,13 +1236,13 @@ public class MainActivity extends Activity {
                 }
                 runOnUiThread(() -> {
                     updateUndoBadge();
-                    refreshMix();
+                    refreshAllLanePeaks();
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     setStatus("Error: " + e.getMessage());
                     setBusy(false);
-                    waveformView.clearProgress();
+                    lanesProgressClear();
                     updateUndoBadge();
                 });
             }
@@ -1343,6 +1296,9 @@ public class MainActivity extends Activity {
             return;
         }
         final String trackId = track.id;
+        // Capture the lane's view now: a mid-op selection change must not
+        // misroute progress onto another lane.
+        final WaveformView opWave = laneWave(trackId);
         setBusy(true);
         if (selStartSec != null && audioDurationSec > 0
                 && ("fx".equals(opType))) {
@@ -1351,9 +1307,11 @@ public class MainActivity extends Activity {
             if (selEndSec != null) {
                 toFrac = (float) Math.min(1.0, selEndSec / audioDurationSec);
             }
-            waveformView.startProgressAnimation(fromFrac, toFrac);
-        } else {
-            waveformView.startProgressAnimation();
+            if (opWave != null) {
+                opWave.startProgressAnimation(fromFrac, toFrac);
+            }
+        } else if (opWave != null) {
+            opWave.startProgressAnimation();
         }
         setStatus(workingMsg);
         new Thread(() -> {
@@ -1376,7 +1334,6 @@ public class MainActivity extends Activity {
                     dur = renderChainToCache(entryId, trackId);
                 }
                 runOnUiThread(() -> {
-                    audioDurationSec = dur;
                     releasePlayer();
                     btnStop.setEnabled(false);
                     if (onRendered != null) {
@@ -1385,10 +1342,12 @@ public class MainActivity extends Activity {
                     setStatus(doneMsg);
                     setPlayPauseEnabled(true);
                     setBusy(false);
-                    waveformView.finishProgressAnimation();
+                    if (opWave != null) {
+                        opWave.finishProgressAnimation();
+                    }
                     updateUndoBadge();
-                    // The mix is the audible truth: rebuild it now.
-                    refreshMix();
+                    // Refresh the edited lane; the mix file goes stale.
+                    refreshLanePeaks(trackId);
                 });
             } catch (Exception e) {
                 if (added) {
@@ -1400,7 +1359,9 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     setStatus("Error: " + e.getMessage());
                     setBusy(false);
-                    waveformView.clearProgress();
+                    if (opWave != null) {
+                        opWave.clearProgress();
+                    }
                     updateUndoBadge();
                 });
             }
@@ -1433,7 +1394,7 @@ public class MainActivity extends Activity {
             showDiagnosisReport(cachedDiagJson);
             return;
         }
-        runDiagnosis(diagPath);
+        runDiagnosis(diagPath, null); // legacy picked-file path: no lane
     }
 
     /**
@@ -1461,31 +1422,38 @@ public class MainActivity extends Activity {
             showDiagnosisReport(cachedDiagJson);
             return;
         }
+        final WaveformView diagWave = laneWave(trackId);
         setBusy(true);
         setStatus("Diagnosing...");
-        waveformView.startProgressAnimation();
+        if (diagWave != null) {
+            diagWave.startProgressAnimation();
+        }
         new Thread(() -> {
             try {
                 renderTrackBlocking(entryId, trackId);
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     setBusy(false);
-                    waveformView.clearProgress();
+                    if (diagWave != null) {
+                        diagWave.clearProgress();
+                    }
                     setStatus("Diagnosis failed: " + e.getMessage());
                 });
                 return;
             }
             diagTrackId = trackId;
             diagLastPath = diagPath;
-            runDiagnosis(diagPath);
+            runDiagnosis(diagPath, laneWave(trackId));
         }).start();
     }
 
     /** Run diagnose_file on a path and show the report card. */
-    private void runDiagnosis(final String diagPath) {
+    private void runDiagnosis(final String diagPath, final WaveformView diagWave) {
         setBusy(true);
         setStatus("Diagnosing...");
-        waveformView.startProgressAnimation();
+        if (diagWave != null) {
+            diagWave.startProgressAnimation();
+        }
         new Thread(() -> {
             try {
                 if (!Python.isStarted()) {
@@ -1501,7 +1469,9 @@ public class MainActivity extends Activity {
                 warmDiagSummaryCache(findingsJson);
                 runOnUiThread(() -> {
                     setBusy(false);
-                    waveformView.finishProgressAnimation();
+                    if (diagWave != null) {
+                        diagWave.finishProgressAnimation();
+                    }
                     cachedDiagPath = diagPath;
                     cachedDiagJson = findingsJson;
                     showDiagnosisReport(findingsJson);
@@ -1509,7 +1479,9 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     setBusy(false);
-                    waveformView.clearProgress();
+                    if (diagWave != null) {
+                        diagWave.clearProgress();
+                    }
                     setStatus("Diagnosis failed: " + e.getMessage());
                 });
             }
@@ -2182,25 +2154,31 @@ public class MainActivity extends Activity {
                 + profile.substring(1);
     }
 
-    /** Show this pass's steps on the waveform overlay, all grey (pending). */
+    /** The lane hosting the tune-up overlay, or null when none. */
+    private TrackLane tuneUpLane() {
+        return tuneUpLaneId != null ? laneById.get(tuneUpLaneId) : null;
+    }
+
+    /** Show this pass's steps on the tune-up lane's overlay, all grey (pending). */
     private void showTuneUpPass(int passNumber, int maxPasses,
             String labelsJson) {
-        if (tuneupOverlay == null) {
+        TrackLane lane = tuneUpLane();
+        if (lane == null) {
             return;
         }
-        tuneupSteps.removeAllViews();
+        lane.steps.removeAllViews();
         try {
             JSONArray labels = new JSONArray(labelsJson);
             for (int i = 0; i < labels.length(); i++) {
-                tuneupSteps.addView(makeTuneUpStepRow(
+                lane.steps.addView(makeTuneUpStepRow(
                         labels.optString(i, "")));
             }
         } catch (Exception ignored) {
         }
-        tuneupPassTitle.setText("Tune Up (" + tuneupProfileLabel + ") - pass "
+        lane.passTitle.setText("Tune Up (" + tuneupProfileLabel + ") - pass "
                 + passNumber + " of " + maxPasses);
-        tuneupOverlay.setVisibility(View.VISIBLE);
-        tuneupOverlay.bringToFront();
+        lane.overlay.setVisibility(View.VISIBLE);
+        lane.overlay.bringToFront();
     }
 
     private View makeTuneUpStepRow(String label) {
@@ -2236,8 +2214,8 @@ public class MainActivity extends Activity {
 
     /** Mark a step in-progress: blinking green label, bar filling. */
     private void setTuneUpStepActive(int stepIndex) {
-        View row = tuneupSteps == null ? null
-                : tuneupSteps.getChildAt(stepIndex);
+        TrackLane lane = tuneUpLane();
+        View row = lane == null ? null : lane.steps.getChildAt(stepIndex);
         if (!(row != null && row.getTag() instanceof TuneUpRow)) {
             return;
         }
@@ -2258,8 +2236,8 @@ public class MainActivity extends Activity {
 
     /** Mark a step done: solid green label, bar to 100%. */
     private void setTuneUpStepDone(int stepIndex) {
-        View row = tuneupSteps == null ? null
-                : tuneupSteps.getChildAt(stepIndex);
+        TrackLane lane = tuneUpLane();
+        View row = lane == null ? null : lane.steps.getChildAt(stepIndex);
         if (!(row != null && row.getTag() instanceof TuneUpRow)) {
             return;
         }
@@ -2274,13 +2252,13 @@ public class MainActivity extends Activity {
         h.bar.setProgress(100);
     }
 
-    /** Remove the step tracker from the waveform. */
+    /** Remove the step tracker from the tune-up lane. */
     private void hideTuneUpOverlay() {
-        if (tuneupOverlay == null) {
-            return;
+        for (TrackLane lane : lanes) {
+            lane.overlay.setVisibility(View.GONE);
+            lane.steps.removeAllViews();
         }
-        tuneupOverlay.setVisibility(View.GONE);
-        tuneupSteps.removeAllViews();
+        tuneUpLaneId = null;
     }
 
     /** One-button Tune Up: converge the profile's fixes over up to 3 passes
@@ -2309,9 +2287,13 @@ public class MainActivity extends Activity {
             setStatus("Track changed since diagnosis. Diagnose again first.");
             return;
         }
+        final WaveformView tuneWave = laneWave(trackId);
+        tuneUpLaneId = trackId;
         setBusy(true);
         setStatus("Tuning up...");
-        waveformView.startProgressAnimation();
+        if (tuneWave != null) {
+            tuneWave.startProgressAnimation();
+        }
         tuneupProfileLabel = tuneUpProfileLabel(profile);
         final TuneUpProgress progress = new TuneUpProgress();
         new Thread(() -> {
@@ -2372,7 +2354,9 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     hideTuneUpOverlay();
                     setBusy(false);
-                    waveformView.clearProgress();
+                    if (tuneWave != null) {
+                        tuneWave.clearProgress();
+                    }
                     setStatus("Tune-up failed: " + e.getMessage());
                 });
             }
@@ -2415,8 +2399,11 @@ public class MainActivity extends Activity {
             setStatus("Undo failed: " + e.getMessage());
             return;
         }
+        final WaveformView undoWave = laneWave(trackId);
         setBusy(true);
-        waveformView.startProgressAnimation();
+        if (undoWave != null) {
+            undoWave.startProgressAnimation();
+        }
         setStatus("Undoing...");
         new Thread(() -> {
             try {
@@ -2433,7 +2420,7 @@ public class MainActivity extends Activity {
                 final int depth = undoDepth(trackId);
                 runOnUiThread(() -> {
                     updateUndoBadge();
-                    refreshMix();
+                    refreshLanePeaks(trackId);
                     setStatus("Undone: " + last.label + (depth > 0
                             ? " — " + depth + " op(s) left."
                             : " — back to the original audio."));
@@ -2449,7 +2436,9 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     setStatus("Undo failed: " + e.getMessage());
                     setBusy(false);
-                    waveformView.clearProgress();
+                    if (undoWave != null) {
+                        undoWave.clearProgress();
+                    }
                     updateUndoBadge();
                 });
             }
@@ -2561,132 +2550,285 @@ public class MainActivity extends Activity {
         diagLastPath = null;
         diagTrackId = null;
         diagSummaryCache.clear();
-        refreshTrackPanel();
+        refreshLanes();
         // History and the undo badge follow the selection.
         updateUndoBadge();
     }
 
-    /** Rebuild the track panel rows for the open entry. */
-    private void refreshTrackPanel() {
-        refreshWaveformHeader();
-        if (trackPanel == null) {
+    /** The selected track's lane, or null when there is none. */
+    private TrackLane selectedLane() {
+        return selectedTrackId != null ? laneById.get(selectedTrackId) : null;
+    }
+
+    /** A track's lane waveform, or null when the lane doesn't exist. */
+    private WaveformView laneWave(String trackId) {
+        TrackLane lane = trackId != null ? laneById.get(trackId) : null;
+        return lane != null ? lane.wave : null;
+    }
+
+    /** Progress fill on every lane (multi-track background work). */
+    private void lanesProgressStart() {
+        for (TrackLane lane : lanes) {
+            lane.wave.startProgressAnimation();
+        }
+    }
+
+    private void lanesProgressFinish() {
+        for (TrackLane lane : lanes) {
+            lane.wave.finishProgressAnimation();
+        }
+    }
+
+    private void lanesProgressClear() {
+        for (TrackLane lane : lanes) {
+            lane.wave.clearProgress();
+        }
+    }
+
+    /** Only the selected lane drives the trim window. */
+    private void onLaneSelectionChanged(String trackId, Float s, Float e) {
+        if (!trackId.equals(selectedTrackId)) {
+            return;
+        }
+        onSelectionChanged(s, e);
+    }
+
+    /**
+     * Sync the per-track lanes with mTracks. Existing lanes are reused
+     * so zoom, selection, and peaks survive; only structural changes
+     * (add/remove/reorder) rebuild. Also refreshes the waveformView
+     * alias (selected lane), the selection highlight, and the project
+     * timeline.
+     */
+    private void refreshLanes() {
+        if (laneList == null) {
             return;
         }
         if (currentEntryId == null) {
-            trackPanel.setVisibility(View.GONE);
+            lanes.clear();
+            laneById.clear();
+            laneList.removeAllViews();
+            tracksBar.setVisibility(View.GONE);
+            waveformView = null;
+            audioDurationSec = 0;
             return;
         }
-        trackPanel.setVisibility(View.VISIBLE);
-        trackList.removeAllViews();
+        tracksBar.setVisibility(View.VISIBLE);
+        Map<String, TrackLane> old = new HashMap<>(laneById);
+        lanes.clear();
+        laneById.clear();
+        laneList.removeAllViews();
         float density = getResources().getDisplayMetrics().density;
         for (LibraryDb.Track t : mTracks) {
-            trackList.addView(buildTrackRow(t, density));
+            TrackLane lane = old.get(t.id);
+            if (lane == null) {
+                lane = buildLane(t, density);
+            } else {
+                lane.trackId = t.id;
+            }
+            updateLaneHeader(lane, t);
+            lanes.add(lane);
+            laneById.put(t.id, lane);
+            laneList.addView(lane.root);
+        }
+        if (getSelectedTrack() == null) {
+            selectedTrackId = mTracks.isEmpty() ? null : mTracks.get(0).id;
+        }
+        TrackLane sel = selectedLane();
+        waveformView = sel != null ? sel.wave : null;
+        updateLaneSelectionHighlights();
+        updateProjectDuration();
+    }
+
+    /** Selection highlight across lanes. */
+    private void updateLaneSelectionHighlights() {
+        for (TrackLane lane : lanes) {
+            lane.root.setBackgroundResource(
+                    lane.trackId.equals(selectedTrackId)
+                            ? R.drawable.bg_chip_selected : R.drawable.bg_card);
         }
     }
 
-    /**
-     * Waveform card header: the selected track's name (tap to rename) plus
-     * its lock/mute toggles and the add-track button. With no track
-     * selected (picked file, empty project) it falls back to the plain
-     * WAVEFORM label and the track buttons hide.
-     */
-    private void refreshWaveformHeader() {
-        LibraryDb.Track t = getSelectedTrack();
-        if (t == null) {
-            waveformTrackTitle.setText("WAVEFORM");
-            btnHdrLock.setVisibility(View.GONE);
-            btnHdrMute.setVisibility(View.GONE);
-            btnHdrAddTrack.setVisibility(
-                    currentEntryId != null ? View.VISIBLE : View.GONE);
-            return;
+    /** Project timeline = longest lane; every lane draws against it. */
+    private void updateProjectDuration() {
+        double max = 0;
+        for (TrackLane lane : lanes) {
+            if (lane.contentDurSec > max) {
+                max = lane.contentDurSec;
+            }
         }
-        waveformTrackTitle.setText(t.name);
-        btnHdrLock.setVisibility(View.VISIBLE);
-        btnHdrMute.setVisibility(View.VISIBLE);
-        btnHdrAddTrack.setVisibility(View.VISIBLE);
-        btnHdrLock.setText(t.locked ? "\uD83D\uDD12" : "\uD83D\uDD13");
-        btnHdrLock.setTextColor(getColor(
-                t.locked ? R.color.sl_teal2 : R.color.sl_mut));
-        btnHdrMute.setText(t.muted ? "\uD83D\uDD07" : "\uD83D\uDD0A");
-        btnHdrMute.setTextColor(getColor(
-                t.muted ? R.color.sl_teal2 : R.color.sl_mut));
+        audioDurationSec = max;
+        for (TrackLane lane : lanes) {
+            lane.wave.setProjectDuration(max);
+        }
+        tvTimeTot.setText(fmtTime(max));
     }
 
     /**
-     * One track row: name (tap to rename), lock toggle, mute toggle,
-     * row tap to select. The selected row uses the selected-chip
-     * background. Track changes are frozen during a recording session
-     * so the record target stays stable.
+     * One lane: card with a header (name tap=rename, lock, mute) and the
+     * track's own waveform on the shared project timeline, plus a
+     * per-lane tune-up overlay. Tapping the header or a first tap on a
+     * non-selected lane's waveform selects the track; taps on the
+     * selected lane's waveform place trim markers. Track changes are
+     * frozen during a recording session so the record target stays
+     * stable.
      */
-    private LinearLayout buildTrackRow(final LibraryDb.Track track,
-            float density) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        int pad = (int) (10 * density);
-        row.setPadding(pad, (int) (8 * density), pad, (int) (8 * density));
-        row.setBackgroundResource(track.id.equals(selectedTrackId)
-                ? R.drawable.bg_chip_selected : R.drawable.bg_chip);
-        row.setClickable(true);
-        row.setFocusable(true);
-        row.setOnClickListener(v -> {
+    private TrackLane buildLane(final LibraryDb.Track track, float density) {
+        final TrackLane lane = new TrackLane();
+        lane.trackId = track.id;
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (14 * density);
+        root.setPadding(pad, pad, pad, pad);
+        root.setBackgroundResource(R.drawable.bg_card);
+        root.setClickable(true);
+        root.setFocusable(true);
+        root.setOnClickListener(v -> {
             if (isRecordingSession()) {
                 return; // silent: the record target stays put
             }
             selectTrack(track.id);
         });
+        LinearLayout.LayoutParams rootLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        rootLp.topMargin = (int) (14 * density);
+        root.setLayoutParams(rootLp);
+        lane.root = root;
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        root.addView(header, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
 
         TextView name = new TextView(this);
-        name.setText(track.name);
-        name.setTextColor(getColor(R.color.sl_txt));
         name.setTextSize(14f);
+        name.setTypeface(null, android.graphics.Typeface.BOLD);
+        name.setTextColor(getColor(R.color.sl_txt));
         name.setSingleLine(true);
         name.setEllipsize(android.text.TextUtils.TruncateAt.END);
         LinearLayout.LayoutParams nameLp = new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
         nameLp.rightMargin = (int) (8 * density);
-        row.addView(name, nameLp);
-        name.setOnClickListener(v -> showRenameTrackDialog(track));
+        header.addView(name, nameLp);
+        name.setOnClickListener(v -> {
+            LibraryDb.Track t = getTrackById(track.id);
+            if (t != null) {
+                showRenameTrackDialog(t);
+            }
+        });
+        lane.nameView = name;
 
         Button lockBtn = new Button(this);
-        final boolean locked = track.locked;
-        lockBtn.setText(locked ? "Locked" : "Unlocked");
-        lockBtn.setTextColor(getColor(
-                locked ? R.color.sl_teal2 : R.color.sl_mut));
-        lockBtn.setTextSize(12f);
-        lockBtn.setBackgroundResource(R.drawable.bg_ghost);
+        lockBtn.setTextSize(14f);
+        lockBtn.setBackgroundResource(R.drawable.bg_zoom_btn);
         lockBtn.setMinHeight(0);
         lockBtn.setMinimumHeight(0);
-        int btnPad = (int) (10 * density);
-        lockBtn.setPadding(btnPad, (int) (6 * density),
-                btnPad, (int) (6 * density));
-        lockBtn.setOnClickListener(v -> toggleTrackLock(track.id, !locked));
-        row.addView(lockBtn);
+        lockBtn.setPadding(0, 0, 0, 0);
+        LinearLayout.LayoutParams lockLp = new LinearLayout.LayoutParams(
+                (int) (28 * density), (int) (28 * density));
+        lockBtn.setOnClickListener(v -> {
+            LibraryDb.Track t = getTrackById(track.id);
+            if (t != null) {
+                toggleTrackLock(t.id, !t.locked);
+            }
+        });
+        header.addView(lockBtn, lockLp);
+        lane.lockBtn = lockBtn;
 
         Button muteBtn = new Button(this);
-        final boolean muted = track.muted;
-        muteBtn.setText(muted ? "\uD83D\uDD07" : "\uD83D\uDD0A");
-        muteBtn.setTextColor(getColor(
-                muted ? R.color.sl_teal2 : R.color.sl_mut));
-        muteBtn.setTextSize(12f);
-        muteBtn.setBackgroundResource(R.drawable.bg_ghost);
+        muteBtn.setTextSize(14f);
+        muteBtn.setBackgroundResource(R.drawable.bg_zoom_btn);
         muteBtn.setMinHeight(0);
         muteBtn.setMinimumHeight(0);
-        muteBtn.setPadding(btnPad, (int) (6 * density),
-                btnPad, (int) (6 * density));
-        muteBtn.setOnClickListener(v -> toggleTrackMute(track.id, !muted));
+        muteBtn.setPadding(0, 0, 0, 0);
         LinearLayout.LayoutParams muteLp = new LinearLayout.LayoutParams(
+                (int) (28 * density), (int) (28 * density));
+        muteLp.leftMargin = (int) (6 * density);
+        muteBtn.setOnClickListener(v -> {
+            LibraryDb.Track t = getTrackById(track.id);
+            if (t != null) {
+                toggleTrackMute(t.id, !t.muted);
+            }
+        });
+        header.addView(muteBtn, muteLp);
+        lane.muteBtn = muteBtn;
+
+        FrameLayout frame = new FrameLayout(this);
+        LinearLayout.LayoutParams frameLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, (int) (110 * density));
+        frameLp.topMargin = (int) (8 * density);
+        root.addView(frame, frameLp);
+
+        final WaveformView wv = new WaveformView(this);
+        wv.setBackgroundResource(R.drawable.bg_wave);
+        wv.setLayoutParams(new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        wv.setOnTapListener(frac -> {
+            if (isRecordingSession()) {
+                return;
+            }
+            if (!track.id.equals(selectedTrackId)) {
+                selectTrack(track.id); // first tap selects only
+            } else {
+                wv.placeMarkerTap(frac);
+            }
+        });
+        wv.setOnSelectionListener((s, e) -> onLaneSelectionChanged(track.id, s, e));
+        frame.addView(wv);
+        lane.wave = wv;
+
+        // Per-lane tune-up step overlay, initially hidden.
+        LinearLayout overlay = new LinearLayout(this);
+        overlay.setOrientation(LinearLayout.VERTICAL);
+        overlay.setGravity(Gravity.CENTER);
+        int opad = (int) (10 * density);
+        overlay.setPadding(opad, opad, opad, opad);
+        overlay.setBackgroundColor(0xD8141316);
+        overlay.setVisibility(View.GONE);
+        overlay.setLayoutParams(new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        TextView passTitle = new TextView(this);
+        passTitle.setTextColor(getColor(R.color.sl_txt));
+        passTitle.setTextSize(13f);
+        passTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams ptLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
-        muteLp.leftMargin = (int) (6 * density);
-        row.addView(muteBtn, muteLp);
+        ptLp.bottomMargin = (int) (6 * density);
+        overlay.addView(passTitle, ptLp);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        LinearLayout steps = new LinearLayout(this);
+        steps.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(steps);
+        overlay.addView(scroll);
+        frame.addView(overlay);
+        lane.overlay = overlay;
+        lane.steps = steps;
+        lane.passTitle = passTitle;
 
-        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        rowLp.bottomMargin = (int) (6 * density);
-        row.setLayoutParams(rowLp);
-        return row;
+        updateLaneHeader(lane, track);
+        return lane;
+    }
+
+    /** Name, lock/mute icons, and the muted dim for one lane. */
+    private void updateLaneHeader(TrackLane lane, LibraryDb.Track t) {
+        lane.nameView.setText(t.name);
+        lane.lockBtn.setText(t.locked ? "\uD83D\uDD12" : "\uD83D\uDD13");
+        lane.lockBtn.setTextColor(getColor(
+                t.locked ? R.color.sl_teal2 : R.color.sl_mut));
+        lane.muteBtn.setText(t.muted ? "\uD83D\uDD07" : "\uD83D\uDD0A");
+        lane.muteBtn.setTextColor(getColor(
+                t.muted ? R.color.sl_teal2 : R.color.sl_mut));
+        // A muted lane dims; it is still excluded from every mix.
+        lane.wave.setAlpha(t.muted ? 0.4f : 1f);
     }
 
     private void onAddTrackClicked() {
@@ -2701,7 +2843,7 @@ public class MainActivity extends Activity {
             LibraryDb.Track created =
                     createNumberedTrack(currentEntryId);
             selectedTrackId = created.id;
-            refreshTrackPanel();
+            refreshLanes();
             setStatus("Track added.");
         } catch (Exception e) {
             setStatus("Could not add track: " + e.getMessage());
@@ -2719,7 +2861,7 @@ public class MainActivity extends Activity {
         try {
             libraryDb.setTrackLocked(trackId, locked);
             mTracks = libraryDb.listTracks(currentEntryId);
-            refreshTrackPanel();
+            refreshLanes();
             setStatus(getString(locked
                     ? R.string.track_locked : R.string.track_unlocked));
         } catch (Exception e) {
@@ -2727,7 +2869,11 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Mute toggle, mirroring toggleTrackLock; muting changes the mix. */
+    /**
+     * Mute toggle. Display-free: the lane dims and the mix file goes
+     * stale (rebuilt on demand for play/overdub/share). No peak
+     * recompute — each lane shows its own audio independently.
+     */
     private void toggleTrackMute(String trackId, boolean muted) {
         if (currentEntryId == null) {
             return;
@@ -2739,8 +2885,9 @@ public class MainActivity extends Activity {
         try {
             libraryDb.setTrackMuted(trackId, muted);
             mTracks = libraryDb.listTracks(currentEntryId);
-            refreshTrackPanel();
-            refreshMix();
+            refreshLanes();
+            mixDirty = true;
+            releasePlayer(); // the playing mix no longer matches
             setStatus(getString(muted
                     ? R.string.track_muted : R.string.track_unmuted));
         } catch (Exception e) {
@@ -2791,7 +2938,7 @@ public class MainActivity extends Activity {
                     try {
                         libraryDb.renameTrack(track.id, name);
                         mTracks = libraryDb.listTracks(currentEntryId);
-                        refreshTrackPanel();
+                        refreshLanes();
                     } catch (Exception e) {
                         setStatus("Rename failed: " + e.getMessage());
                     }
@@ -2980,21 +3127,28 @@ public class MainActivity extends Activity {
         if (entryId == null || trackId == null) {
             return;
         }
+        final WaveformView rtWave = laneWave(trackId);
         setBusy(true);
-        waveformView.startProgressAnimation();
+        if (rtWave != null) {
+            rtWave.startProgressAnimation();
+        }
         setStatus("Rendering track...");
         new Thread(() -> {
             try {
                 renderTrackBlocking(entryId, trackId);
                 runOnUiThread(() -> {
                     setBusy(false);
-                    waveformView.finishProgressAnimation();
+                    if (rtWave != null) {
+                        rtWave.finishProgressAnimation();
+                    }
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     setStatus("Render failed: " + e.getMessage());
                     setBusy(false);
-                    waveformView.clearProgress();
+                    if (rtWave != null) {
+                        rtWave.clearProgress();
+                    }
                 });
             }
         }).start();
@@ -3012,6 +3166,25 @@ public class MainActivity extends Activity {
             this.id = id;
             this.path = path;
         }
+    }
+
+    /**
+     * One per-track waveform lane: header (name/lock/mute), the track's
+     * own waveform on the shared project timeline, and a per-lane
+     * tune-up step overlay. contentDurSec is the lane's audio length;
+     * the project timeline is the max across lanes.
+     */
+    static final class TrackLane {
+        String trackId;
+        LinearLayout root;
+        TextView nameView;
+        Button lockBtn;
+        Button muteBtn;
+        WaveformView wave;
+        LinearLayout overlay;
+        LinearLayout steps;
+        TextView passTitle;
+        double contentDurSec;
     }
 
     /**
@@ -3098,28 +3271,145 @@ public class MainActivity extends Activity {
         return mixPath;
     }
 
-    /**
-     * In-memory mix peaks for the waveform display (call off the UI
-     * thread). Same mix as mixdownBlocking, but no file is written.
-     * Returns {"peaks_json", "duration_s"}.
-     */
-    private JSONObject mixPeaksBlocking(List<MixTrack> mixTracks)
-            throws Exception {
+    /** Peaks + duration for a WAV file (call off the UI thread). */
+    private static final class PeaksResult {
+        float[] peaks;
+        double dur;
+    }
+
+    private PeaksResult waveformPeaksBlocking(String path) throws Exception {
         if (!Python.isStarted()) {
             Python.start(new AndroidPlatform(this));
         }
-        JSONObject a = mixCallArgs(mixTracks);
-        PyObject result = Python.getInstance()
-                .getModule("audiofx.android_bridge")
-                .callAttr("mix_peaks", a.getString("tracks"), a.getInt("rate"),
-                        a.getString("muted"), 1200);
-        if (!"True".equals(result.callAttr("get", "ok").toString())) {
-            throw new Exception("mix peaks failed");
+        PyObject result = Python.getInstance().getModule("audiofx.android_bridge")
+                .callAttr("waveform_peaks", path, 1200);
+        // peaks_json is a Python str; PyObject.toString() gives str().
+        JSONArray arr = new JSONArray(result.callAttr("get", "peaks_json").toString());
+        PeaksResult r = new PeaksResult();
+        r.peaks = new float[arr.length()];
+        for (int i = 0; i < arr.length(); i++) {
+            r.peaks[i] = (float) arr.getDouble(i);
         }
-        JSONObject o = new JSONObject();
-        o.put("peaks_json", result.callAttr("get", "peaks_json").toString());
-        o.put("duration_s", result.callAttr("get", "duration_s").toString());
-        return o;
+        r.dur = Double.parseDouble(
+                result.callAttr("get", "duration_s").toString());
+        return r;
+    }
+
+    /**
+     * Reload one lane's peaks from its render file. The mix file goes
+     * stale (rebuilt on demand). A track with no render clears its lane.
+     */
+    private void refreshLanePeaks(String trackId) {
+        final String entryId = currentEntryId;
+        final TrackLane lane = trackId != null ? laneById.get(trackId) : null;
+        if (entryId == null || lane == null) {
+            return;
+        }
+        File render;
+        try {
+            render = libraryDb.trackRenderFile(trackId);
+        } catch (Exception e) {
+            return;
+        }
+        if (!render.exists() || render.length() <= 44) {
+            lane.wave.setPeaks(new float[0]);
+            lane.wave.setDuration(0);
+            lane.contentDurSec = 0;
+            updateProjectDuration();
+            mixDirty = true;
+            return;
+        }
+        final String path = render.getAbsolutePath();
+        final WaveformView wv = lane.wave;
+        setBusy(true);
+        wv.startProgressAnimation();
+        setStatus("Loading track...");
+        new Thread(() -> {
+            try {
+                final PeaksResult r = waveformPeaksBlocking(path);
+                runOnUiThread(() -> {
+                    wv.setPeaks(r.peaks);
+                    wv.setDuration(r.dur);
+                    lane.contentDurSec = r.dur;
+                    updateProjectDuration();
+                    tvTimeCur.setText("0:00");
+                    setPlayPauseEnabled(true);
+                    mixDirty = true;
+                    releasePlayer();
+                    btnStop.setEnabled(false);
+                    setBusy(false);
+                    wv.finishProgressAnimation();
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setStatus("Waveform failed: " + e.getMessage());
+                    setBusy(false);
+                    wv.clearProgress();
+                });
+            }
+        }).start();
+    }
+
+    /**
+     * Reload every lane's peaks from its render file (entry open, full
+     * re-render). The mix file goes stale (rebuilt on demand).
+     */
+    private void refreshAllLanePeaks() {
+        final String entryId = currentEntryId;
+        if (entryId == null || lanes.isEmpty()) {
+            return;
+        }
+        setBusy(true);
+        for (TrackLane lane : lanes) {
+            lane.wave.startProgressAnimation();
+        }
+        setStatus("Loading tracks...");
+        new Thread(() -> {
+            try {
+                final Map<String, PeaksResult> got = new HashMap<>();
+                for (TrackLane lane : lanes) {
+                    File render = libraryDb.trackRenderFile(lane.trackId);
+                    if (render.exists() && render.length() > 44) {
+                        got.put(lane.trackId, waveformPeaksBlocking(
+                                render.getAbsolutePath()));
+                    }
+                }
+                runOnUiThread(() -> {
+                    boolean anyAudio = false;
+                    for (TrackLane lane : lanes) {
+                        PeaksResult r = got.get(lane.trackId);
+                        if (r != null) {
+                            lane.wave.setPeaks(r.peaks);
+                            lane.wave.setDuration(r.dur);
+                            lane.contentDurSec = r.dur;
+                            anyAudio = true;
+                        } else {
+                            lane.wave.setPeaks(new float[0]);
+                            lane.wave.setDuration(0);
+                            lane.contentDurSec = 0;
+                        }
+                    }
+                    updateProjectDuration();
+                    tvTimeCur.setText("0:00");
+                    setPlayPauseEnabled(anyAudio);
+                    mixDirty = true;
+                    releasePlayer();
+                    btnStop.setEnabled(false);
+                    setBusy(false);
+                    for (TrackLane lane : lanes) {
+                        lane.wave.finishProgressAnimation();
+                    }
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setStatus("Waveform failed: " + e.getMessage());
+                    setBusy(false);
+                    for (TrackLane lane : lanes) {
+                        lane.wave.clearProgress();
+                    }
+                });
+            }
+        }).start();
     }
 
     /**
@@ -3162,93 +3452,7 @@ public class MainActivity extends Activity {
      * demand for playback, overdub, and share. With no audible tracks at
      * all, no Python runs: the view just clears.
      */
-    private void refreshMix() {
-        final String entryId = currentEntryId;
-        if (entryId == null) {
-            return;
-        }
-        final List<MixTrack> mixTracks = collectMixWavs();
-        final java.util.Set<String> mutedIds = new java.util.HashSet<>();
-        for (LibraryDb.Track t : mTracks) {
-            if (t.muted) {
-                mutedIds.add(t.id);
-            }
-        }
-        boolean anyAudible = false;
-        for (MixTrack mt : mixTracks) {
-            if (!mutedIds.contains(mt.id)) {
-                anyAudible = true;
-                break;
-            }
-        }
-        if (!anyAudible) {
-            clearMixView();
-            mixDirty = true;
-            if (!mixTracks.isEmpty()) {
-                setStatus("All tracks muted.");
-            }
-            return;
-        }
-        setBusy(true);
-        waveformView.startProgressAnimation();
-        setStatus("Mixing tracks...");
-        new Thread(() -> {
-            try {
-                final JSONObject peaks = mixPeaksBlocking(mixTracks);
-                final JSONArray arr =
-                        new JSONArray(peaks.getString("peaks_json"));
-                final float[] peakArr = new float[arr.length()];
-                for (int i = 0; i < arr.length(); i++) {
-                    peakArr[i] = (float) arr.getDouble(i);
-                }
-                final double dur =
-                        Double.parseDouble(peaks.getString("duration_s"));
-                runOnUiThread(() -> {
-                    waveformView.setPeaks(peakArr);
-                    waveformView.setDuration(dur);
-                    audioDurationSec = dur;
-                    tvTimeCur.setText("0:00");
-                    tvTimeTot.setText(fmtTime(dur));
-                    setPlayPauseEnabled(true);
-                    mixDirty = true;
-                    releasePlayer();
-                    btnStop.setEnabled(false);
-                    setBusy(false);
-                    waveformView.finishProgressAnimation();
-                });
-            } catch (Exception e) {
-                final boolean noAudible = e.getMessage() != null
-                        && e.getMessage().contains("no audible tracks");
-                runOnUiThread(() -> {
-                    if (noAudible) {
-                        // A render vanished mid-mix: empty mix, not an error.
-                        clearMixView();
-                        mixDirty = true;
-                        setBusy(false);
-                        waveformView.clearProgress();
-                        setStatus("All tracks muted.");
-                    } else {
-                        setStatus("Mix failed: " + e.getMessage());
-                        setBusy(false);
-                        waveformView.clearProgress();
-                    }
-                });
-            }
-        }).start();
-    }
-
-    /** Empty-mix view: clear the waveform, timers, and playback state. */
-    private void clearMixView() {
-        waveformView.setPeaks(new float[0]);
-        waveformView.setDuration(0);
-        audioDurationSec = 0;
-        currentOutputPath = null;
-        tvTimeCur.setText("0:00");
-        tvTimeTot.setText("0:00");
-        setPlayPauseEnabled(false);
-    }
-
-    /** A track's content changed: re-render that track, refresh the mix. */
+    /** A track's content changed: re-render that track, refresh its lane. */
     private void onTrackContentChanged(String trackId) {
         final String entryId = currentEntryId;
         if (entryId == null || trackId == null) {
@@ -3260,8 +3464,11 @@ public class MainActivity extends Activity {
         diagLastPath = null;
         diagTrackId = null;
         diagSummaryCache.clear();
+        final WaveformView tcWave = laneWave(trackId);
         setBusy(true);
-        waveformView.startProgressAnimation();
+        if (tcWave != null) {
+            tcWave.startProgressAnimation();
+        }
         setStatus("Rendering track...");
         new Thread(() -> {
             try {
@@ -3270,12 +3477,14 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     setStatus("Render failed: " + e.getMessage());
                     setBusy(false);
-                    waveformView.clearProgress();
+                    if (tcWave != null) {
+                        tcWave.clearProgress();
+                    }
                 });
                 return;
             }
-            // Hand the running progress animation to the mix.
-            runOnUiThread(() -> refreshMix());
+            // Hand the running progress animation to the lane refresh.
+            runOnUiThread(() -> refreshLanePeaks(trackId));
         }).start();
     }
 
@@ -3532,7 +3741,10 @@ public class MainActivity extends Activity {
         livePeakAcc = 0f;
         recorder.setBlockListener(this::onCaptureBlock);
         liveMonitor.setBlockListener(this::onCaptureBlock);
-        waveformView.startLive();
+        TrackLane recLane = laneById.get(pendingRecordTrackId);
+        if (recLane != null) {
+            recLane.wave.startLive();
+        }
         if (live) {
             // Effect params are snapshotted at record start; moving
             // sliders mid-take would do nothing, so lock them.
@@ -3565,7 +3777,9 @@ public class MainActivity extends Activity {
         btnJoin.setEnabled(true);
         btnNormalize.setEnabled(true);
         btnNormalize.setAlpha(1f);
-        waveformView.endLive();
+        for (TrackLane lane : lanes) {
+            lane.wave.endLive();
+        }
         recorder.setBlockListener(null);
         liveMonitor.setBlockListener(null);
         seekWarmth.setEnabled(true);
@@ -3596,7 +3810,7 @@ public class MainActivity extends Activity {
         exitRecordingUi();
         if (take == null) {
             // Zero audio captured: not a failure, keep the (empty) track.
-            refreshTrackPanel();
+            refreshLanes();
             if (pendingRecordTrackId != null) {
                 selectTrack(pendingRecordTrackId);
             }
@@ -3674,7 +3888,7 @@ public class MainActivity extends Activity {
             // pristine-load racing it.
             adoptLibraryEntry(entryId, false);
         }
-        refreshTrackPanel();
+        refreshLanes();
         onTrackContentChanged(trackId);
         setStatus(switchAutoNorm.isChecked()
                 ? "Take saved and normalized."
@@ -3725,11 +3939,10 @@ public class MainActivity extends Activity {
                     if (op.equals("trim")) {
                         // Duration unchanged: zero the affected peak buckets
                         // locally; the selection stays exactly as it was.
-                        // (audioDurationSec is already the rendered duration.)
                         zeroPeakRange(s, e != null ? e : audioDurationSec);
-                    } else {
-                        loadWaveformForPath(currentOutputPath);
                     }
+                    // Join changes duration: the end-of-op lane refresh
+                    // covers the display.
                 });
     }
 
@@ -3918,7 +4131,9 @@ public class MainActivity extends Activity {
         Double e = selEndSec;
         // The joined region disappears; drop the selection first so the
         // later waveform reload has nothing stale to clear.
-        waveformView.clearSelection();
+        if (waveformView != null) {
+            waveformView.clearSelection();
+        }
         editSelection("join", s, e);
     }
 
@@ -3988,9 +4203,9 @@ public class MainActivity extends Activity {
                         // Duration unchanged: zero the affected peak buckets
                         // locally; the selection stays exactly as it was.
                         zeroPeakRange(startSec, endSec != null ? endSec : dur);
-                    } else {
-                        loadWaveformForPath(outPath);
                     }
+                    // Join: legacy picked-file path (unreachable now that
+                    // picks become library entries); lanes cover display.
                     setStatus(msg);
                     setPlayPauseEnabled(true);
                     updateUndoBadge();
@@ -4010,19 +4225,26 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    /** Zero the displayed peak buckets overlapping the startSec/endSec window. */
+    /** Zero the displayed peak buckets overlapping the startSec/endSec window.
+     * The lane's peaks cover its own content (tracks start at 0, so
+     * project seconds are track seconds). */
     private void zeroPeakRange(double startSec, double endSec) {
-        float[] peaks = waveformView.getPeaks();
-        int n = peaks.length;
-        if (n == 0 || audioDurationSec <= 0) {
+        TrackLane lane = selectedLane();
+        if (lane == null) {
             return;
         }
-        int from = Math.max(0, (int) (startSec / audioDurationSec * n));
-        int to = Math.min(n, (int) Math.ceil(endSec / audioDurationSec * n));
+        float[] peaks = lane.wave.getPeaks();
+        int n = peaks.length;
+        double dur = lane.contentDurSec;
+        if (n == 0 || dur <= 0) {
+            return;
+        }
+        int from = Math.max(0, (int) (startSec / dur * n));
+        int to = Math.min(n, (int) Math.ceil(endSec / dur * n));
         for (int i = from; i < to; i++) {
             peaks[i] = 0f;
         }
-        waveformView.updatePeaks(peaks);
+        lane.wave.updatePeaks(peaks);
     }
 
     /** Enable/disable the buttons that must not run during an edit. */
@@ -4061,20 +4283,18 @@ public class MainActivity extends Activity {
         if (currentOutputPath == null || !(new File(currentOutputPath).exists())) {
             setPlayPauseEnabled(inputPath != null && new File(inputPath).exists());
         }
-        // Structural edits (trim/join) change the audio itself: reload the
-        // waveform so peaks and duration match the restored file.
-        String refreshPath = (currentOutputPath != null
-                && new File(currentOutputPath).exists()) ? currentOutputPath : inputPath;
-        if (refreshPath != null) {
-            loadWaveformForPath(refreshPath);
-        }
+        // Structural edits (trim/join) change the audio itself. Legacy
+        // picked-file path (unreachable now that picks become library
+        // entries); lanes cover the display.
         updateUndoBadge();
     }
 
     private void releasePlayer() {
         cancelScheduledStop();
         stopPositionUpdates();
-        waveformView.clearPlayback();
+        for (TrackLane lane : lanes) {
+            lane.wave.clearPlayback();
+        }
         if (player != null) {
             try {
                 player.stop();
@@ -4156,8 +4376,10 @@ public class MainActivity extends Activity {
                 e = Math.min(1f, se);
             }
         }
-        waveformView.setPlaybackRange(s, e);
-        waveformView.setPlaybackPosition(positionMs / 1000f / dur);
+        for (TrackLane lane : lanes) {
+            lane.wave.setPlaybackRange(s, e);
+            lane.wave.setPlaybackPosition(positionMs / 1000f / dur);
+        }
     }
 
     private void cancelScheduledStop() {
@@ -4319,7 +4541,9 @@ public class MainActivity extends Activity {
             player.setOnCompletionListener(mp -> {
                 isPaused = false;
                 stopPositionUpdates();
-                waveformView.clearPlayback();
+                for (TrackLane lane : lanes) {
+                    lane.wave.clearPlayback();
+                }
                 setStatus("Playback finished.");
                 setPlayPauseEnabled(true);
                 refreshPlayPause();
@@ -4490,7 +4714,7 @@ public class MainActivity extends Activity {
         }
         setBusy(true);
         setStatus("Saving tracks...");
-        waveformView.startProgressAnimation();
+        lanesProgressStart();
         new Thread(() -> {
             final List<String> saved = new ArrayList<>();
             String error = null;
@@ -4516,7 +4740,7 @@ public class MainActivity extends Activity {
             final String err = error;
             runOnUiThread(() -> {
                 setBusy(false);
-                waveformView.clearProgress();
+                lanesProgressClear();
                 if (err != null) {
                     setStatus("Save failed: " + err
                             + (n > 0 ? " (" + n + " saved before the error)"
@@ -4942,7 +5166,7 @@ public class MainActivity extends Activity {
         shareInProgress = true;
         setBusy(true);
         setStatus("Preparing mix...");
-        waveformView.startProgressAnimation();
+        lanesProgressStart();
         new Thread(() -> {
             try {
                 for (LibraryDb.Track t : mTracks) {
@@ -4959,9 +5183,8 @@ public class MainActivity extends Activity {
                     currentOutputPath = mixPath;
                     releasePlayer();
                     btnStop.setEnabled(false);
-                    loadWaveformForPath(mixPath);
                     setBusy(false);
-                    waveformView.finishProgressAnimation();
+                    lanesProgressFinish();
                     // Now the existing share pipeline on the fresh mix.
                     shareEncodeDone = false;
                     shareMp3Result = null;
@@ -4978,7 +5201,7 @@ public class MainActivity extends Activity {
                     setStatus(allMuted ? "All tracks muted."
                             : "Share failed: " + e.getMessage());
                     setBusy(false);
-                    waveformView.clearProgress();
+                    lanesProgressClear();
                 });
             }
         }).start();
