@@ -1231,7 +1231,19 @@ public class MainActivity extends Activity {
             try {
                 for (LibraryDb.Track t : mTracks) {
                     if (trackHasAudio(t)) {
-                        renderChainToCache(entryId, t.id);
+                        if (undoDepth(t.id) > 0) {
+                            renderChainToCache(entryId, t.id);
+                        } else {
+                            // No ops: the render IS the pristine. A file
+                            // copy skips the Python DSP pass entirely.
+                            copyFile(new File(t.wavPath),
+                                    libraryDb.trackRenderFile(t.id));
+                            // The Python tip cache was not seeded: force
+                            // the next op to take the full render path.
+                            if (("track:" + t.id).equals(tipCacheKey)) {
+                                tipCacheKey = null;
+                            }
+                        }
                     }
                 }
                 runOnUiThread(() -> {
@@ -2824,9 +2836,9 @@ public class MainActivity extends Activity {
         lane.lockBtn.setText(t.locked ? "\uD83D\uDD12" : "\uD83D\uDD13");
         lane.lockBtn.setTextColor(getColor(
                 t.locked ? R.color.sl_teal2 : R.color.sl_mut));
-        // Locked is unmistakable: teal-tinted background, not just a tint.
+        // Locked is unmistakable: solid red chip, not just a tint.
         lane.lockBtn.setBackgroundResource(t.locked
-                ? R.drawable.bg_chip_selected : R.drawable.bg_zoom_btn);
+                ? R.drawable.bg_chip_locked : R.drawable.bg_zoom_btn);
         lane.muteBtn.setText(t.muted ? "\uD83D\uDD07" : "\uD83D\uDD0A");
         lane.muteBtn.setTextColor(getColor(
                 t.muted ? R.color.sl_teal2 : R.color.sl_mut));

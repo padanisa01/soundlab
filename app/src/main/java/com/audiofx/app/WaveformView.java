@@ -272,6 +272,11 @@ public class WaveformView extends View {
 
     /** Fraction of the project width this lane's content occupies. */
     private float contentFrac() {
+        // Live take: fill the lane; squeezing it into the project
+        // timeline would shrink it to a sliver on long projects.
+        if (liveMode) {
+            return 1f;
+        }
         if (projectDurationSec > 0 && durationSec > 0
                 && durationSec < projectDurationSec) {
             return (float) (durationSec / projectDurationSec);
@@ -595,7 +600,8 @@ public class WaveformView extends View {
         // Time axis in seconds, over the visible range. On the shared
         // project timeline the ticks read in project seconds so lanes
         // align; otherwise they read in the lane's own seconds.
-        double axisSec = projectDurationSec > 0 ? projectDurationSec : durationSec;
+        double axisSec = (projectDurationSec > 0 && !liveMode)
+                ? projectDurationSec : durationSec;
         if (axisSec > 0) {
             double visStartSec = viewStart * axisSec;
             double visEndSec = Math.min(axisSec, (viewStart + 1f / zoom) * axisSec);
