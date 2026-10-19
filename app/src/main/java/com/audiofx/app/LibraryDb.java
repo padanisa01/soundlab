@@ -13,26 +13,39 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
  * Plain SQLiteOpenHelper for the SoundLab "Library of recordings" feature.
  *
- * One immutable pristine WAV per entry (getFilesDir()/library/takes/<uuid>.wav)
- * plus an ordered, re-runnable op chain in {@code ops}. The cached render lives
- * at getFilesDir()/library/render/<uuid>.wav and is regenerable.
+ * Multitrack model (DB v2): one library entry = one project. A project owns
+ * N tracks (the {@code tracks} table); each track has its own immutable
+ * pristine WAV at getFilesDir()/library/tracks/&lt;trackId&gt;.wav and its
+ * own ordered, re-runnable op chain in {@code ops}, scoped by track_id. The
+ * per-track cached render lives at
+ * getFilesDir()/library/render/track_&lt;trackId&gt;.wav and the project mix
+ * cache at getFilesDir()/library/render/mix_&lt;entryId&gt;.wav; both are
+ * regenerable.
+ *
+ * Legacy single-take entries (created before tracks existed) keep their take
+ * at getFilesDir()/library/takes/&lt;entryId&gt;.wav. Calling
+ * ensureTracks(entryId, pristinePath) adopts it as "Track 1" without copying
+ * the file and re-points the legacy entry-level ops at the new track.
  *
  * Op types in use: 'livefx' (display-only, never rendered), 'fx', 'normalize',
- * 'trim', 'join', 'fork' (display-only marker, never rendered). Callers that
- * render via render_chain must filter out 'livefx' and 'fork' ops.
+ * 'trim', 'join', 'fork' (entry-level display-only marker with NULL track_id,
+ * never rendered). Callers that render via render_chain must filter out
+ * 'livefx' and 'fork' ops.
  */
 public class LibraryDb extends SQLiteOpenHelper {
 
     public static final String DSP_VERSION = "1";
 
     private static final String DB_NAME = "soundlab_library.db";
-    private static final int DB_VERSION = 1;
+    private static final int DB_VERSION = 2;
 
     private final Context mAppContext;
 
@@ -61,9 +74,21 @@ public class LibraryDb extends SQLiteOpenHelper {
                 + "  dsp_version TEXT,\n"
                 + "  pristine_path TEXT NOT NULL\n"
                 + ")");
+        db.execSQL("CREATE TABLE tracks(\n"
+                + "  id TEXT PRIMARY KEY,\n"
+                + "  entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,\n"
+                + "  name TEXT NOT NULL,\n"
+                + "  wav_path TEXT NOT NULL,\n"
+                + "  locked INTEGER NOT NULL DEFAULT 0,\n"
+                + "  position INTEGER NOT NULL,\n"
+                + "  created_at INTEGER NOT NULL,\n"
+                + "  updated_at INTEGER NOT NULL\n"
+                + ")");
+        db.execSQL("CREATE INDEX idx_tracks_entry ON tracks(entry_id, position)");
         db.execSQL("CREATE TABLE ops(\n"
                 + "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n"
                 + "  entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,\n"
+                + "  track_id TEXT REFERENCES tracks(id) ON DELETE CASCADE,\n"
                 + "  seq INTEGER NOT NULL,\n"
                 + "  op_type TEXT NOT NULL,\n"
                 + "  params_json TEXT NOT NULL,\n"
@@ -71,6 +96,7 @@ public class LibraryDb extends SQLiteOpenHelper {
                 + "  created_at INTEGER NOT NULL\n"
                 + ")");
         db.execSQL("CREATE INDEX idx_ops_entry ON ops(entry_id, seq)");
+        db.execSQL("CREATE INDEX idx_ops_track ON ops(track_id)");
         db.execSQL("CREATE TABLE exports(\n"
                 + "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n"
                 + "  entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,\n"
@@ -84,11 +110,51 @@ public class LibraryDb extends SQLiteOpenHelper {
 
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        // Fresh v1: no migration, drop and recreate.
-        db.execSQL("DROP TABLE IF EXISTS exports");
-        db.execSQL("DROP TABLE IF EXISTS ops");
-        db.execSQL("DROP TABLE IF EXISTS entries");
-        onCreate(db);
+        if (oldVersion < 2) {
+            // DB v2: multitrack. SQLite rejects ALTER TABLE ... ADD COLUMN
+            // with a REFERENCES clause while foreign keys are enforced, so
+            // the ops table is rebuilt with the track_id column and a real
+            // FK instead. All rows are copied; no user data is lost.
+            db.beginTransaction();
+            try {
+                db.execSQL("CREATE TABLE tracks(\n"
+                        + "  id TEXT PRIMARY KEY,\n"
+                        + "  entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,\n"
+                        + "  name TEXT NOT NULL,\n"
+                        + "  wav_path TEXT NOT NULL,\n"
+                        + "  locked INTEGER NOT NULL DEFAULT 0,\n"
+                        + "  position INTEGER NOT NULL,\n"
+                        + "  created_at INTEGER NOT NULL,\n"
+                        + "  updated_at INTEGER NOT NULL\n"
+                        + ")");
+                db.execSQL("CREATE INDEX idx_tracks_entry ON tracks(entry_id, position)");
+                db.execSQL("CREATE TABLE ops_new(\n"
+                        + "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+                        + "  entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,\n"
+                        + "  track_id TEXT REFERENCES tracks(id) ON DELETE CASCADE,\n"
+                        + "  seq INTEGER NOT NULL,\n"
+                        + "  op_type TEXT NOT NULL,\n"
+                        + "  params_json TEXT NOT NULL,\n"
+                        + "  label TEXT NOT NULL,\n"
+                        + "  created_at INTEGER NOT NULL\n"
+                        + ")");
+                db.execSQL("INSERT INTO ops_new (id, entry_id, seq, op_type,"
+                        + " params_json, label, created_at)"
+                        + " SELECT id, entry_id, seq, op_type, params_json,"
+                        + " label, created_at FROM ops");
+                db.execSQL("DROP TABLE ops");
+                db.execSQL("ALTER TABLE ops_new RENAME TO ops");
+                // Keep AUTOINCREMENT continuing past the copied max row id.
+                db.execSQL("INSERT INTO sqlite_sequence (name, seq)"
+                        + " SELECT 'ops', MAX(id) FROM ops"
+                        + " HAVING MAX(id) IS NOT NULL");
+                db.execSQL("CREATE INDEX idx_ops_entry ON ops(entry_id, seq)");
+                db.execSQL("CREATE INDEX idx_ops_track ON ops(track_id)");
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -115,6 +181,21 @@ public class LibraryDb extends SQLiteOpenHelper {
     /** getFilesDir()/library/render/&lt;id&gt;.wav (dirs created on demand). */
     public File renderFile(String entryId) {
         return mkdirsParent(new File(libraryDir(), "render/" + entryId + ".wav"));
+    }
+
+    /** getFilesDir()/library/tracks/&lt;id&gt;.wav (dirs created on demand). */
+    public File trackTakeFile(String trackId) {
+        return mkdirsParent(new File(libraryDir(), "tracks/" + trackId + ".wav"));
+    }
+
+    /** getFilesDir()/library/render/track_&lt;id&gt;.wav (dirs created on demand). */
+    public File trackRenderFile(String trackId) {
+        return mkdirsParent(new File(libraryDir(), "render/track_" + trackId + ".wav"));
+    }
+
+    /** getFilesDir()/library/render/mix_&lt;entryId&gt;.wav (dirs created on demand). */
+    public File mixFile(String entryId) {
+        return mkdirsParent(new File(libraryDir(), "render/mix_" + entryId + ".wav"));
     }
 
     // ------------------------------------------------------------------
@@ -205,12 +286,18 @@ public class LibraryDb extends SQLiteOpenHelper {
     }
 
     /**
-     * Deletes the entry's DB rows (ops and exports cascade) AND the take +
+     * Deletes the entry's DB rows (tracks and ops cascade via FK) AND the
+     * legacy take + render files, the mix file, and every track's take +
      * render files. Missing files are ignored.
      */
     public synchronized void deleteEntry(String id) {
         deleteIfExists(takeFile(id));
         deleteIfExists(renderFile(id));
+        deleteIfExists(mixFile(id));
+        for (Track t : listTracks(id)) {
+            deleteIfExists(trackTakeFile(t.id));
+            deleteIfExists(trackRenderFile(t.id));
+        }
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
@@ -228,9 +315,11 @@ public class LibraryDb extends SQLiteOpenHelper {
     }
 
     /**
-     * Forks an entry: new UUID, pristine file copied, all ops copied
-     * preserving seq, plus a first (seq=0) display-only "fork" marker op with
-     * label "Forked from &lt;old name&gt;".
+     * Forks an entry: new UUID, pristine file copied, tracks duplicated (new
+     * UUIDs, wav files copied, same names/locked/position), each track's ops
+     * copied preserving seq with remapped track_id, plus a first (seq=0)
+     * entry-level display-only "fork" marker op (NULL track_id) with label
+     * "Forked from &lt;old name&gt;".
      *
      * The fork marker is display-only: render_chain callers must filter out
      * op types 'livefx' and 'fork' before rendering.
@@ -253,6 +342,23 @@ public class LibraryDb extends SQLiteOpenHelper {
         long now = System.currentTimeMillis();
         copyFile(srcTake, takeFile(newId));
 
+        // Copy track wav files up front (mirrors the pristine copy above).
+        // A missing track wav does not abort the fork; the track row still
+        // points at its conventional path.
+        List<Track> srcTracks = listTracks(id);
+        Map<String, String> trackIdMap = new LinkedHashMap<>();
+        Map<String, String> trackWavPath = new LinkedHashMap<>();
+        for (Track t : srcTracks) {
+            String newTrackId = UUID.randomUUID().toString();
+            trackIdMap.put(t.id, newTrackId);
+            File dstWav = trackTakeFile(newTrackId);
+            File srcWav = new File(t.wavPath);
+            if (srcWav.isFile()) {
+                copyFile(srcWav, dstWav);
+            }
+            trackWavPath.put(newTrackId, dstWav.getAbsolutePath());
+        }
+
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
@@ -270,10 +376,29 @@ public class LibraryDb extends SQLiteOpenHelper {
             cv.put("pristine_path", takeFile(newId).getAbsolutePath());
             db.insertOrThrow("entries", null, cv);
 
-            // Copy ops preserving seq.
-            for (Op op : listOps(id)) {
+            // Duplicate tracks: new UUIDs, same name/locked/position.
+            for (Track t : srcTracks) {
+                String newTrackId = trackIdMap.get(t.id);
+                ContentValues tcv = new ContentValues();
+                tcv.put("id", newTrackId);
+                tcv.put("entry_id", newId);
+                tcv.put("name", t.name);
+                tcv.put("wav_path", trackWavPath.get(newTrackId));
+                tcv.put("locked", t.locked ? 1 : 0);
+                tcv.put("position", t.position);
+                tcv.put("created_at", now);
+                tcv.put("updated_at", now);
+                db.insertOrThrow("tracks", null, tcv);
+            }
+
+            // Copy ops preserving seq, remapping track_id onto the new
+            // tracks. Entry-level rows (NULL track_id, e.g. older fork
+            // markers) keep NULL track_id.
+            for (Op op : listAllOps(db, id)) {
                 ContentValues ocv = new ContentValues();
                 ocv.put("entry_id", newId);
+                ocv.put("track_id", op.trackId == null ? null
+                        : trackIdMap.get(op.trackId));
                 ocv.put("seq", op.seq);
                 ocv.put("op_type", op.opType);
                 ocv.put("params_json", op.paramsJson);
@@ -285,6 +410,7 @@ public class LibraryDb extends SQLiteOpenHelper {
             // Fork marker: seq 0 sorts first; display-only, never rendered.
             ContentValues fcv = new ContentValues();
             fcv.put("entry_id", newId);
+            fcv.put("track_id", (String) null);
             fcv.put("seq", 0);
             fcv.put("op_type", "fork");
             fcv.put("params_json", "{\"from_id\":\"" + escapeJson(src.id)
@@ -331,31 +457,207 @@ public class LibraryDb extends SQLiteOpenHelper {
     }
 
     // ------------------------------------------------------------------
-    // Ops
+    // Tracks
     // ------------------------------------------------------------------
 
     /**
-     * Appends an op. seq = max existing seq + 1, starting at 1 (the 'fork'
-     * marker uses seq 0 so it always sorts first). Bumps entries.updated_at.
+     * Creates a track on the entry. Generates a UUID; the take path is
+     * trackTakeFile(newId). position = max existing + 1, starting at 1.
+     * Returns the new Track.
+     */
+    public synchronized Track createTrack(String entryId, String name) {
+        String newId = UUID.randomUUID().toString();
+        long now = System.currentTimeMillis();
+        String wavPath = trackTakeFile(newId).getAbsolutePath();
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        int position;
+        try {
+            position = 1;
+            try (Cursor c = db.rawQuery(
+                    "SELECT MAX(position) FROM tracks WHERE entry_id=?",
+                    new String[]{entryId})) {
+                if (c.moveToFirst() && !c.isNull(0)) {
+                    position = c.getInt(0) + 1;
+                }
+            }
+            ContentValues cv = new ContentValues();
+            cv.put("id", newId);
+            cv.put("entry_id", entryId);
+            cv.put("name", name);
+            cv.put("wav_path", wavPath);
+            cv.put("locked", 0);
+            cv.put("position", position);
+            cv.put("created_at", now);
+            cv.put("updated_at", now);
+            db.insertOrThrow("tracks", null, cv);
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+        return new Track(newId, entryId, name, wavPath, false, position,
+                now, now);
+    }
+
+    /** All tracks for the entry, ORDER BY position ASC. */
+    public List<Track> listTracks(String entryId) {
+        List<Track> out = new ArrayList<>();
+        SQLiteDatabase db = getReadableDatabase();
+        try (Cursor c = db.query("tracks", null, "entry_id=?",
+                new String[]{entryId}, null, null, "position ASC")) {
+            while (c.moveToNext()) {
+                out.add(readTrack(c));
+            }
+        }
+        return out;
+    }
+
+    /** Returns the track, or null when missing. */
+    public Track getTrack(String trackId) {
+        SQLiteDatabase db = getReadableDatabase();
+        try (Cursor c = db.query("tracks", null, "id=?",
+                new String[]{trackId}, null, null, null)) {
+            if (!c.moveToFirst()) {
+                return null;
+            }
+            return readTrack(c);
+        }
+    }
+
+    /** Renames the track; also bumps the parent entry's updated_at. */
+    public synchronized void renameTrack(String trackId, String name) {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            String entryId = null;
+            try (Cursor c = db.query("tracks", new String[]{"entry_id"},
+                    "id=?", new String[]{trackId}, null, null, null)) {
+                if (c.moveToFirst()) {
+                    entryId = c.getString(0);
+                }
+            }
+            if (entryId != null) {
+                ContentValues cv = new ContentValues();
+                cv.put("name", name);
+                cv.put("updated_at", System.currentTimeMillis());
+                db.update("tracks", cv, "id=?", new String[]{trackId});
+                bumpUpdatedAt(db, entryId);
+            }
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    /** Sets the track's locked flag (and bumps the track's updated_at). */
+    public synchronized void setTrackLocked(String trackId, boolean locked) {
+        SQLiteDatabase db = getWritableDatabase();
+        ContentValues cv = new ContentValues();
+        cv.put("locked", locked ? 1 : 0);
+        cv.put("updated_at", System.currentTimeMillis());
+        db.update("tracks", cv, "id=?", new String[]{trackId});
+    }
+
+    /**
+     * Deletes the track's take + render files, then the row (the track's
+     * ops cascade via FK). Missing files are ignored.
+     */
+    public synchronized void deleteTrack(String trackId) {
+        deleteIfExists(trackTakeFile(trackId));
+        deleteIfExists(trackRenderFile(trackId));
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            db.delete("tracks", "id=?", new String[]{trackId});
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    /**
+     * Migration helper for legacy single-take entries: when the entry has
+     * no tracks, creates "Track 1" reusing the legacy pristine file (no
+     * copy) and adopts the legacy entry-level ops (track_id IS NULL) onto
+     * it. Returns listTracks(entryId).
+     */
+    public synchronized List<Track> ensureTracks(String entryId,
+            String legacyPristinePath) {
+        List<Track> existing = listTracks(entryId);
+        if (!existing.isEmpty()) {
+            return existing;
+        }
+        String newId = UUID.randomUUID().toString();
+        long now = System.currentTimeMillis();
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            ContentValues cv = new ContentValues();
+            cv.put("id", newId);
+            cv.put("entry_id", entryId);
+            cv.put("name", "Track 1");
+            cv.put("wav_path", legacyPristinePath);
+            cv.put("locked", 0);
+            cv.put("position", 1);
+            cv.put("created_at", now);
+            cv.put("updated_at", now);
+            db.insertOrThrow("tracks", null, cv);
+            ContentValues ocv = new ContentValues();
+            ocv.put("track_id", newId);
+            db.update("ops", ocv, "entry_id=? AND track_id IS NULL",
+                    new String[]{entryId});
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+        return listTracks(entryId);
+    }
+
+    private static Track readTrack(Cursor c) {
+        return new Track(
+                c.getString(c.getColumnIndexOrThrow("id")),
+                c.getString(c.getColumnIndexOrThrow("entry_id")),
+                c.getString(c.getColumnIndexOrThrow("name")),
+                c.getString(c.getColumnIndexOrThrow("wav_path")),
+                c.getInt(c.getColumnIndexOrThrow("locked")) != 0,
+                c.getInt(c.getColumnIndexOrThrow("position")),
+                c.getLong(c.getColumnIndexOrThrow("created_at")),
+                c.getLong(c.getColumnIndexOrThrow("updated_at")));
+    }
+
+    // ------------------------------------------------------------------
+    // Ops (track-scoped)
+    // ------------------------------------------------------------------
+
+    /**
+     * Appends an op to the track's chain. seq = max existing seq for the
+     * track + 1, starting at 1 (the entry-level 'fork' marker uses seq 0 so
+     * it always sorts first). Bumps entries.updated_at.
      *
      * @return the new op row id
+     * @throws IllegalArgumentException if trackId is null or empty
      */
-    public synchronized long addOp(String entryId, String opType,
+    public synchronized long addOp(String entryId, String trackId, String opType,
             String paramsJson, String label) {
+        if (trackId == null || trackId.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "trackId must not be null or empty");
+        }
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         long rowId;
         try {
             int nextSeq = 1;
             try (Cursor c = db.rawQuery(
-                    "SELECT MAX(seq) FROM ops WHERE entry_id=?",
-                    new String[]{entryId})) {
+                    "SELECT MAX(seq) FROM ops WHERE entry_id=? AND track_id=?",
+                    new String[]{entryId, trackId})) {
                 if (c.moveToFirst() && !c.isNull(0)) {
                     nextSeq = c.getInt(0) + 1;
                 }
             }
             ContentValues cv = new ContentValues();
             cv.put("entry_id", entryId);
+            cv.put("track_id", trackId);
             cv.put("seq", nextSeq);
             cv.put("op_type", opType);
             cv.put("params_json", paramsJson);
@@ -371,18 +673,25 @@ public class LibraryDb extends SQLiteOpenHelper {
     }
 
     /**
-     * Deletes the highest-seq op row. Returns false when there are no ops.
-     * Bumps entries.updated_at on success.
+     * Deletes the track's highest-seq op row. Returns false when the track
+     * has no ops. Bumps entries.updated_at on success.
+     *
+     * @throws IllegalArgumentException if trackId is null or empty
      */
-    public synchronized boolean popLastOp(String entryId) {
+    public synchronized boolean popLastOp(String entryId, String trackId) {
+        if (trackId == null || trackId.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "trackId must not be null or empty");
+        }
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         boolean popped = false;
         try {
             Long rowId = null;
             try (Cursor c = db.rawQuery(
-                    "SELECT id FROM ops WHERE entry_id=? ORDER BY seq DESC LIMIT 1",
-                    new String[]{entryId})) {
+                    "SELECT id FROM ops WHERE entry_id=? AND track_id=?"
+                            + " ORDER BY seq DESC LIMIT 1",
+                    new String[]{entryId, trackId})) {
                 if (c.moveToFirst()) {
                     rowId = c.getLong(0);
                 }
@@ -399,24 +708,44 @@ public class LibraryDb extends SQLiteOpenHelper {
         return popped;
     }
 
-    /** All ops for the entry, ORDER BY seq ASC. */
-    public List<Op> listOps(String entryId) {
+    /** All ops for the track, ORDER BY seq ASC. */
+    public List<Op> listOps(String entryId, String trackId) {
         List<Op> out = new ArrayList<>();
         SQLiteDatabase db = getReadableDatabase();
-        try (Cursor c = db.query("ops", null, "entry_id=?",
-                new String[]{entryId}, null, null, "seq ASC")) {
+        try (Cursor c = db.query("ops", null, "entry_id=? AND track_id=?",
+                new String[]{entryId, trackId}, null, null, "seq ASC")) {
             while (c.moveToNext()) {
-                out.add(new Op(
-                        c.getLong(c.getColumnIndexOrThrow("id")),
-                        c.getString(c.getColumnIndexOrThrow("entry_id")),
-                        c.getInt(c.getColumnIndexOrThrow("seq")),
-                        c.getString(c.getColumnIndexOrThrow("op_type")),
-                        c.getString(c.getColumnIndexOrThrow("params_json")),
-                        c.getString(c.getColumnIndexOrThrow("label")),
-                        c.getLong(c.getColumnIndexOrThrow("created_at"))));
+                out.add(readOp(c));
             }
         }
         return out;
+    }
+
+    /**
+     * All ops for the entry across tracks (plus entry-level rows with NULL
+     * track_id), ORDER BY seq ASC. Internal helper for duplicateEntry.
+     */
+    private List<Op> listAllOps(SQLiteDatabase db, String entryId) {
+        List<Op> out = new ArrayList<>();
+        try (Cursor c = db.query("ops", null, "entry_id=?",
+                new String[]{entryId}, null, null, "seq ASC")) {
+            while (c.moveToNext()) {
+                out.add(readOp(c));
+            }
+        }
+        return out;
+    }
+
+    private static Op readOp(Cursor c) {
+        return new Op(
+                c.getLong(c.getColumnIndexOrThrow("id")),
+                c.getString(c.getColumnIndexOrThrow("entry_id")),
+                c.getString(c.getColumnIndexOrThrow("track_id")),
+                c.getInt(c.getColumnIndexOrThrow("seq")),
+                c.getString(c.getColumnIndexOrThrow("op_type")),
+                c.getString(c.getColumnIndexOrThrow("params_json")),
+                c.getString(c.getColumnIndexOrThrow("label")),
+                c.getLong(c.getColumnIndexOrThrow("created_at")));
     }
 
     // ------------------------------------------------------------------
@@ -540,19 +869,45 @@ public class LibraryDb extends SQLiteOpenHelper {
         }
     }
 
+    public static class Track {
+        public final String id;
+        public final String entryId;
+        public final String name;
+        public final String wavPath;
+        public final boolean locked;
+        public final int position;
+        public final long createdAt;
+        public final long updatedAt;
+
+        public Track(String id, String entryId, String name, String wavPath,
+                boolean locked, int position, long createdAt, long updatedAt) {
+            this.id = id;
+            this.entryId = entryId;
+            this.name = name;
+            this.wavPath = wavPath;
+            this.locked = locked;
+            this.position = position;
+            this.createdAt = createdAt;
+            this.updatedAt = updatedAt;
+        }
+    }
+
     public static class Op {
         public final long rowId;
         public final String entryId;
+        public final String trackId;
         public final int seq;
         public final String opType;
         public final String paramsJson;
         public final String label;
         public final long createdAt;
 
-        public Op(long rowId, String entryId, int seq, String opType,
-                String paramsJson, String label, long createdAt) {
+        public Op(long rowId, String entryId, String trackId, int seq,
+                String opType, String paramsJson, String label,
+                long createdAt) {
             this.rowId = rowId;
             this.entryId = entryId;
+            this.trackId = trackId;
             this.seq = seq;
             this.opType = opType;
             this.paramsJson = paramsJson;
