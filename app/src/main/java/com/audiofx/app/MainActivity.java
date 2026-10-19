@@ -136,7 +136,10 @@ public class MainActivity extends Activity {
     private String selectedTrackId;
     private LinearLayout trackPanel;
     private LinearLayout trackList;
-    private Button btnAddTrack;
+    private TextView waveformTrackTitle;
+    private Button btnHdrLock;
+    private Button btnHdrMute;
+    private Button btnHdrAddTrack;
 
     private String inputPath;   // cached WAV picked by the user, or a library pristine
     private String inputFileName = "audio.wav";
@@ -433,8 +436,6 @@ public class MainActivity extends Activity {
         seekWarmth.setOnSeekBarChangeListener(sliderListener());
         seekEcho.setOnSeekBarChangeListener(sliderListener());
         updateSliderLabels();
-        findViewById(R.id.btn_zoom_in).setOnClickListener(v -> waveformView.zoomBy(1.4f));
-        findViewById(R.id.btn_zoom_out).setOnClickListener(v -> waveformView.zoomBy(1f / 1.4f));
         btnSelClear.setOnClickListener(v -> waveformView.clearSelection());
         chipStudio.setOnClickListener(v -> selectReverb("studio"));
         chipHall.setOnClickListener(v -> selectReverb("concert_hall"));
@@ -459,8 +460,30 @@ public class MainActivity extends Activity {
         btnRecord.setOnClickListener(v -> onRecordClicked());
         trackPanel = findViewById(R.id.track_panel);
         trackList = findViewById(R.id.track_list);
-        btnAddTrack = findViewById(R.id.btn_add_track);
-        btnAddTrack.setOnClickListener(v -> onAddTrackClicked());
+        waveformTrackTitle = findViewById(R.id.waveform_track_title);
+        btnHdrLock = findViewById(R.id.btn_hdr_lock);
+        btnHdrMute = findViewById(R.id.btn_hdr_mute);
+        btnHdrAddTrack = findViewById(R.id.btn_hdr_add_track);
+        waveformTrackTitle.setOnClickListener(v -> {
+            LibraryDb.Track t = getSelectedTrack();
+            if (t == null || isRecordingSession()) {
+                return;
+            }
+            showRenameTrackDialog(t);
+        });
+        btnHdrLock.setOnClickListener(v -> {
+            LibraryDb.Track t = getSelectedTrack();
+            if (t != null) {
+                toggleTrackLock(t.id, !t.locked);
+            }
+        });
+        btnHdrMute.setOnClickListener(v -> {
+            LibraryDb.Track t = getSelectedTrack();
+            if (t != null) {
+                toggleTrackMute(t.id, !t.muted);
+            }
+        });
+        btnHdrAddTrack.setOnClickListener(v -> onAddTrackClicked());
         btnStop.setOnClickListener(v -> {
             if (isRecordingSession()) {
                 // During a recording session btnStop is the pause button.
@@ -2537,6 +2560,7 @@ public class MainActivity extends Activity {
 
     /** Rebuild the track panel rows for the open entry. */
     private void refreshTrackPanel() {
+        refreshWaveformHeader();
         if (trackPanel == null) {
             return;
         }
@@ -2550,6 +2574,34 @@ public class MainActivity extends Activity {
         for (LibraryDb.Track t : mTracks) {
             trackList.addView(buildTrackRow(t, density));
         }
+    }
+
+    /**
+     * Waveform card header: the selected track's name (tap to rename) plus
+     * its lock/mute toggles and the add-track button. With no track
+     * selected (picked file, empty project) it falls back to the plain
+     * WAVEFORM label and the track buttons hide.
+     */
+    private void refreshWaveformHeader() {
+        LibraryDb.Track t = getSelectedTrack();
+        if (t == null) {
+            waveformTrackTitle.setText("WAVEFORM");
+            btnHdrLock.setVisibility(View.GONE);
+            btnHdrMute.setVisibility(View.GONE);
+            btnHdrAddTrack.setVisibility(
+                    currentEntryId != null ? View.VISIBLE : View.GONE);
+            return;
+        }
+        waveformTrackTitle.setText(t.name);
+        btnHdrLock.setVisibility(View.VISIBLE);
+        btnHdrMute.setVisibility(View.VISIBLE);
+        btnHdrAddTrack.setVisibility(View.VISIBLE);
+        btnHdrLock.setText(t.locked ? "\uD83D\uDD12" : "\uD83D\uDD13");
+        btnHdrLock.setTextColor(getColor(
+                t.locked ? R.color.sl_teal2 : R.color.sl_mut));
+        btnHdrMute.setText(t.muted ? "\uD83D\uDD07" : "\uD83D\uDD0A");
+        btnHdrMute.setTextColor(getColor(
+                t.muted ? R.color.sl_teal2 : R.color.sl_mut));
     }
 
     /**

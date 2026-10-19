@@ -177,17 +177,6 @@
                         android:textSize="13sp"
                         android:textStyle="bold"
                         android:letterSpacing="0.08" />
-
-                    <Button
-                        android:id="@+id/btn_add_track"
-                        android:layout_width="32dp"
-                        android:layout_height="32dp"
-                        android:background="@drawable/bg_zoom_btn"
-                        android:contentDescription="@string/add_track"
-                        android:padding="0dp"
-                        android:text="+"
-                        android:textColor="@color/sl_txt"
-                        android:textSize="16sp" />
                 </LinearLayout>
 
                 <LinearLayout
@@ -214,6 +203,7 @@
                     android:orientation="horizontal">
 
                     <TextView
+                        android:id="@+id/waveform_track_title"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
@@ -221,25 +211,39 @@
                         android:textColor="@color/sl_mut"
                         android:textSize="13sp"
                         android:textStyle="bold"
-                        android:letterSpacing="0.08" />
+                        android:letterSpacing="0.08"
+                        android:singleLine="true"
+                        android:ellipsize="end" />
 
                     <Button
-                        android:id="@+id/btn_zoom_in"
+                        android:id="@+id/btn_hdr_lock"
                         android:layout_width="28dp"
                         android:layout_height="28dp"
                         android:background="@drawable/bg_zoom_btn"
-                        android:text="+"
+                        android:text="&#xD83D;&#xDD13;"
                         android:textColor="@color/sl_txt"
-                        android:textSize="16sp"
+                        android:textSize="14sp"
                         android:padding="0dp" />
 
                     <Button
-                        android:id="@+id/btn_zoom_out"
+                        android:id="@+id/btn_hdr_mute"
                         android:layout_width="28dp"
                         android:layout_height="28dp"
                         android:layout_marginStart="6dp"
                         android:background="@drawable/bg_zoom_btn"
-                        android:text="−"
+                        android:text="&#xD83D;&#xDD0A;"
+                        android:textColor="@color/sl_txt"
+                        android:textSize="14sp"
+                        android:padding="0dp" />
+
+                    <Button
+                        android:id="@+id/btn_hdr_add_track"
+                        android:layout_width="28dp"
+                        android:layout_height="28dp"
+                        android:layout_marginStart="6dp"
+                        android:background="@drawable/bg_zoom_btn"
+                        android:contentDescription="@string/add_track"
+                        android:text="+"
                         android:textColor="@color/sl_txt"
                         android:textSize="16sp"
                         android:padding="0dp" />
@@ -453,7 +457,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:text="Tap waveform: start marker · tap again: end marker · double-tap: clear · scroll or +/−: zoom · drag: pan when zoomed"
+                    android:text="Tap waveform: start marker · tap again: end marker · double-tap: clear · scroll or pinch: zoom · drag: pan when zoomed"
                     android:textColor="@color/sl_dim"
                     android:textSize="11.5sp" />
             </LinearLayout>

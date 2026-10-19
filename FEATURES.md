@@ -226,7 +226,10 @@ or the plan changes.
 - **Track panel** above the waveform: tap a row to select it
   (highlighted), tap the name to rename it, tap the lock toggle to
   lock or unlock it, tap the speaker toggle to mute or unmute it.
-  The "+" button adds a track ("Track N").
+- **Waveform header** shows the selected track's name (tap to rename),
+  its lock toggle, its mute toggle, and the "+" button, which adds a
+  track ("Track N"). The old zoom +/- buttons are gone; pinch to zoom
+  on the waveform instead (1x-8x, already supported).
 - **Record** targets the selected track when it is empty and
   unlocked, else the first empty unlocked track, else a new track is
   auto-created ("Track N"). Recording never overwrites existing
