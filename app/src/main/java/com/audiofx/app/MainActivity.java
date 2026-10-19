@@ -177,6 +177,10 @@ public class MainActivity extends Activity {
     /** Non-null while a punch-in recording is armed: the selected start
      * point in seconds (track time) where the take will replace audio. */
     private Double pendingPunchStartSec;
+    /** True when the entry was pre-created at record start (no project
+     * was open); stopRecording finalizes its metadata instead of
+     * creating it. */
+    private boolean pendingPreCreatedEntry;
     /** True when the active recording is the live-FX monitor. */
     private boolean recordingLive;
     /** Plays the existing mix back while a take is recorded (overdub). */
@@ -3635,6 +3639,35 @@ public class MainActivity extends Activity {
             stopPlayback();
         }
         // Resolve the take's track now so pause/stop use a stable target.
+        if (currentEntryId == null) {
+            // No project open: create an empty one now so the live lane
+            // exists and the recording indicator has a waveform to draw
+            // in. The take lands on Track 1 at stop via the normal path.
+            try {
+                String entryId = UUID.randomUUID().toString();
+                String name = "Recording " + new SimpleDateFormat(
+                        "yyyy-MM-dd HH-mm", Locale.US).format(new Date());
+                pendingRecName = name + ".wav";
+                libraryDb.createEntryWithId(entryId, name,
+                        System.currentTimeMillis(), 0, 44100, 2, "mic",
+                        "Mic", LibraryDb.DSP_VERSION, "");
+                currentEntryId = entryId;
+                inputFileName = name;
+                // Create Track 1 directly (reserves its take-file path);
+                // ensureTracks would adopt the entry's empty pristine path.
+                libraryDb.createTrack(entryId, "Track 1");
+                ensureTracksForEntry(entryId);
+                refreshLanes();
+                updateProjectName();
+                updateTrackActions();
+                pendingPreCreatedEntry = true;
+                setStatus("Recording — tap the red button to stop.");
+            } catch (Exception e) {
+                currentEntryId = null;
+                setStatus("Could not create project.");
+                return;
+            }
+        }
         if (currentEntryId != null) {
             ensureTracksForEntry(currentEntryId);
             // Punch-in: the selected track is unlocked, holds audio, and
@@ -3662,8 +3695,6 @@ public class MainActivity extends Activity {
             // The target may be freshly auto-created: make sure its lane
             // exists before capture, or the live peaks have nowhere to go.
             refreshLanes();
-        } else {
-            pendingRecordTrackId = null;
         }
         // The monitor mix must be fresh before capture starts; build it
         // off the UI thread, then start capture and overdub together.
@@ -4010,6 +4041,18 @@ public class MainActivity extends Activity {
                         dest.delete(); // keep the empty slot empty
                         throw e;
                     }
+                    // Pre-created entry (record from app open): finalize
+                    // its audio metadata now that the take has landed.
+                    if (pendingPreCreatedEntry) {
+                        try {
+                            double[] info = wavInfo(dest);
+                            libraryDb.updateEntryAudio(entryId, info[2],
+                                    (int) info[0], (int) info[1],
+                                    dest.getAbsolutePath());
+                        } catch (Exception ignored) {
+                        }
+                        pendingPreCreatedEntry = false;
+                    }
                 }
             }
             if (wasLive) {
@@ -4031,6 +4074,7 @@ public class MainActivity extends Activity {
             setStatus("Could not save recording: " + e.getMessage());
             pendingRecordTrackId = null;
             pendingPunchStartSec = null;
+            pendingPreCreatedEntry = false;
             monitorMixFile = null;
             return;
         }

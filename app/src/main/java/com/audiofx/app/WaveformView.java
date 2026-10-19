@@ -243,12 +243,16 @@ public class WaveformView extends View {
         float maxAmp = midY * 0.95f;
         int n = liveArr.length;
         android.graphics.Path path = new android.graphics.Path();
-        float cycles = 32f; // fixed visual frequency; envelope carries time
+        float cycles = 12f; // low visual frequency; envelope carries time
         int step = Math.max(2, (int) (w / 300));
         for (int px = 0; px <= (int) w; px += step) {
             float frac = px / w;
             int idx = n > 0 ? Math.min(n - 1, (int) (frac * n)) : 0;
-            float env = n > 0 ? liveArr[idx] : 0.12f; // idle ripple
+            // Boost the mic envelope so the wave is clearly visible;
+            // clamp at 1. Idle ripple when no peaks yet.
+            float env = n > 0
+                    ? Math.min(1f, liveArr[idx] * 3f)
+                    : 0.15f;
             float y = midY + (float) Math.sin(frac * cycles * 2 * Math.PI)
                     * env * maxAmp;
             if (px == 0) {

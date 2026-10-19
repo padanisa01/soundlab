@@ -195,6 +195,19 @@ public class LibraryDb extends SQLiteOpenHelper {
         return f;
     }
 
+    /** Update an entry's audio metadata (e.g. after the take lands). */
+    public synchronized void updateEntryAudio(String id, double durationS,
+            int sampleRate, int channels, String pristinePath) {
+        SQLiteDatabase db = getWritableDatabase();
+        ContentValues cv = new ContentValues();
+        cv.put("duration_s", durationS);
+        cv.put("sample_rate", sampleRate);
+        cv.put("channels", channels);
+        cv.put("pristine_path", pristinePath);
+        cv.put("updated_at", System.currentTimeMillis());
+        db.update("entries", cv, "id=?", new String[]{id});
+    }
+
     /** getFilesDir()/library/takes/&lt;id&gt;.wav (dirs created on demand). */
     public File takeFile(String entryId) {
         return mkdirsParent(new File(libraryDir(), "takes/" + entryId + ".wav"));
