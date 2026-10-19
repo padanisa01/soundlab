@@ -140,7 +140,7 @@ public class MainActivity extends Activity {
 
     private String inputPath;   // cached WAV picked by the user, or a library pristine
     private String inputFileName = "audio.wav";
-    private String currentOutputPath;  // file backing Play/Save; null until first Apply
+    private String currentOutputPath;  // mix file backing Play/Share; null until first render
     private String playerOutputPath;   // file the live player was built for
     private String currentEntryId;     // library entry being edited; null for picked files
     private LibraryDb libraryDb;
@@ -164,11 +164,16 @@ public class MainActivity extends Activity {
     private String cachedDiagJson;
     private String cachedDiagPath;
     /** Path of the audio file the current diagnosis (and its Tune Up) refers
-     * to: currentOutputPath at diagnosis time, else the pristine input. */
+     * to: the selected track's render file at diagnosis time. */
     private String diagLastPath;
-    /** Library entry id whose exact float chain tip is cached in Python
-     * (see _tip_cache in android_bridge). Valid only while it equals the
-     * entry being rendered; entry switches invalidate it implicitly. */
+    /** Id of the track the current diagnosis was computed for; cleared
+     * with the diagnosis cache so a stale report can never be tuned up
+     * onto the wrong track. */
+    private String diagTrackId;
+    /** Chain-tip cache key whose exact float chain tip is cached in Python
+     * (see _tip_cache in android_bridge): "track:" + track id. A key
+     * mismatch falls back to a full render, so switching tracks or
+     * entries invalidates it implicitly. */
     private String tipCacheKey;
     /** Tune-up step tracker overlay on the waveform (per-pass step list). */
     private LinearLayout tuneupOverlay;
@@ -578,9 +583,11 @@ public class MainActivity extends Activity {
     /** Effect history panel: library ops or legacy picked-file history. */
     private void refreshHistoryPanel() {
         List<String[]> rows = new ArrayList<>();
-        if (currentEntryId != null) {
+        if (currentEntryId != null && selectedTrackId != null) {
+            // History follows the selected track.
             try {
-                for (LibraryDb.Op op : libraryDb.listOps(currentEntryId)) {
+                for (LibraryDb.Op op
+                        : libraryDb.listOps(currentEntryId, selectedTrackId)) {
                     rows.add(new String[]{op.label, fmtDateTime(op.createdAt)});
                 }
             } catch (Exception ignored) {
@@ -754,7 +761,8 @@ public class MainActivity extends Activity {
         // Library entries use the persisted op chain; picked files use the
         // legacy session-only history.
         int depth = currentEntryId != null
-                ? undoDepth() : historyDb.depth(fileHash(inputFileName));
+                ? undoDepth(selectedTrackId)
+                : historyDb.depth(fileHash(inputFileName));
         undoBadge.setText(String.valueOf(depth));
         undoBadge.setBackgroundResource(
                 depth > 0 ? R.drawable.bg_badge : R.drawable.bg_badge_zero);
@@ -1030,6 +1038,7 @@ public class MainActivity extends Activity {
         cachedDiagJson = null;
         cachedDiagPath = null;
         diagLastPath = null;
+        diagTrackId = null;
         diagSummaryCache.clear();
         audioDurationSec = 0;
         selStartSec = null;
@@ -1042,35 +1051,36 @@ public class MainActivity extends Activity {
         tvTimeTot.setText("0:00");
         updateTrackActions();
         updateProjectName();
-        int depth = undoDepth();
+        // ---- Multitrack: every open entry shows its tracks ----
+        ensureTracksForEntry(entryId);
+        refreshTrackPanel();
+        int depth = undoDepth(selectedTrackId);
         setStatus(depth > 0
                 ? "Loaded from library — " + depth + " effects in history."
                 : "Loaded from library — pristine take.");
         updateUndoBadge();
-        // ---- Multitrack: every open entry shows its tracks ----
-        ensureTracksForEntry(entryId);
-        refreshTrackPanel();
         if (!loadNow) {
             return; // the caller chains straight into an op that loads
         }
         refreshMix();
         boolean engineOk = LibraryDb.DSP_VERSION.equals(e.dspVersion);
-        File render = libraryDb.renderFile(entryId);
-        if (!engineOk && render.exists()) {
-            // Engine moved on: keep the last render as the audible truth
-            // and warn instead of silently re-rendering.
-            currentOutputPath = render.getAbsolutePath();
-            setStatus("Note: rendered with an older engine — re-apply to refresh.");
-            loadWaveformForPath(currentOutputPath);
-            return;
-        }
         if (!engineOk) {
             setStatus("Note: engine updated since this take — re-rendering.");
         }
-        if (hasRenderableOps(entryId)) {
+        // The mix is the audible truth: render every track that holds
+        // audio, then mix. refreshMix above shows the cached mix (if any)
+        // while the fresh render runs.
+        boolean anyAudio = false;
+        for (LibraryDb.Track t : mTracks) {
+            if (trackHasAudio(t)) {
+                anyAudio = true;
+                break;
+            }
+        }
+        if (anyAudio) {
             reRenderEntry("Rendering...");
         } else {
-            loadWaveformForPath(inputPath);
+            refreshMix();
         }
     }
 
@@ -1086,26 +1096,15 @@ public class MainActivity extends Activity {
                 || "eq_balance".equals(opType) || "tune_up".equals(opType);
     }
 
-    private boolean hasRenderableOps(String entryId) {
-        try {
-            for (LibraryDb.Op op : libraryDb.listOps(entryId)) {
-                if (isRenderableOp(op.opType)) {
-                    return true;
-                }
-            }
-        } catch (Exception ignored) {
-        }
-        return false;
-    }
-
-    /** Undo depth = persisted renderable op count; survives restarts. */
-    private int undoDepth() {
-        if (currentEntryId == null) {
+    /** Undo depth = the given track's persisted renderable op count;
+     * survives restarts. */
+    private int undoDepth(String trackId) {
+        if (currentEntryId == null || trackId == null) {
             return 0;
         }
         int n = 0;
         try {
-            for (LibraryDb.Op op : libraryDb.listOps(currentEntryId)) {
+            for (LibraryDb.Op op : libraryDb.listOps(currentEntryId, trackId)) {
                 if (isRenderableOp(op.opType)) {
                     n++;
                 }
@@ -1115,11 +1114,11 @@ public class MainActivity extends Activity {
         return n;
     }
 
-    /** ops_json for render_chain: renderable ops only, in seq order. */
-    private String buildOpsJson(String entryId) throws Exception {
+    /** ops_json for render_chain: the track's renderable ops, in seq order. */
+    private String buildOpsJson(String entryId, String trackId) throws Exception {
         StringBuilder sb = new StringBuilder("[");
         boolean first = true;
-        for (LibraryDb.Op op : libraryDb.listOps(entryId)) {
+        for (LibraryDb.Op op : libraryDb.listOps(entryId, trackId)) {
             if (!isRenderableOp(op.opType)) {
                 continue; // livefx / fork are display-only
             }
@@ -1127,51 +1126,36 @@ public class MainActivity extends Activity {
                 sb.append(",");
             }
             first = false;
-            sb.append("{\"op\":\"").append(op.opType)
-                    .append("\",\"params\":").append(op.paramsJson).append("}");
+            sb.append("{\"op\":").append(JSONObject.quote(op.opType))
+                    .append(",\"params\":").append(op.paramsJson).append("}");
         }
         sb.append("]");
         return sb.toString();
     }
 
     /**
-     * Render the entry's op chain to the render cache (call on a background
-     * thread). Writes to a temp file and atomically renames into place.
-     * Seeds the Python chain-tip cache under the entry id, so the next
-     * apply can render incrementally. Returns the rendered duration.
+     * Full render of one track's op chain to its render file (call on a
+     * background thread). Seeds the Python chain-tip cache under
+     * "track:"+trackId, so the next apply on the track can render
+     * incrementally. Returns the rendered duration.
      */
-    private double renderChainToCache(String entryId) throws Exception {
-        LibraryDb.LibraryEntry e = libraryDb.getEntry(entryId);
-        if (e == null) {
-            throw new Exception("Library entry not found");
-        }
-        if (!Python.isStarted()) {
-            Python.start(new AndroidPlatform(this));
-        }
-        String opsJson = buildOpsJson(entryId);
-        File render = libraryDb.renderFile(entryId);
-        File tmp = new File(render.getParentFile(), render.getName() + ".tmp");
-        PyObject result = Python.getInstance().getModule("audiofx.android_bridge")
-                .callAttr("render_chain", e.pristinePath, opsJson,
-                        tmp.getAbsolutePath(), null, entryId);
-        double dur = Double.parseDouble(
-                result.callAttr("get", "duration_s").toString());
-        if (!tmp.renameTo(render)) {
-            copyFile(tmp, render);
-            tmp.delete();
-        }
-        tipCacheKey = entryId;
+    private double renderChainToCache(String entryId, String trackId)
+            throws Exception {
+        double dur = renderTrackChain(entryId, trackId);
+        tipCacheKey = "track:" + trackId;
         return dur;
     }
 
     /**
-     * Render a single new op starting from the cached chain tip (call on a
-     * background thread). Falls back to a full renderChainToCache on a
-     * cache miss. Returns the rendered duration in seconds.
+     * Render a single new op on the track starting from the cached chain
+     * tip (call on a background thread). Falls back to a full
+     * renderChainToCache on a cache miss. Returns the rendered duration
+     * in seconds.
      */
-    private double renderIncrementalOrFull(String entryId, String opType,
-            String paramsJson) throws Exception {
-        if (tipCacheKey != null && tipCacheKey.equals(entryId)) {
+    private double renderIncrementalOrFull(String entryId, String trackId,
+            String opType, String paramsJson) throws Exception {
+        final String cacheKey = "track:" + trackId;
+        if (tipCacheKey != null && tipCacheKey.equals(cacheKey)) {
             try {
                 if (!Python.isStarted()) {
                     Python.start(new AndroidPlatform(this));
@@ -1179,12 +1163,12 @@ public class MainActivity extends Activity {
                 String opJson = "[{\"op\":" + JSONObject.quote(opType)
                         + ",\"params\":" + (paramsJson != null ? paramsJson : "{}")
                         + "}]";
-                File render = libraryDb.renderFile(entryId);
+                File render = libraryDb.trackRenderFile(trackId);
                 File tmp = new File(render.getParentFile(),
                         render.getName() + ".tmp");
                 PyObject r = Python.getInstance()
                         .getModule("audiofx.android_bridge")
-                        .callAttr("render_chain_from_tip", entryId, opJson,
+                        .callAttr("render_chain_from_tip", cacheKey, opJson,
                                 tmp.getAbsolutePath());
                 if ("True".equals(r.callAttr("get", "cache_hit").toString())) {
                     double dur = Double.parseDouble(
@@ -1200,20 +1184,20 @@ public class MainActivity extends Activity {
                         "incremental render failed; full render", e);
             }
         }
-        return renderChainToCache(entryId);
+        return renderChainToCache(entryId, trackId);
     }
 
     /**
      * Adopt a pre-rendered WAV (e.g. the tune-up's converged output) as the
-     * entry's render cache without re-rendering. The Python tip cache was
+     * track's render cache without re-rendering. The Python tip cache was
      * already seeded by the producer. Returns the adopted duration.
      */
-    private double adoptPreRendered(String entryId, File preRendered,
+    private double adoptPreRendered(String trackId, File preRendered,
             double dur) throws Exception {
         if (preRendered == null || !preRendered.exists()) {
             throw new Exception("pre-rendered audio missing");
         }
-        File render = libraryDb.renderFile(entryId);
+        File render = libraryDb.trackRenderFile(trackId);
         if (!preRendered.renameTo(render)) {
             copyFile(preRendered, render);
             if (!preRendered.delete()) {
@@ -1221,13 +1205,13 @@ public class MainActivity extends Activity {
                         "could not delete tune-up temp file");
             }
         }
-        tipCacheKey = entryId;
+        tipCacheKey = "track:" + trackId;
         return dur;
     }
 
     /**
-     * Re-render the current entry in the background with the standard
-     * progress UI, then reload the waveform.
+     * Re-render every track holding audio, then rebuild the mix (the
+     * audible truth). The mix owns the progress tail via refreshMix.
      */
     private void reRenderEntry(String workingMsg) {
         final String entryId = currentEntryId;
@@ -1239,18 +1223,14 @@ public class MainActivity extends Activity {
         setStatus(workingMsg);
         new Thread(() -> {
             try {
-                final double dur = renderChainToCache(entryId);
+                for (LibraryDb.Track t : mTracks) {
+                    if (trackHasAudio(t)) {
+                        renderChainToCache(entryId, t.id);
+                    }
+                }
                 runOnUiThread(() -> {
-                    currentOutputPath =
-                            libraryDb.renderFile(entryId).getAbsolutePath();
-                    audioDurationSec = dur;
-                    releasePlayer();
-                    btnStop.setEnabled(false);
-                    loadWaveformForPath(currentOutputPath);
-                    setPlayPauseEnabled(true);
-                    setBusy(false);
-                    waveformView.finishProgressAnimation();
                     updateUndoBadge();
+                    refreshMix();
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
@@ -1264,9 +1244,9 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Append an op to the current library entry and re-render the whole
-     * chain (cumulative semantics). The op row is rolled back if the
-     * render fails, so the DB never disagrees with the audio.
+     * Append an op to the selected track and re-render (cumulative
+     * semantics). The op row is rolled back if the render fails, so the
+     * DB never disagrees with the audio.
      */
     private void applyLibraryOp(final String opType, final String paramsJson,
                                 final String label, final String workingMsg,
@@ -1287,6 +1267,12 @@ public class MainActivity extends Activity {
                 onRendered, false, preRendered, preRenderedDur);
     }
 
+    /**
+     * Append an op to the SELECTED track and re-render (cumulative
+     * semantics). Locked tracks are never touched: toast and no-op. The
+     * op row is rolled back if the render fails, so the DB never
+     * disagrees with the audio. The mix is rebuilt at the end.
+     */
     private void applyLibraryOp(final String opType, final String paramsJson,
                                 final String label, final String workingMsg,
                                 final String doneMsg, final Runnable onRendered,
@@ -1296,6 +1282,14 @@ public class MainActivity extends Activity {
         if (entryId == null) {
             return;
         }
+        final LibraryDb.Track track = getSelectedTrack();
+        if (track == null) {
+            return;
+        }
+        if (!checkTrackUnlocked(track.id)) {
+            return;
+        }
+        final String trackId = track.id;
         setBusy(true);
         if (selStartSec != null && audioDurationSec > 0
                 && ("fx".equals(opType))) {
@@ -1312,23 +1306,23 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             boolean added = false;
             try {
-                libraryDb.addOp(entryId, opType, paramsJson, label);
+                libraryDb.addOp(entryId, trackId, opType, paramsJson, label);
                 added = true;
                 cachedDiagJson = null;
                 cachedDiagPath = null;
                 diagLastPath = null;
+                diagTrackId = null;
                 diagSummaryCache.clear();
                 final double dur;
                 if (preRendered != null) {
-                    dur = adoptPreRendered(entryId, preRendered, preRenderedDur);
+                    dur = adoptPreRendered(trackId, preRendered, preRenderedDur);
                 } else if (incremental) {
-                    dur = renderIncrementalOrFull(entryId, opType, paramsJson);
+                    dur = renderIncrementalOrFull(entryId, trackId, opType,
+                            paramsJson);
                 } else {
-                    dur = renderChainToCache(entryId);
+                    dur = renderChainToCache(entryId, trackId);
                 }
                 runOnUiThread(() -> {
-                    currentOutputPath =
-                            libraryDb.renderFile(entryId).getAbsolutePath();
                     audioDurationSec = dur;
                     releasePlayer();
                     btnStop.setEnabled(false);
@@ -1340,11 +1334,13 @@ public class MainActivity extends Activity {
                     setBusy(false);
                     waveformView.finishProgressAnimation();
                     updateUndoBadge();
+                    // The mix is the audible truth: rebuild it now.
+                    refreshMix();
                 });
             } catch (Exception e) {
                 if (added) {
                     try {
-                        libraryDb.popLastOp(entryId);
+                        libraryDb.popLastOp(entryId, trackId);
                     } catch (Exception ignored) {
                     }
                 }
@@ -1358,24 +1354,82 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    /** Run the diagnostics on the current output, then show the report. */
+    /** Run the diagnostics, then show the report. Library entries diagnose
+     * the selected track's freshly rendered file; picked files diagnose
+     * the current output as before. */
     private void onDiagnoseClicked() {
         final String entryId = currentEntryId;
+        if (entryId != null) {
+            diagnoseSelectedTrack(entryId);
+            return;
+        }
+        // Legacy path for picked files (unchanged).
         // Same fallback playback uses: the render when there is one,
         // otherwise the pristine input (fresh picks have no render yet).
         String path = (currentOutputPath != null
                 && new File(currentOutputPath).exists()) ? currentOutputPath
                         : inputPath;
-        if (entryId == null || path == null || !new File(path).exists()) {
+        if (path == null || !new File(path).exists()) {
             setStatus("Open or record audio first.");
             return;
         }
         final String diagPath = path;
         diagLastPath = diagPath;
+        diagTrackId = null;
         if (diagPath.equals(cachedDiagPath) && cachedDiagJson != null) {
             showDiagnosisReport(cachedDiagJson);
             return;
         }
+        runDiagnosis(diagPath);
+    }
+
+    /**
+     * Diagnose the selected track: render it fresh so the report matches
+     * the current chain, then diagnose its render file. Diagnosing is
+     * read-only, so locked tracks may be diagnosed; their Fix buttons
+     * still no-op via applyLibraryOp's guard.
+     */
+    private void diagnoseSelectedTrack(final String entryId) {
+        final LibraryDb.Track track = getSelectedTrack();
+        if (track == null) {
+            setStatus("Open or record audio first.");
+            return;
+        }
+        if (!trackHasAudio(track)) {
+            setStatus("The selected track has no audio to diagnose.");
+            return;
+        }
+        final String trackId = track.id;
+        final String diagPath =
+                libraryDb.trackRenderFile(trackId).getAbsolutePath();
+        if (diagPath.equals(cachedDiagPath) && cachedDiagJson != null
+                && trackId.equals(diagTrackId)) {
+            diagLastPath = diagPath;
+            showDiagnosisReport(cachedDiagJson);
+            return;
+        }
+        setBusy(true);
+        setStatus("Diagnosing...");
+        waveformView.startProgressAnimation();
+        new Thread(() -> {
+            try {
+                renderTrackBlocking(entryId, trackId);
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    waveformView.clearProgress();
+                    setStatus("Diagnosis failed: " + e.getMessage());
+                });
+                return;
+            }
+            diagTrackId = trackId;
+            diagLastPath = diagPath;
+            runDiagnosis(diagPath);
+        }).start();
+    }
+
+    /** Run diagnose_file on a path and show the report card. */
+    private void runDiagnosis(final String diagPath) {
         setBusy(true);
         setStatus("Diagnosing...");
         waveformView.startProgressAnimation();
@@ -2180,17 +2234,32 @@ public class MainActivity extends Activity {
      * and adopt the converged audio directly (no re-render, no automatic
      * re-diagnosis). Falls back to the single-pass build if the diagnosed
      * file is gone. */
+    /** Tune Up the SELECTED track: converge on its own rendered file and
+     * adopt the composite tune_up op onto that track. Locked tracks
+     * no-op with the "Track locked" toast. */
     private void runTuneUp(final String findingsJson, final String profile) {
         final String entryId = currentEntryId;
-        if (entryId == null) {
+        final LibraryDb.Track track = getSelectedTrack();
+        if (entryId == null || track == null) {
             setStatus("Open or record audio first.");
+            return;
+        }
+        if (!checkTrackUnlocked(track.id)) {
+            return;
+        }
+        if (!trackHasAudio(track)) {
+            setStatus("The selected track has no audio to tune up.");
+            return;
+        }
+        final String trackId = track.id;
+        if (diagTrackId != null && !diagTrackId.equals(trackId)) {
+            setStatus("Track changed since diagnosis. Diagnose again first.");
             return;
         }
         setBusy(true);
         setStatus("Tuning up...");
         waveformView.startProgressAnimation();
         tuneupProfileLabel = tuneUpProfileLabel(profile);
-        final String convergePath = diagLastPath;
         final TuneUpProgress progress = new TuneUpProgress();
         new Thread(() -> {
             try {
@@ -2199,15 +2268,21 @@ public class MainActivity extends Activity {
                 }
                 final PyObject bridge = Python.getInstance()
                         .getModule("audiofx.android_bridge");
+                // Converge on the selected track's own rendered file.
+                File trackRender = libraryDb.trackRenderFile(trackId);
+                if (!trackRender.exists()) {
+                    renderTrackBlocking(entryId, trackId);
+                }
+                final String convergePath = trackRender.getAbsolutePath();
                 final String tuneUpJson;
                 final File preRendered;
                 final double preRenderedDur;
-                if (convergePath != null
-                        && new File(convergePath).exists()) {
+                if (new File(convergePath).exists()) {
                     preRendered = new File(getCacheDir(), "tune_up_render.wav");
                     String out = bridge.callAttr("tune_up_converge",
                             convergePath, findingsJson, profile, progress, 3,
-                            preRendered.getAbsolutePath(), entryId).toString();
+                            preRendered.getAbsolutePath(),
+                            "track:" + trackId).toString();
                     tuneUpJson = out;
                     preRenderedDur = new JSONObject(out)
                             .optDouble("duration_s", -1);
@@ -2251,15 +2326,24 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    /** Pop the last renderable op and re-render (cross-session undo). */
+    /** Pop the selected track's last renderable op and re-render
+     * (cross-session undo). Locked tracks no-op with the toast. */
     private void undoLibraryOp() {
         final String entryId = currentEntryId;
         if (entryId == null) {
             return;
         }
+        final LibraryDb.Track track = getSelectedTrack();
+        if (track == null) {
+            return;
+        }
+        if (!checkTrackUnlocked(track.id)) {
+            return;
+        }
+        final String trackId = track.id;
         final LibraryDb.Op last;
         try {
-            List<LibraryDb.Op> ops = libraryDb.listOps(entryId);
+            List<LibraryDb.Op> ops = libraryDb.listOps(entryId, trackId);
             LibraryDb.Op found = null;
             for (int i = ops.size() - 1; i >= 0; i--) {
                 if (isRenderableOp(ops.get(i).opType)) {
@@ -2283,46 +2367,30 @@ public class MainActivity extends Activity {
         setStatus("Undoing...");
         new Thread(() -> {
             try {
-                libraryDb.popLastOp(entryId);
+                libraryDb.popLastOp(entryId, trackId);
                 cachedDiagJson = null;
                 cachedDiagPath = null;
                 diagLastPath = null;
+                diagTrackId = null;
                 diagSummaryCache.clear();
-                final boolean remaining = hasRenderableOps(entryId);
-                final String refreshPath;
-                if (remaining) {
-                    renderChainToCache(entryId);
-                    refreshPath = libraryDb.renderFile(entryId).getAbsolutePath();
-                } else {
-                    // Back to pristine: drop the render cache.
-                    File render = libraryDb.renderFile(entryId);
-                    if (render.exists()) {
-                        render.delete();
-                    }
-                    LibraryDb.LibraryEntry e = libraryDb.getEntry(entryId);
-                    refreshPath = e != null ? e.pristinePath : null;
-                }
-                if (refreshPath == null || !(new File(refreshPath).exists())) {
-                    throw new Exception("audio missing after undo");
-                }
+                // Re-render the track (a bare take renders through the
+                // empty chain, so undoing to zero ops still sounds right),
+                // then rebuild the mix.
+                renderChainToCache(entryId, trackId);
+                final int depth = undoDepth(trackId);
                 runOnUiThread(() -> {
-                    currentOutputPath = remaining ? refreshPath : null;
-                    releasePlayer();
-                    btnStop.setEnabled(false);
-                    loadWaveformForPath(refreshPath);
-                    int depth = undoDepth();
+                    updateUndoBadge();
+                    refreshMix();
                     setStatus("Undone: " + last.label + (depth > 0
                             ? " — " + depth + " op(s) left."
                             : " — back to the original audio."));
-                    setBusy(false);
-                    waveformView.finishProgressAnimation();
-                    updateUndoBadge();
                 });
             } catch (Exception e) {
                 // Roll the popped op back on: re-add with the same content
                 // (it regains the top seq, preserving order).
                 try {
-                    libraryDb.addOp(entryId, last.opType, last.paramsJson, last.label);
+                    libraryDb.addOp(entryId, trackId, last.opType,
+                            last.paramsJson, last.label);
                 } catch (Exception ignored) {
                 }
                 runOnUiThread(() -> {
@@ -2333,13 +2401,6 @@ public class MainActivity extends Activity {
                 });
             }
         }).start();
-    }
-
-    /** Disable the edit controls + progress bar while background work runs. */
-    private void setBusy(boolean busy) {
-        setEditButtonsEnabled(!busy);
-        btnUndo.setEnabled(!busy);
-        showProgress(busy);
     }
 
     // ---- Library op params (spec section 6) ----
@@ -2441,7 +2502,15 @@ public class MainActivity extends Activity {
 
     private void selectTrack(String trackId) {
         selectedTrackId = trackId;
+        // Diagnosis is per-track: drop the old track's cached report.
+        cachedDiagJson = null;
+        cachedDiagPath = null;
+        diagLastPath = null;
+        diagTrackId = null;
+        diagSummaryCache.clear();
         refreshTrackPanel();
+        // History and the undo badge follow the selection.
+        updateUndoBadge();
     }
 
     /** Rebuild the track panel rows for the open entry. */
@@ -2726,9 +2795,21 @@ public class MainActivity extends Activity {
     /**
      * Full render of one track's op chain to its render file (blocking;
      * call off the UI thread). Display-only ops (livefx, fork) are
-     * filtered exactly like the entry render path.
+     * filtered out. See renderTrackChain for the duration-returning form.
      */
     private void renderTrackBlocking(String entryId, String trackId)
+            throws Exception {
+        renderTrackChain(entryId, trackId);
+    }
+
+    /**
+     * Full render of one track's op chain to its render file, returning
+     * the rendered duration. Writes to a temp file and atomically
+     * renames into place. The Python tip cache is seeded under
+     * "track:"+trackId; use renderChainToCache when the Java-side
+     * tipCacheKey must track it too.
+     */
+    private double renderTrackChain(String entryId, String trackId)
             throws Exception {
         LibraryDb.Track track = getTrackById(trackId);
         if (track == null) {
@@ -2737,32 +2818,21 @@ public class MainActivity extends Activity {
         if (!Python.isStarted()) {
             Python.start(new AndroidPlatform(this));
         }
-        StringBuilder sb = new StringBuilder("[");
-        boolean first = true;
-        for (LibraryDb.Op op : libraryDb.listOps(entryId, trackId)) {
-            if (!isRenderableOp(op.opType)) {
-                continue; // livefx / fork are display-only
-            }
-            if (!first) {
-                sb.append(",");
-            }
-            first = false;
-            sb.append("{\"op\":").append(JSONObject.quote(op.opType))
-                    .append(",\"params\":").append(op.paramsJson).append("}");
-        }
-        sb.append("]");
+        String opsJson = buildOpsJson(entryId, trackId);
         File render = libraryDb.trackRenderFile(trackId);
         File tmp = new File(render.getParentFile(),
                 render.getName() + ".tmp");
         PyObject result = Python.getInstance()
                 .getModule("audiofx.android_bridge")
-                .callAttr("render_chain", track.wavPath, sb.toString(),
+                .callAttr("render_chain", track.wavPath, opsJson,
                         tmp.getAbsolutePath(), null, "track:" + trackId);
-        Double.parseDouble(result.callAttr("get", "duration_s").toString());
+        double dur = Double.parseDouble(
+                result.callAttr("get", "duration_s").toString());
         if (!tmp.renameTo(render)) {
             copyFile(tmp, render);
             tmp.delete();
         }
+        return dur;
     }
 
     /** Full render of one track only, with the standard progress UI. */
@@ -2792,6 +2862,62 @@ public class MainActivity extends Activity {
     }
 
     /**
+     * Rendered track WAVs for the mix, in track position order.
+     * Tracks without a rendered take are skipped.
+     */
+    private List<String> collectMixWavs() {
+        final List<String> wavPaths = new ArrayList<>();
+        for (LibraryDb.Track t : mTracks) {
+            try {
+                File render = libraryDb.trackRenderFile(t.id);
+                if (render.exists() && render.length() > 44) {
+                    wavPaths.add(render.getAbsolutePath());
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return wavPaths;
+    }
+
+    /**
+     * Blocking mixdown of rendered track WAVs (call off the UI thread).
+     * Returns the mix file path.
+     */
+    private String mixdownBlocking(String entryId, List<String> wavPaths)
+            throws Exception {
+        if (!Python.isStarted()) {
+            Python.start(new AndroidPlatform(this));
+        }
+        // The entry's sample rate: the first track's rate.
+        int targetRate = 0;
+        for (String p : wavPaths) {
+            try {
+                targetRate = (int) wavInfo(new File(p))[0];
+                break;
+            } catch (Exception ignored) {
+            }
+        }
+        final int sampleRate = targetRate > 0 ? targetRate : 44100;
+        File outFile = libraryDb.mixFile(entryId);
+        PyObject result = Python.getInstance()
+                .getModule("audiofx.android_bridge")
+                .callAttr("mixdown", new JSONArray(wavPaths).toString(),
+                        outFile.getAbsolutePath(), sampleRate);
+        if (!"True".equals(result.callAttr("get", "ok").toString())) {
+            throw new Exception("mixdown failed");
+        }
+        String mixPath = result.callAttr("get", "output_path").toString();
+        if (mixPath == null || mixPath.isEmpty()
+                || !(new File(mixPath).exists())) {
+            mixPath = outFile.getAbsolutePath();
+        }
+        if (!(new File(mixPath).exists())) {
+            throw new Exception("mixdown produced no file");
+        }
+        return mixPath;
+    }
+
+    /**
      * Mix every rendered track into the entry mix and show it. Tracks
      * without a rendered take are skipped; with no rendered audio at all
      * the waveform is cleared (the existing empty behavior).
@@ -2801,21 +2927,7 @@ public class MainActivity extends Activity {
         if (entryId == null) {
             return;
         }
-        final List<String> wavPaths = new ArrayList<>();
-        int targetRate = 0;
-        for (LibraryDb.Track t : mTracks) {
-            try {
-                File render = libraryDb.trackRenderFile(t.id);
-                if (render.exists() && render.length() > 44) {
-                    wavPaths.add(render.getAbsolutePath());
-                    if (targetRate == 0) {
-                        // The entry's sample rate: the first track's rate.
-                        targetRate = (int) wavInfo(render)[0];
-                    }
-                }
-            } catch (Exception ignored) {
-            }
-        }
+        final List<String> wavPaths = collectMixWavs();
         if (wavPaths.isEmpty()) {
             waveformView.setPeaks(new float[0]);
             waveformView.setDuration(0);
@@ -2826,31 +2938,12 @@ public class MainActivity extends Activity {
             setPlayPauseEnabled(false);
             return;
         }
-        final int sampleRate = targetRate > 0 ? targetRate : 44100;
-        final String wavsJson = new JSONArray(wavPaths).toString();
         setBusy(true);
         waveformView.startProgressAnimation();
         setStatus("Mixing tracks...");
         new Thread(() -> {
             try {
-                if (!Python.isStarted()) {
-                    Python.start(new AndroidPlatform(this));
-                }
-                File outFile = libraryDb.mixFile(entryId);
-                PyObject result = Python.getInstance()
-                        .getModule("audiofx.android_bridge")
-                        .callAttr("mixdown", wavsJson,
-                                outFile.getAbsolutePath(), sampleRate);
-                if (!"True".equals(result.callAttr("get", "ok").toString())) {
-                    throw new Exception("mixdown failed");
-                }
-                String mixPath =
-                        result.callAttr("get", "output_path").toString();
-                if (mixPath == null || mixPath.isEmpty()
-                        || !(new File(mixPath).exists())) {
-                    mixPath = outFile.getAbsolutePath();
-                }
-                final String finalMixPath = mixPath;
+                final String finalMixPath = mixdownBlocking(entryId, wavPaths);
                 runOnUiThread(() -> {
                     currentOutputPath = finalMixPath;
                     releasePlayer();
@@ -2876,6 +2969,12 @@ public class MainActivity extends Activity {
         if (entryId == null || trackId == null) {
             return;
         }
+        // The track's audio changed: any diagnosis of it is stale.
+        cachedDiagJson = null;
+        cachedDiagPath = null;
+        diagLastPath = null;
+        diagTrackId = null;
+        diagSummaryCache.clear();
         setBusy(true);
         waveformView.startProgressAnimation();
         setStatus("Rendering track...");
@@ -3806,7 +3905,180 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "Pick an audio file or record first", Toast.LENGTH_SHORT).show();
             return;
         }
+        if (currentEntryId != null) {
+            // Multitrack project: one WAV per track.
+            showSaveTracksDialog();
+            return;
+        }
         showSaveDialog();
+    }
+
+    /**
+     * Save dialog for multitrack projects: each track with audio is
+     * saved as a separate WAV named after the track, inside the chosen
+     * folder. The MP3 flow's per-file name field does not apply here;
+     * name collisions are kept as numbered copies.
+     */
+    private void showSaveTracksDialog() {
+        if (saveDialog != null && saveDialog.isShowing()) {
+            return;
+        }
+        final float density = getResources().getDisplayMetrics().density;
+        int pad = (int) (20 * density);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(pad, (int) (8 * density), pad, (int) (8 * density));
+
+        int audible = 0;
+        StringBuilder names = new StringBuilder();
+        for (LibraryDb.Track t : mTracks) {
+            if (trackHasAudio(t)) {
+                if (audible > 0) {
+                    names.append(", ");
+                }
+                names.append(sanitizeWavName(t.name));
+                audible++;
+            }
+        }
+        TextView info = new TextView(this);
+        info.setText(audible == 0
+                ? "No recorded audio to save yet."
+                : "Saves " + audible
+                        + (audible == 1 ? " track as WAV: " : " tracks as WAV: ")
+                        + names);
+        info.setTextColor(getColor(R.color.sl_txt));
+        info.setTextSize(14);
+        LinearLayout.LayoutParams infoLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        infoLp.bottomMargin = (int) (16 * density);
+        root.addView(info, infoLp);
+
+        TextView folderLabel = new TextView(this);
+        folderLabel.setText("Save folder");
+        folderLabel.setTextColor(getColor(R.color.sl_mut));
+        folderLabel.setTextSize(12);
+        root.addView(folderLabel);
+
+        LinearLayout folderRow = new LinearLayout(this);
+        folderRow.setOrientation(LinearLayout.HORIZONTAL);
+        folderRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        saveFolderLabel = new TextView(this);
+        saveFolderLabel.setText(saveFolderName());
+        saveFolderLabel.setTextColor(getColor(R.color.sl_txt));
+        saveFolderLabel.setTextSize(14);
+        LinearLayout.LayoutParams folderLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        folderRow.addView(saveFolderLabel, folderLp);
+        Button chooseBtn = new Button(this);
+        chooseBtn.setText("Choose…");
+        chooseBtn.setTextColor(getColor(R.color.sl_teal2));
+        chooseBtn.setBackgroundResource(R.drawable.bg_ghost);
+        chooseBtn.setOnClickListener(v -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            startActivityForResult(intent, PICK_FOLDER);
+        });
+        folderRow.addView(chooseBtn);
+        root.addView(folderRow);
+
+        saveDialog = new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+                .setTitle("Save tracks as WAV")
+                .setView(root)
+                .setPositiveButton("Save", null)
+                .setNegativeButton("Cancel", null)
+                .setOnDismissListener(d -> saveDialog = null)
+                .show();
+        // The dialog theme inherits light Material buttons; re-tint them.
+        saveDialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setTextColor(getColor(R.color.sl_teal2));
+        saveDialog.getButton(AlertDialog.BUTTON_NEGATIVE)
+                .setTextColor(getColor(R.color.sl_mut));
+        // Manual click handling: the Save tap needs a folder first.
+        saveDialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    if (saveFolderUri == null) {
+                        Toast.makeText(this, "Choose a save folder first",
+                                Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    saveDialog.dismiss();
+                    doSaveTracksWav();
+                });
+    }
+
+    /**
+     * Save every audible track as its own WAV in the chosen folder,
+     * re-rendering each first so the file matches the current chain.
+     * Empty tracks are skipped; collisions are kept as numbered copies.
+     * Each saved file is logged as an export on the entry.
+     */
+    private void doSaveTracksWav() {
+        final String entryId = currentEntryId;
+        if (entryId == null || saveFolderUri == null) {
+            return;
+        }
+        final List<LibraryDb.Track> audible = new ArrayList<>();
+        for (LibraryDb.Track t : mTracks) {
+            if (trackHasAudio(t)) {
+                audible.add(t);
+            }
+        }
+        if (audible.isEmpty()) {
+            Toast.makeText(this, "No recorded audio to save",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        setBusy(true);
+        setStatus("Saving tracks...");
+        waveformView.startProgressAnimation();
+        new Thread(() -> {
+            final List<String> saved = new ArrayList<>();
+            String error = null;
+            for (LibraryDb.Track t : audible) {
+                try {
+                    renderTrackBlocking(entryId, t.id);
+                    File render = libraryDb.trackRenderFile(t.id);
+                    String savedAs = copyToSaveFolder(render,
+                            sanitizeWavName(t.name), false, "audio/wav");
+                    saved.add(savedAs);
+                    try {
+                        libraryDb.logExport(entryId, savedAs, saveFolderName(),
+                                undoDepth(t.id));
+                    } catch (Exception logEx) {
+                        Log.w("AudioMechanic", "logExport failed", logEx);
+                    }
+                } catch (Exception e) {
+                    error = e.getMessage();
+                    break;
+                }
+            }
+            final int n = saved.size();
+            final String err = error;
+            runOnUiThread(() -> {
+                setBusy(false);
+                waveformView.clearProgress();
+                if (err != null) {
+                    setStatus("Save failed: " + err
+                            + (n > 0 ? " (" + n + " saved before the error)"
+                                    : ""));
+                } else {
+                    setStatus("Saved " + n
+                            + (n == 1 ? " track." : " tracks."));
+                }
+            });
+        }).start();
+    }
+
+    private static String sanitizeWavName(String raw) {
+        String name = raw.trim().replaceAll("[/\\\\]", "_");
+        if (name.isEmpty()) {
+            name = "track";
+        }
+        if (!name.toLowerCase(Locale.US).endsWith(".wav")) {
+            name += ".wav";
+        }
+        return name;
     }
 
     /**
@@ -3987,7 +4259,7 @@ public class MainActivity extends Activity {
                     if (currentEntryId != null) {
                         try {
                             libraryDb.logExport(currentEntryId, savedAs,
-                                    saveFolderName(), undoDepth());
+                                    saveFolderName(), undoDepth(selectedTrackId));
                         } catch (Exception e) {
                             Log.w("AudioMechanic", "logExport failed", e);
                         }
@@ -4172,9 +4444,16 @@ public class MainActivity extends Activity {
     /**
      * Share entry point: encoding starts in the background and the
      * split-screen wait dialog covers it (progress on top, ads below).
+     * Multitrack projects share the mix: every audible track is
+     * re-rendered and mixed fresh, then the existing 96 kbps MP3 encode
+     * + FileProvider chooser runs on the mix file.
      */
     private void shareAudio() {
         if (shareInProgress) {
+            return;
+        }
+        if (currentEntryId != null) {
+            shareMixFresh();
             return;
         }
         final String srcPath = (currentOutputPath != null
@@ -4189,6 +4468,58 @@ public class MainActivity extends Activity {
         shareEncodeError = null;
         showEncodeWaitScreen("Preparing share file...", !isPremium());
         new Thread(() -> encodeShareFile(srcPath)).start();
+    }
+
+    /**
+     * Share for multitrack projects: re-render every audible track and
+     * rebuild the mix, then run the existing share pipeline on the
+     * fresh mix file.
+     */
+    private void shareMixFresh() {
+        final String entryId = currentEntryId;
+        if (entryId == null) {
+            return;
+        }
+        shareInProgress = true;
+        setBusy(true);
+        setStatus("Preparing mix...");
+        waveformView.startProgressAnimation();
+        new Thread(() -> {
+            try {
+                for (LibraryDb.Track t : mTracks) {
+                    if (trackHasAudio(t)) {
+                        renderTrackBlocking(entryId, t.id);
+                    }
+                }
+                List<String> wavs = collectMixWavs();
+                if (wavs.isEmpty()) {
+                    throw new Exception("Nothing to share yet.");
+                }
+                final String mixPath = mixdownBlocking(entryId, wavs);
+                runOnUiThread(() -> {
+                    currentOutputPath = mixPath;
+                    releasePlayer();
+                    btnStop.setEnabled(false);
+                    loadWaveformForPath(mixPath);
+                    setBusy(false);
+                    waveformView.finishProgressAnimation();
+                    // Now the existing share pipeline on the fresh mix.
+                    shareEncodeDone = false;
+                    shareMp3Result = null;
+                    shareEncodeError = null;
+                    showEncodeWaitScreen("Preparing share file...",
+                            !isPremium());
+                    new Thread(() -> encodeShareFile(mixPath)).start();
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    shareInProgress = false;
+                    setStatus("Share failed: " + e.getMessage());
+                    setBusy(false);
+                    waveformView.clearProgress();
+                });
+            }
+        }).start();
     }
 
     /** Background MP3 encode for the share flow. */
@@ -4260,6 +4591,11 @@ public class MainActivity extends Activity {
 
     private String copyToSaveFolder(File src, String baseName, boolean overwrite)
             throws Exception {
+        return copyToSaveFolder(src, baseName, overwrite, "audio/mpeg");
+    }
+
+    private String copyToSaveFolder(File src, String baseName, boolean overwrite,
+            String mimeType) throws Exception {
         DocumentFile dir = DocumentFile.fromTreeUri(this, saveFolderUri);
         if (dir == null || !dir.canWrite()) {
             throw new Exception("Save folder is not writable");
@@ -4279,7 +4615,7 @@ public class MainActivity extends Activity {
                 name = stem + " (" + (copy++) + ")" + ext;
             }
         }
-        DocumentFile dest = dir.createFile("audio/mpeg", name);
+        DocumentFile dest = dir.createFile(mimeType, name);
         if (dest == null) {
             throw new Exception("Could not create file in save folder");
         }
