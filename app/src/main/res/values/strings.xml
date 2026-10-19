@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Audio Mechanic</string>
+    <string name="tracks_title">Tracks</string>
+    <string name="add_track">Add track</string>
+    <string name="track_locked">Track locked</string>
+    <string name="track_unlocked">Track unlocked</string>
+    <string name="rename_track">Rename track</string>
     <string-array name="reverb_presets">
         <item>studio</item>
         <item>concert_hall</item>
