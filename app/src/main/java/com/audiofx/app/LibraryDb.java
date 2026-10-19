@@ -456,12 +456,12 @@ public class LibraryDb extends SQLiteOpenHelper {
                                 new org.json.JSONObject(paramsJson);
                         String takePath = p.optString("take_path", null);
                         if (takePath != null) {
-                            File srcTake = new File(takePath);
-                            if (srcTake.isFile()) {
+                            File punchSrc = new File(takePath);
+                            if (punchSrc.isFile()) {
                                 File dstTake = punchTakeFile(
                                         java.util.UUID.randomUUID()
                                                 .toString());
-                                copyFile(srcTake, dstTake);
+                                copyFile(punchSrc, dstTake);
                                 p.put("take_path",
                                         dstTake.getAbsolutePath());
                                 paramsJson = p.toString();
