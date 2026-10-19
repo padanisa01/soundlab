@@ -45,7 +45,7 @@ public class LibraryDb extends SQLiteOpenHelper {
     public static final String DSP_VERSION = "1";
 
     private static final String DB_NAME = "soundlab_library.db";
-    private static final int DB_VERSION = 2;
+    private static final int DB_VERSION = 3;
 
     private final Context mAppContext;
 
@@ -80,6 +80,7 @@ public class LibraryDb extends SQLiteOpenHelper {
                 + "  name TEXT NOT NULL,\n"
                 + "  wav_path TEXT NOT NULL,\n"
                 + "  locked INTEGER NOT NULL DEFAULT 0,\n"
+                + "  muted INTEGER NOT NULL DEFAULT 0,\n"
                 + "  position INTEGER NOT NULL,\n"
                 + "  created_at INTEGER NOT NULL,\n"
                 + "  updated_at INTEGER NOT NULL\n"
@@ -150,6 +151,27 @@ public class LibraryDb extends SQLiteOpenHelper {
                         + " HAVING MAX(id) IS NOT NULL");
                 db.execSQL("CREATE INDEX idx_ops_entry ON ops(entry_id, seq)");
                 db.execSQL("CREATE INDEX idx_ops_track ON ops(track_id)");
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
+            }
+        }
+        if (oldVersion < 3) {
+            // DB v3: per-track mute flag. NOTE: unlike the v1->v2 migration
+            // (which rebuilt the child table ops), the tracks table cannot
+            // be rebuilt by drop/rename here: ops.track_id references
+            // tracks(id) with ON DELETE CASCADE and foreign keys are
+            // enforced (onConfigure), so DROP TABLE tracks would implicitly
+            // delete every row in ops, wiping all op chains. PRAGMA
+            // foreign_keys cannot be toggled inside onUpgrade either,
+            // because SQLiteOpenHelper already runs it in a transaction.
+            // ADD COLUMN is safe with FK enforcement on: it cannot name a
+            // REFERENCES clause, existing rows get the default 0, and the
+            // index on tracks is untouched.
+            db.beginTransaction();
+            try {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN"
+                        + " muted INTEGER NOT NULL DEFAULT 0");
                 db.setTransactionSuccessful();
             } finally {
                 db.endTransaction();
@@ -376,7 +398,7 @@ public class LibraryDb extends SQLiteOpenHelper {
             cv.put("pristine_path", takeFile(newId).getAbsolutePath());
             db.insertOrThrow("entries", null, cv);
 
-            // Duplicate tracks: new UUIDs, same name/locked/position.
+            // Duplicate tracks: new UUIDs, same name/locked/muted/position.
             for (Track t : srcTracks) {
                 String newTrackId = trackIdMap.get(t.id);
                 ContentValues tcv = new ContentValues();
@@ -385,6 +407,7 @@ public class LibraryDb extends SQLiteOpenHelper {
                 tcv.put("name", t.name);
                 tcv.put("wav_path", trackWavPath.get(newTrackId));
                 tcv.put("locked", t.locked ? 1 : 0);
+                tcv.put("muted", t.muted ? 1 : 0);
                 tcv.put("position", t.position);
                 tcv.put("created_at", now);
                 tcv.put("updated_at", now);
@@ -495,7 +518,7 @@ public class LibraryDb extends SQLiteOpenHelper {
         } finally {
             db.endTransaction();
         }
-        return new Track(newId, entryId, name, wavPath, false, position,
+        return new Track(newId, entryId, name, wavPath, false, false, position,
                 now, now);
     }
 
@@ -554,6 +577,15 @@ public class LibraryDb extends SQLiteOpenHelper {
         SQLiteDatabase db = getWritableDatabase();
         ContentValues cv = new ContentValues();
         cv.put("locked", locked ? 1 : 0);
+        cv.put("updated_at", System.currentTimeMillis());
+        db.update("tracks", cv, "id=?", new String[]{trackId});
+    }
+
+    /** Sets the track's muted flag (and bumps the track's updated_at). */
+    public synchronized void setTrackMuted(String trackId, boolean muted) {
+        SQLiteDatabase db = getWritableDatabase();
+        ContentValues cv = new ContentValues();
+        cv.put("muted", muted ? 1 : 0);
         cv.put("updated_at", System.currentTimeMillis());
         db.update("tracks", cv, "id=?", new String[]{trackId});
     }
@@ -620,6 +652,7 @@ public class LibraryDb extends SQLiteOpenHelper {
                 c.getString(c.getColumnIndexOrThrow("name")),
                 c.getString(c.getColumnIndexOrThrow("wav_path")),
                 c.getInt(c.getColumnIndexOrThrow("locked")) != 0,
+                c.getInt(c.getColumnIndexOrThrow("muted")) != 0,
                 c.getInt(c.getColumnIndexOrThrow("position")),
                 c.getLong(c.getColumnIndexOrThrow("created_at")),
                 c.getLong(c.getColumnIndexOrThrow("updated_at")));
@@ -875,17 +908,20 @@ public class LibraryDb extends SQLiteOpenHelper {
         public final String name;
         public final String wavPath;
         public final boolean locked;
+        public final boolean muted;
         public final int position;
         public final long createdAt;
         public final long updatedAt;
 
         public Track(String id, String entryId, String name, String wavPath,
-                boolean locked, int position, long createdAt, long updatedAt) {
+                boolean locked, boolean muted, int position, long createdAt,
+                long updatedAt) {
             this.id = id;
             this.entryId = entryId;
             this.name = name;
             this.wavPath = wavPath;
             this.locked = locked;
+            this.muted = muted;
             this.position = position;
             this.createdAt = createdAt;
             this.updatedAt = updatedAt;
