@@ -155,6 +155,14 @@ public class MainActivity extends Activity {
     private final LiveFxMonitor liveMonitor = new LiveFxMonitor();
     private String pendingRecName;
     private ObjectAnimator recPulse;
+    /** Id of the track the active recording lands in; null on the new-project path. */
+    private String pendingRecordTrackId;
+    /** True when the active recording is the live-FX monitor. */
+    private boolean recordingLive;
+    /** Plays the existing mix back while a take is recorded (overdub). */
+    private final OverdubPlayer overdubPlayer = new OverdubPlayer();
+    /** Mix file feeding overdub playback; null when there is none. */
+    private File monitorMixFile;
     /** Peak accumulator fed by the capture threads; drained by recTick. */
     private volatile float livePeakAcc;
     private android.app.AlertDialog saveDialog;
@@ -453,7 +461,14 @@ public class MainActivity extends Activity {
         trackList = findViewById(R.id.track_list);
         btnAddTrack = findViewById(R.id.btn_add_track);
         btnAddTrack.setOnClickListener(v -> onAddTrackClicked());
-        btnStop.setOnClickListener(v -> stopPlayback());
+        btnStop.setOnClickListener(v -> {
+            if (isRecordingSession()) {
+                // During a recording session btnStop is the pause button.
+                pauseRecording();
+            } else {
+                stopPlayback();
+            }
+        });
 
         libraryDb = new LibraryDb(this);
         restoreSaveFolderUri(prefs);
@@ -2531,8 +2546,10 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * One track row: name (tap to rename), lock toggle, row tap to select.
-     * The selected row uses the selected-chip background.
+     * One track row: name (tap to rename), lock toggle, mute toggle,
+     * row tap to select. The selected row uses the selected-chip
+     * background. Track changes are frozen during a recording session
+     * so the record target stays stable.
      */
     private LinearLayout buildTrackRow(final LibraryDb.Track track,
             float density) {
@@ -2545,7 +2562,12 @@ public class MainActivity extends Activity {
                 ? R.drawable.bg_chip_selected : R.drawable.bg_chip);
         row.setClickable(true);
         row.setFocusable(true);
-        row.setOnClickListener(v -> selectTrack(track.id));
+        row.setOnClickListener(v -> {
+            if (isRecordingSession()) {
+                return; // silent: the record target stays put
+            }
+            selectTrack(track.id);
+        });
 
         TextView name = new TextView(this);
         name.setText(track.name);
@@ -2574,6 +2596,24 @@ public class MainActivity extends Activity {
         lockBtn.setOnClickListener(v -> toggleTrackLock(track.id, !locked));
         row.addView(lockBtn);
 
+        Button muteBtn = new Button(this);
+        final boolean muted = track.muted;
+        muteBtn.setText(muted ? "\uD83D\uDD07" : "\uD83D\uDD0A");
+        muteBtn.setTextColor(getColor(
+                muted ? R.color.sl_teal2 : R.color.sl_mut));
+        muteBtn.setTextSize(12f);
+        muteBtn.setBackgroundResource(R.drawable.bg_ghost);
+        muteBtn.setMinHeight(0);
+        muteBtn.setMinimumHeight(0);
+        muteBtn.setPadding(btnPad, (int) (6 * density),
+                btnPad, (int) (6 * density));
+        muteBtn.setOnClickListener(v -> toggleTrackMute(track.id, !muted));
+        LinearLayout.LayoutParams muteLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        muteLp.leftMargin = (int) (6 * density);
+        row.addView(muteBtn, muteLp);
+
         LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
@@ -2584,6 +2624,10 @@ public class MainActivity extends Activity {
 
     private void onAddTrackClicked() {
         if (currentEntryId == null) {
+            return;
+        }
+        if (isRecordingSession()) {
+            setStatus("Stop recording first.");
             return;
         }
         try {
@@ -2601,6 +2645,10 @@ public class MainActivity extends Activity {
         if (currentEntryId == null) {
             return;
         }
+        if (isRecordingSession()) {
+            setStatus("Stop recording first.");
+            return;
+        }
         try {
             libraryDb.setTrackLocked(trackId, locked);
             mTracks = libraryDb.listTracks(currentEntryId);
@@ -2612,8 +2660,32 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** Mute toggle, mirroring toggleTrackLock; muting changes the mix. */
+    private void toggleTrackMute(String trackId, boolean muted) {
+        if (currentEntryId == null) {
+            return;
+        }
+        if (isRecordingSession()) {
+            setStatus("Stop recording first.");
+            return;
+        }
+        try {
+            libraryDb.setTrackMuted(trackId, muted);
+            mTracks = libraryDb.listTracks(currentEntryId);
+            refreshTrackPanel();
+            refreshMix();
+            setStatus(getString(muted
+                    ? R.string.track_muted : R.string.track_unmuted));
+        } catch (Exception e) {
+            setStatus("Could not change mute: " + e.getMessage());
+        }
+    }
+
     /** Rename dialog: EditText prefilled, trimmed, empty input ignored. */
     private void showRenameTrackDialog(final LibraryDb.Track track) {
+        if (isRecordingSession()) {
+            return; // silent: the record target stays put
+        }
         final float density = getResources().getDisplayMetrics().density;
         int pad = (int) (20 * density);
         LinearLayout root = new LinearLayout(this);
@@ -2862,37 +2934,68 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Rendered track WAVs for the mix, in track position order.
-     * Tracks without a rendered take are skipped.
+     * One audible track for the mix: stable id (for mute) plus its
+     * rendered WAV path.
      */
-    private List<String> collectMixWavs() {
-        final List<String> wavPaths = new ArrayList<>();
+    static final class MixTrack {
+        final String id;
+        final String path;
+
+        MixTrack(String id, String path) {
+            this.id = id;
+            this.path = path;
+        }
+    }
+
+    /**
+     * Rendered track WAVs for the mix, in track position order.
+     * Tracks without a rendered take are skipped. Muted tracks are
+     * NOT filtered here: the Python mixdown needs their ids.
+     */
+    private List<MixTrack> collectMixWavs() {
+        final List<MixTrack> mixTracks = new ArrayList<>();
         for (LibraryDb.Track t : mTracks) {
             try {
                 File render = libraryDb.trackRenderFile(t.id);
                 if (render.exists() && render.length() > 44) {
-                    wavPaths.add(render.getAbsolutePath());
+                    mixTracks.add(new MixTrack(t.id,
+                            render.getAbsolutePath()));
                 }
             } catch (Exception ignored) {
             }
         }
-        return wavPaths;
+        return mixTracks;
     }
 
     /**
      * Blocking mixdown of rendered track WAVs (call off the UI thread).
+     * Muted track ids ride along; the Python side skips them and raises
+     * "no audible tracks to mix" when nothing audible remains.
      * Returns the mix file path.
      */
-    private String mixdownBlocking(String entryId, List<String> wavPaths)
+    private String mixdownBlocking(String entryId, List<MixTrack> mixTracks)
             throws Exception {
         if (!Python.isStarted()) {
             Python.start(new AndroidPlatform(this));
         }
+        JSONArray tracksJson = new JSONArray();
+        for (MixTrack mt : mixTracks) {
+            JSONObject o = new JSONObject();
+            o.put("id", mt.id);
+            o.put("path", mt.path);
+            tracksJson.put(o);
+        }
+        JSONArray mutedJson = new JSONArray();
+        for (LibraryDb.Track t : mTracks) {
+            if (t.muted) {
+                mutedJson.put(t.id);
+            }
+        }
         // The entry's sample rate: the first track's rate.
         int targetRate = 0;
-        for (String p : wavPaths) {
+        for (MixTrack mt : mixTracks) {
             try {
-                targetRate = (int) wavInfo(new File(p))[0];
+                targetRate = (int) wavInfo(new File(mt.path))[0];
                 break;
             } catch (Exception ignored) {
             }
@@ -2901,8 +3004,9 @@ public class MainActivity extends Activity {
         File outFile = libraryDb.mixFile(entryId);
         PyObject result = Python.getInstance()
                 .getModule("audiofx.android_bridge")
-                .callAttr("mixdown", new JSONArray(wavPaths).toString(),
-                        outFile.getAbsolutePath(), sampleRate);
+                .callAttr("mixdown", tracksJson.toString(),
+                        outFile.getAbsolutePath(), sampleRate,
+                        mutedJson.toString());
         if (!"True".equals(result.callAttr("get", "ok").toString())) {
             throw new Exception("mixdown failed");
         }
@@ -2920,22 +3024,18 @@ public class MainActivity extends Activity {
     /**
      * Mix every rendered track into the entry mix and show it. Tracks
      * without a rendered take are skipped; with no rendered audio at all
-     * the waveform is cleared (the existing empty behavior).
+     * the waveform is cleared (the existing empty behavior). When every
+     * audible track is muted the mix is empty too: the waveform clears
+     * with a muted notice instead of an error.
      */
     private void refreshMix() {
         final String entryId = currentEntryId;
         if (entryId == null) {
             return;
         }
-        final List<String> wavPaths = collectMixWavs();
-        if (wavPaths.isEmpty()) {
-            waveformView.setPeaks(new float[0]);
-            waveformView.setDuration(0);
-            audioDurationSec = 0;
-            currentOutputPath = null;
-            tvTimeCur.setText("0:00");
-            tvTimeTot.setText("0:00");
-            setPlayPauseEnabled(false);
+        final List<MixTrack> mixTracks = collectMixWavs();
+        if (mixTracks.isEmpty()) {
+            clearMixView();
             return;
         }
         setBusy(true);
@@ -2943,7 +3043,8 @@ public class MainActivity extends Activity {
         setStatus("Mixing tracks...");
         new Thread(() -> {
             try {
-                final String finalMixPath = mixdownBlocking(entryId, wavPaths);
+                final String finalMixPath =
+                        mixdownBlocking(entryId, mixTracks);
                 runOnUiThread(() -> {
                     currentOutputPath = finalMixPath;
                     releasePlayer();
@@ -2954,13 +3055,34 @@ public class MainActivity extends Activity {
                     waveformView.finishProgressAnimation();
                 });
             } catch (Exception e) {
+                final boolean allMuted = e.getMessage() != null
+                        && e.getMessage().contains("no audible tracks");
                 runOnUiThread(() -> {
-                    setStatus("Mix failed: " + e.getMessage());
-                    setBusy(false);
-                    waveformView.clearProgress();
+                    if (allMuted) {
+                        // Every audible track is muted: empty mix, not an error.
+                        clearMixView();
+                        setBusy(false);
+                        waveformView.clearProgress();
+                        setStatus("All tracks muted.");
+                    } else {
+                        setStatus("Mix failed: " + e.getMessage());
+                        setBusy(false);
+                        waveformView.clearProgress();
+                    }
                 });
             }
         }).start();
+    }
+
+    /** Empty-mix view: clear the waveform, timers, and playback state. */
+    private void clearMixView() {
+        waveformView.setPeaks(new float[0]);
+        waveformView.setDuration(0);
+        audioDurationSec = 0;
+        currentOutputPath = null;
+        tvTimeCur.setText("0:00");
+        tvTimeTot.setText("0:00");
+        setPlayPauseEnabled(false);
     }
 
     /** A track's content changed: re-render that track, refresh the mix. */
@@ -2996,7 +3118,16 @@ public class MainActivity extends Activity {
 
     // ---- Microphone recording ----
 
+    /** True while a recording session is active, including a paused one. */
+    private boolean isRecordingSession() {
+        return recorder.isRecording() || liveMonitor.isRecording();
+    }
+
     private void onRecordClicked() {
+        if (recorder.isPaused() || liveMonitor.isPaused()) {
+            resumeRecording();
+            return;
+        }
         if (recorder.isRecording() || liveMonitor.isRecording()) {
             stopRecording();
             return;
@@ -3028,6 +3159,18 @@ public class MainActivity extends Activity {
         if (player != null && player.isPlaying()) {
             stopPlayback();
         }
+        // Resolve the take's track now so pause/stop use a stable target.
+        if (currentEntryId != null) {
+            ensureTracksForEntry(currentEntryId);
+            LibraryDb.Track target = resolveRecordTarget();
+            if (target == null) {
+                setStatus("Could not start recording.");
+                return;
+            }
+            pendingRecordTrackId = target.id;
+        } else {
+            pendingRecordTrackId = null;
+        }
         if (switchLiveFx.isChecked()) {
             startLiveRecording();
             return;
@@ -3035,9 +3178,12 @@ public class MainActivity extends Activity {
         recorder.setPreprocessing(switchAgc.isChecked(), switchNs.isChecked());
         File take = new File(getCacheDir(), "rec_take.wav");
         if (!recorder.start(take)) {
+            pendingRecordTrackId = null;
             setStatus("Microphone unavailable on this device.");
             return;
         }
+        recordingLive = false;
+        startOverdub();
         pendingRecName = "Recording "
                 + new SimpleDateFormat("yyyy-MM-dd HH-mm", Locale.US).format(new Date())
                 + ".wav";
@@ -3076,9 +3222,12 @@ public class MainActivity extends Activity {
         File take = new File(getCacheDir(), "rec_take.wav");
         if (!liveMonitor.start(take, warmth, reverbPreset, echo,
                 switchAgc.isChecked(), switchNs.isChecked())) {
+            pendingRecordTrackId = null;
             setStatus("Live FX unavailable on this device.");
             return;
         }
+        recordingLive = true;
+        startOverdub();
         pendingRecName = "Recording "
                 + new SimpleDateFormat("yyyy-MM-dd HH-mm", Locale.US).format(new Date())
                 + ".wav";
@@ -3096,16 +3245,95 @@ public class MainActivity extends Activity {
                 + ") — use headphones. Tap the red button to stop.");
     }
 
-    /** Shared recording UI: pulsing red button, REC pill, elapsed timer. */
-    private void enterRecordingUi(boolean live) {
+    /**
+     * Start overdub playback of the existing mix while a take is
+     * recorded. A missing mix or a failed start just means the take is
+     * recorded without playback, exactly as before this feature.
+     */
+    private void startOverdub() {
+        monitorMixFile = (currentOutputPath != null)
+                ? new File(currentOutputPath) : null;
+        if (monitorMixFile != null && monitorMixFile.exists()
+                && monitorMixFile.length() > 44) {
+            try {
+                overdubPlayer.start(monitorMixFile, 0);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /** Pause capture and overdub playback; the record-head UI freezes. */
+    private void pauseRecording() {
+        if (!isRecordingSession()) {
+            return;
+        }
+        if (recordingLive) {
+            liveMonitor.pause();
+        } else {
+            recorder.pause();
+        }
+        overdubPlayer.pause();
+        // Freeze the record-head UI distinctly: steady pause icon, no pulse.
+        if (recPulse != null) {
+            recPulse.cancel();
+            recPulse = null;
+        }
+        btnRecord.setAlpha(1f);
+        btnRecord.setImageResource(R.drawable.ic_pause);
+        // The pause button stays disabled until the session resumes.
+        btnStop.setEnabled(false);
+        setStatus("Recording paused. Tap the record button to resume.");
+    }
+
+    /** Resume a paused capture session, picking overdub playback back up. */
+    private void resumeRecording() {
+        if (!(recorder.isPaused() || liveMonitor.isPaused())) {
+            return;
+        }
+        long offset = recordingLive
+                ? liveMonitor.dataFrames() : recorder.dataFrames();
+        boolean ok = recordingLive
+                ? liveMonitor.resume() : recorder.resume();
+        if (!ok) {
+            setStatus("Could not resume recording.");
+            return;
+        }
         btnRecord.setImageResource(R.drawable.ic_stop_white);
+        startRecPulse();
+        btnStop.setEnabled(true);
+        setStatus(recordingLive
+                ? "Recording resumed (live FX). Tap the red button to stop."
+                : "Recording resumed. Tap the red button to stop.");
+        if (monitorMixFile != null && monitorMixFile.exists()) {
+            try {
+                // An offset past EOF starts nothing: the take continues
+                // without playback, which is the correct fallback.
+                overdubPlayer.start(monitorMixFile, offset);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /** The pulsing record-button animation used while a take is running. */
+    private void startRecPulse() {
+        if (recPulse != null) {
+            recPulse.cancel();
+        }
         recPulse = ObjectAnimator.ofFloat(btnRecord, "alpha", 1f, 0.35f);
         recPulse.setDuration(600);
         recPulse.setRepeatMode(ValueAnimator.REVERSE);
         recPulse.setRepeatCount(ValueAnimator.INFINITE);
         recPulse.start();
+    }
+
+    /** Shared recording UI: pulsing red button, REC pill, elapsed timer. */
+    private void enterRecordingUi(boolean live) {
+        btnRecord.setImageResource(R.drawable.ic_stop_white);
+        startRecPulse();
         setPlayPauseEnabled(false);
-        btnStop.setEnabled(false);
+        // During a recording session btnStop is the pause button.
+        btnStop.setImageResource(R.drawable.ic_pause);
+        btnStop.setEnabled(true);
         btnProcess.setEnabled(false);
         btnProcess.setAlpha(0.55f);
         btnTrim.setEnabled(false);
@@ -3140,6 +3368,9 @@ public class MainActivity extends Activity {
         }
         btnRecord.setAlpha(1f);
         btnRecord.setImageResource(0);
+        // Restore btnStop's normal role: stop playback, look, and state.
+        btnStop.setImageResource(R.drawable.ic_stop);
+        btnStop.setEnabled(false);
         btnProcess.setEnabled(true);
         btnProcess.setAlpha(1f);
         btnTrim.setEnabled(true);
@@ -3158,6 +3389,8 @@ public class MainActivity extends Activity {
     }
 
     private void stopRecording() {
+        // Overdub playback always stops with the take, even from a pause.
+        overdubPlayer.stop();
         final boolean wasLive = liveMonitor.isRecording();
         // Snapshot UI state before stop() resets the session labels.
         final String captureLabel = wasLive
@@ -3174,7 +3407,14 @@ public class MainActivity extends Activity {
         }
         exitRecordingUi();
         if (take == null) {
-            setStatus("Recording failed — nothing captured.");
+            // Zero audio captured: not a failure, keep the (empty) track.
+            refreshTrackPanel();
+            if (pendingRecordTrackId != null) {
+                selectTrack(pendingRecordTrackId);
+            }
+            setStatus("No audio captured.");
+            pendingRecordTrackId = null;
+            monitorMixFile = null;
             return;
         }
         // Multitrack: the take lands in a track's take file, never as a
@@ -3197,7 +3437,13 @@ public class MainActivity extends Activity {
             } else {
                 entryId = currentEntryId;
                 ensureTracksForEntry(entryId);
-                LibraryDb.Track target = resolveRecordTarget();
+                // Use the track picked at record start; resolve again
+                // only if it somehow vanished mid-session.
+                LibraryDb.Track target =
+                        getTrackById(pendingRecordTrackId);
+                if (target == null) {
+                    target = resolveRecordTarget();
+                }
                 if (target == null) {
                     throw new Exception("no empty track available");
                 }
@@ -3228,6 +3474,8 @@ public class MainActivity extends Activity {
             }
         } catch (Exception e) {
             setStatus("Could not save recording: " + e.getMessage());
+            pendingRecordTrackId = null;
+            monitorMixFile = null;
             return;
         }
         // Select the recorded track, show it, render it, refresh the mix.
@@ -3243,6 +3491,8 @@ public class MainActivity extends Activity {
         setStatus(switchAutoNorm.isChecked()
                 ? "Take saved and normalized."
                 : "Take saved.");
+        pendingRecordTrackId = null;
+        monitorMixFile = null;
     }
 
     /** Library path for Apply: append an fx op, re-render cumulatively. */
@@ -4491,7 +4741,7 @@ public class MainActivity extends Activity {
                         renderTrackBlocking(entryId, t.id);
                     }
                 }
-                List<String> wavs = collectMixWavs();
+                List<MixTrack> wavs = collectMixWavs();
                 if (wavs.isEmpty()) {
                     throw new Exception("Nothing to share yet.");
                 }
@@ -4512,9 +4762,12 @@ public class MainActivity extends Activity {
                     new Thread(() -> encodeShareFile(mixPath)).start();
                 });
             } catch (Exception e) {
+                final boolean allMuted = e.getMessage() != null
+                        && e.getMessage().contains("no audible tracks");
                 runOnUiThread(() -> {
                     shareInProgress = false;
-                    setStatus("Share failed: " + e.getMessage());
+                    setStatus(allMuted ? "All tracks muted."
+                            : "Share failed: " + e.getMessage());
                     setBusy(false);
                     waveformView.clearProgress();
                 });
@@ -4636,6 +4889,9 @@ public class MainActivity extends Activity {
             premiumBilling.destroy();
         }
         super.onDestroy();
+        // A paused session still counts as recording: capture and
+        // overdub playback both stop here.
+        overdubPlayer.stop();
         if (recorder.isRecording()) {
             recorder.stop();
         }
