@@ -220,6 +220,12 @@ public class LibraryDb extends SQLiteOpenHelper {
         return mkdirsParent(new File(libraryDir(), "render/mix_" + entryId + ".wav"));
     }
 
+    /** getFilesDir()/library/punches/&lt;uuid&gt;.wav: durable punch-in takes
+     * referenced by punch_in ops (dirs created on demand). */
+    public File punchTakeFile(String uuid) {
+        return mkdirsParent(new File(libraryDir(), "punches/" + uuid + ".wav"));
+    }
+
     // ------------------------------------------------------------------
     // Entries
     // ------------------------------------------------------------------
@@ -319,6 +325,23 @@ public class LibraryDb extends SQLiteOpenHelper {
         for (Track t : listTracks(id)) {
             deleteIfExists(trackTakeFile(t.id));
             deleteIfExists(trackRenderFile(t.id));
+        }
+        // Punch-in takes referenced by track ops; delete them too.
+        try {
+            for (Track t : listTracks(id)) {
+                for (Op op : listOps(id, t.id)) {
+                    if ("punch_in".equals(op.opType)
+                            && op.paramsJson != null) {
+                        String takePath =
+                                new org.json.JSONObject(op.paramsJson)
+                                        .optString("take_path", null);
+                        if (takePath != null) {
+                            deleteIfExists(new File(takePath));
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
         }
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
@@ -424,7 +447,30 @@ public class LibraryDb extends SQLiteOpenHelper {
                         : trackIdMap.get(op.trackId));
                 ocv.put("seq", op.seq);
                 ocv.put("op_type", op.opType);
-                ocv.put("params_json", op.paramsJson);
+                String paramsJson = op.paramsJson;
+                // punch_in ops reference a durable take file; copy it so
+                // the fork does not share (and cannot lose) the original.
+                if ("punch_in".equals(op.opType) && paramsJson != null) {
+                    try {
+                        org.json.JSONObject p =
+                                new org.json.JSONObject(paramsJson);
+                        String takePath = p.optString("take_path", null);
+                        if (takePath != null) {
+                            File srcTake = new File(takePath);
+                            if (srcTake.isFile()) {
+                                File dstTake = punchTakeFile(
+                                        java.util.UUID.randomUUID()
+                                                .toString());
+                                copyFile(srcTake, dstTake);
+                                p.put("take_path",
+                                        dstTake.getAbsolutePath());
+                                paramsJson = p.toString();
+                            }
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+                ocv.put("params_json", paramsJson);
                 ocv.put("label", op.label);
                 ocv.put("created_at", op.createdAt);
                 db.insertOrThrow("ops", null, ocv);

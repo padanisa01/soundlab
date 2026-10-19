@@ -174,6 +174,9 @@ public class MainActivity extends Activity {
     private ObjectAnimator recPulse;
     /** Id of the track the active recording lands in; null on the new-project path. */
     private String pendingRecordTrackId;
+    /** Non-null while a punch-in recording is armed: the selected start
+     * point in seconds (track time) where the take will replace audio. */
+    private Double pendingPunchStartSec;
     /** True when the active recording is the live-FX monitor. */
     private boolean recordingLive;
     /** Plays the existing mix back while a take is recorded (overdub). */
@@ -1116,7 +1119,8 @@ public class MainActivity extends Activity {
                 || "declip".equals(opType) || "denoise".equals(opType)
                 || "deplosive".equals(opType) || "deess".equals(opType)
                 || "level".equals(opType) || "loudness".equals(opType)
-                || "eq_balance".equals(opType) || "tune_up".equals(opType);
+                || "eq_balance".equals(opType) || "tune_up".equals(opType)
+                || "punch_in".equals(opType);
     }
 
     /** Undo depth = the given track's persisted renderable op count;
@@ -2436,6 +2440,18 @@ public class MainActivity extends Activity {
         setStatus("Undoing...");
         new Thread(() -> {
             try {
+                // Punch-in takes are durable files referenced by the op;
+                // delete the take when its op is undone.
+                if ("punch_in".equals(last.opType)) {
+                    try {
+                        String takePath = new JSONObject(last.paramsJson)
+                                .optString("take_path", null);
+                        if (takePath != null) {
+                            new File(takePath).delete();
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
                 libraryDb.popLastOp(entryId, trackId);
                 cachedDiagJson = null;
                 cachedDiagPath = null;
@@ -3621,8 +3637,24 @@ public class MainActivity extends Activity {
         // Resolve the take's track now so pause/stop use a stable target.
         if (currentEntryId != null) {
             ensureTracksForEntry(currentEntryId);
-            LibraryDb.Track target = resolveRecordTarget();
+            // Punch-in: the selected track is unlocked, holds audio, and
+            // the user set a start marker. The take replaces audio from
+            // the marker; otherwise the normal target rule applies.
+            LibraryDb.Track selected = getSelectedTrack();
+            pendingPunchStartSec = null;
+            LibraryDb.Track target;
+            if (selected != null && !selected.locked
+                    && trackHasAudio(selected) && selStartSec != null) {
+                target = selected;
+                pendingPunchStartSec = selStartSec;
+                setStatus("Punch-in at " + fmtSec(selStartSec)
+                        + " on " + selected.name + " — tap the red button"
+                        + " to stop.");
+            } else {
+                target = resolveRecordTarget();
+            }
             if (target == null) {
+                pendingPunchStartSec = null;
                 setStatus("Could not start recording.");
                 return;
             }
@@ -3666,6 +3698,7 @@ public class MainActivity extends Activity {
         File take = new File(getCacheDir(), "rec_take.wav");
         if (!recorder.start(take)) {
             pendingRecordTrackId = null;
+            pendingPunchStartSec = null;
             setStatus("Microphone unavailable on this device.");
             return;
         }
@@ -3906,6 +3939,7 @@ public class MainActivity extends Activity {
             }
             setStatus("No audio captured.");
             pendingRecordTrackId = null;
+            pendingPunchStartSec = null;
             monitorMixFile = null;
             return;
         }
@@ -3940,13 +3974,42 @@ public class MainActivity extends Activity {
                     throw new Exception("no empty track available");
                 }
                 trackId = target.id;
-                final File dest = libraryDb.trackTakeFile(trackId);
-                try {
-                    copyFile(take, dest);
-                    take.delete();
-                } catch (Exception e) {
-                    dest.delete(); // keep the empty slot empty
-                    throw e;
+                if (pendingPunchStartSec != null) {
+                    // Punch-in: the take becomes a durable file referenced
+                    // by the op; the op splices it into the track at the
+                    // marker. Undoable like any other op.
+                    String punchUuid = UUID.randomUUID().toString();
+                    File punchTake = libraryDb.punchTakeFile(punchUuid);
+                    try {
+                        copyFile(take, punchTake);
+                        take.delete();
+                    } catch (Exception e) {
+                        punchTake.delete();
+                        throw e;
+                    }
+                    double[] info = wavInfo(new File(target.wavPath));
+                    long startFrame =
+                            (long) (pendingPunchStartSec * info[0]);
+                    String params = "{\"take_path\":"
+                            + JSONObject.quote(
+                                    punchTake.getAbsolutePath())
+                            + ",\"start_frame\":" + startFrame + "}";
+                    libraryDb.addOp(entryId, trackId, "punch_in", params,
+                            "Punch-in at " + fmtSec(pendingPunchStartSec));
+                    // The marker served its purpose; clear the selection.
+                    selStartSec = null;
+                    selEndSec = null;
+                    setSelChip(null, null);
+                    pendingPunchStartSec = null;
+                } else {
+                    final File dest = libraryDb.trackTakeFile(trackId);
+                    try {
+                        copyFile(take, dest);
+                        take.delete();
+                    } catch (Exception e) {
+                        dest.delete(); // keep the empty slot empty
+                        throw e;
+                    }
                 }
             }
             if (wasLive) {
@@ -3967,6 +4030,7 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             setStatus("Could not save recording: " + e.getMessage());
             pendingRecordTrackId = null;
+            pendingPunchStartSec = null;
             monitorMixFile = null;
             return;
         }

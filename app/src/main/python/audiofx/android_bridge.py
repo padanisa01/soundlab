@@ -153,6 +153,34 @@ def _apply_op(samples, sample_rate, op, params, index):
             if sub == "tune_up":
                 raise ValueError("tune_up ops cannot nest")
             samples = _apply_op(samples, sample_rate, sub, sub_params, index)
+    elif op == "punch_in":
+        # Replace [start_frame, start_frame + take_len) with the take,
+        # crossfaded at the splice points. If the take runs past the end
+        # the track extends.
+        take_path = params.get("take_path")
+        start_frame = int(params.get("start_frame", 0))
+        if not take_path or not os.path.isfile(take_path):
+            raise ValueError("op #%d punch_in take not found: %r"
+                             % (index, take_path))
+        take, take_rate = read_wav_mono(take_path)
+        take = resample_linear(take, take_rate, sample_rate)
+        take_list = (take.tolist()
+                     if _HAVE_NP and isinstance(take, _np.ndarray)
+                     else list(take))
+        if not take_list:
+            raise ValueError("op #%d punch_in take is empty" % index)
+        orig = (samples.tolist()
+                if _HAVE_NP and isinstance(samples, _np.ndarray)
+                else list(samples))
+        n = len(orig)
+        start = max(0, min(start_frame, n))
+        end = min(start + len(take_list), n)
+        spliced = splice_with_crossfade(orig, take_list[:end - start],
+                                        start, end, sample_rate)
+        if start + len(take_list) > n:
+            spliced.extend(take_list[n - start:])
+        samples = (_np.asarray(spliced, dtype=_np.float64)
+                   if _HAVE_NP else spliced)
     elif op == "livefx":
         # Live-FX takes are baked into the pristine; the livefx op is a
         # display-only label and must never be re-run.

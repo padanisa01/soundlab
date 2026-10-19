@@ -248,6 +248,12 @@ or the plan changes.
   latency compensation between playback and capture in this version
   (known limitation); use headphones to avoid the mic picking up
   the monitor.
+- **Punch-in**: select an unlocked track that has audio, tap the
+  waveform to set a start marker, then hit record. The take replaces
+  the track's audio from the marker (crossfaded at the splice, track
+  extends if the take runs past the end). Implemented as an undoable
+  `punch_in` op; the take is stored durably and cleaned up on undo,
+  entry delete, or fork (forks get their own copy).
 - **Pause/resume**: while recording, the stop button becomes a pause
   button. Pause halts capture and playback, keeping the partial take;
   tapping record resumes, appending to the same take file, with

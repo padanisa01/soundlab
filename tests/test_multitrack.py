@@ -395,5 +395,51 @@ class TestResolveRecordTarget(unittest.TestCase):
                          {"action": "record", "track_id": "t3"})
 
 
+class PunchInOpTest(unittest.TestCase):
+    """punch_in op: splice a take into the pristine at start_frame."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.pristine = os.path.join(self.tmp, "pristine.wav")
+        self.take = os.path.join(self.tmp, "take.wav")
+        self.out = os.path.join(self.tmp, "out.wav")
+        # 1s of silence at 8kHz, take is 0.25s of DC 0.5
+        write_wav(self.pristine, [0.0] * 8000, 8000)
+        write_wav(self.take, [0.5] * 2000, 8000)
+
+    def render(self, start_frame):
+        ops = json.dumps([{"op": "punch_in",
+                           "params": {"take_path": self.take,
+                                     "start_frame": start_frame}}])
+        r = android_bridge.render_chain(self.pristine, ops, self.out)
+        self.assertTrue(r["ok"])
+        samples, rate = read_wav_mono(self.out)
+        return samples, rate
+
+    def test_punch_middle(self):
+        samples, rate = self.render(2000)
+        self.assertEqual(rate, 8000)
+        self.assertEqual(len(samples), 8000)
+        # Before the punch: silence.
+        self.assertAlmostEqual(max(abs(s) for s in samples[:1500]), 0.0)
+        # Inside the take (away from crossfades): 0.5.
+        self.assertAlmostEqual(samples[3000], 0.5, places=2)
+        # After the take: silence again.
+        self.assertAlmostEqual(max(abs(s) for s in samples[4500:]), 0.0)
+
+    def test_punch_extends_track(self):
+        # Punch at 7000 with a 2000-frame take on an 8000-frame track.
+        samples, _ = self.render(7000)
+        self.assertEqual(len(samples), 9000)
+        self.assertAlmostEqual(samples[8000], 0.5, places=2)
+
+    def test_punch_missing_take_raises(self):
+        ops = json.dumps([{"op": "punch_in",
+                           "params": {"take_path": "/nonexistent.wav",
+                                     "start_frame": 0}}])
+        with self.assertRaises(ValueError):
+            android_bridge.render_chain(self.pristine, ops, self.out)
+
+
 if __name__ == "__main__":
     unittest.main()
