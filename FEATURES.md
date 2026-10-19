@@ -190,10 +190,11 @@ or the plan changes.
   entry points in `android_bridge.py`.
 
 ### Library of recordings
-- Every recording becomes a durable project in `filesDir/library/`:
-  one immutable pristine WAV (`takes/<uuid>.wav`) plus an ordered,
-  re-runnable op chain in SQLite (`soundlab_library.db`), surviving
-  app restarts. Since 2026-10-17 picked/imported files are first-class
+- Every recording becomes a durable project in `filesDir/library/`,
+  holding one or more tracks: each track has an immutable pristine WAV
+  (`tracks/<uuid>.wav`) plus its own ordered, re-runnable op chain in
+  SQLite (`soundlab_library.db`, DB v2), surviving app restarts. Legacy
+  single-take entries adopt a "Track 1" in place on first open. Since 2026-10-17 picked/imported files are first-class
   too: opening audio imports a pristine copy as a new entry (named
   after the file), with the same op chain, undo history and exports.
 - **Library screen** (`LibraryActivity`, via the header icon or the
@@ -217,6 +218,38 @@ or the plan changes.
 - History is keyed by entry ID: renames never orphan it. Duplicate
   forks an independent copy with a "Forked from" marker. Edits
   auto-persist; there is no save-project step.
+
+### Multi-track recording
+- One library entry is a project of N tracks (`tracks` table, DB v2):
+  each track has a UUID, an editable name, its own pristine WAV, its
+  own op chain, and a lock flag.
+- **Track panel** above the waveform: tap a row to select it
+  (highlighted), tap the name to rename it, tap the lock toggle to
+  lock or unlock it. The "+" button adds a track ("Track N").
+- **Record** targets the selected track when it is empty and
+  unlocked, else the first empty unlocked track, else a new track is
+  auto-created ("Track N"). Recording never overwrites existing
+  audio. Pressing record with no project open creates one first. The
+  mic pipeline (AGC/NS/limiter/auto-normalize) applies unchanged to
+  each take.
+- A locked track is immune to change: effects, trim, tune-up, Fix
+  buttons, undo, and re-recording all no-op with a "Track locked"
+  toast. Lock blocks changes, not playback: locked tracks are
+  included in the mix, and diagnosing a locked track (read-only) is
+  allowed.
+- Effects, undo, diagnose, and tune-up target the selected track
+  only. Each track renders incrementally from its own cached chain
+  tip, so editing one track never re-renders the others.
+- The main waveform and playback always show the current mix of all
+  tracks: each track is resampled to the project rate (linear
+  interpolation), zero-padded to the longest, summed in float64, and
+  peak-normalized to -1 dBFS (`mixdown` in `android_bridge.py`).
+  Empty tracks are skipped.
+- **Save**: each audible track is written as `<sanitized track
+  name>.wav` into the user-chosen folder; empty tracks are skipped.
+- **Share**: mixes all tracks down, then the existing 96 kbps MP3
+  FileProvider share runs on the mix.
+- Not included by design: mute, solo, per-track volume, pan.
 
 ### Save
 - **Save as MP3**: encodes with `lameenc` (CBR 192 kbps), in the Python
