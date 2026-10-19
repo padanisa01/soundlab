@@ -220,23 +220,41 @@ or the plan changes.
   auto-persist; there is no save-project step.
 
 ### Multi-track recording
-- One library entry is a project of N tracks (`tracks` table, DB v2):
+- One library entry is a project of N tracks (`tracks` table, DB v3):
   each track has a UUID, an editable name, its own pristine WAV, its
-  own op chain, and a lock flag.
+  own op chain, a lock flag, and a mute flag.
 - **Track panel** above the waveform: tap a row to select it
   (highlighted), tap the name to rename it, tap the lock toggle to
-  lock or unlock it. The "+" button adds a track ("Track N").
+  lock or unlock it, tap the speaker toggle to mute or unmute it.
+  The "+" button adds a track ("Track N").
 - **Record** targets the selected track when it is empty and
   unlocked, else the first empty unlocked track, else a new track is
   auto-created ("Track N"). Recording never overwrites existing
   audio. Pressing record with no project open creates one first. The
   mic pipeline (AGC/NS/limiter/auto-normalize) applies unchanged to
   each take.
+- **Overdub**: when recording starts, the current mix of all
+  non-empty, unmuted tracks plays back on a dedicated thread while
+  the mic captures, so you can play along with existing tracks. If
+  nothing is audible, recording proceeds without playback. No
+  latency compensation between playback and capture in this version
+  (known limitation); use headphones to avoid the mic picking up
+  the monitor.
+- **Pause/resume**: while recording, the stop button becomes a pause
+  button. Pause halts capture and playback, keeping the partial take;
+  tapping record resumes, appending to the same take file, with
+  playback restarting from the take-length offset to stay in sync.
+  The record head shows a steady paused state. Pause-then-stop with
+  zero audio keeps the track empty. Pause affects only the
+  recording session, never already-recorded tracks.
 - A locked track is immune to change: effects, trim, tune-up, Fix
   buttons, undo, and re-recording all no-op with a "Track locked"
   toast. Lock blocks changes, not playback: locked tracks are
   included in the mix, and diagnosing a locked track (read-only) is
   allowed.
+- A muted track is excluded from every mix: the monitor mix during
+  recording, the main waveform mix, and the share mixdown. Mute is
+  the way to silence a track everywhere; it persists per track.
 - Effects, undo, diagnose, and tune-up target the selected track
   only. Each track renders incrementally from its own cached chain
   tip, so editing one track never re-renders the others.
@@ -249,7 +267,7 @@ or the plan changes.
   name>.wav` into the user-chosen folder; empty tracks are skipped.
 - **Share**: mixes all tracks down, then the existing 96 kbps MP3
   FileProvider share runs on the mix.
-- Not included by design: mute, solo, per-track volume, pan.
+- Not included by design: solo, per-track volume, pan.
 
 ### Save
 - **Save as MP3**: encodes with `lameenc` (CBR 192 kbps), in the Python
