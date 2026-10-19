@@ -51,6 +51,7 @@ public class WaveformView extends View {
     private static final int BAR_COLOR = 0xFF4DB6AC;
     private static final int PLACEHOLDER_COLOR = 0xFFB0BEC5;
     private static final int LIVE_HEAD_COLOR = 0xFFE53935; // record-head line
+    private static final int LIVE_WAVE_COLOR = 0xFFFFFFFF; // live sine wave
     private static final int LIVE_MAX_BUCKETS = 600; // 2 min at 5 buckets/s
     private static final int GRADIENT_START = 0x3326A69A; // translucent teal
     private static final int GRADIENT_END = 0xCC26A69A;   // more opaque teal
@@ -122,6 +123,7 @@ public class WaveformView extends View {
     private final Paint pbFillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pbHeadPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint liveHeadPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint liveWavePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF pbRect = new RectF();
 
     public WaveformView(Context context) {
@@ -148,6 +150,9 @@ public class WaveformView extends View {
         pbHeadPaint.setStrokeWidth(3f);
         liveHeadPaint.setColor(LIVE_HEAD_COLOR);
         liveHeadPaint.setStrokeWidth(3f);
+        liveWavePaint.setColor(LIVE_WAVE_COLOR);
+        liveWavePaint.setStyle(Paint.Style.STROKE);
+        liveWavePaint.setStrokeWidth(2.5f);
         touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
         scaleDetector = new ScaleGestureDetector(context, new ScaleListener());
         gestureDetector = new GestureDetector(context, new GestureListener());
@@ -227,6 +232,40 @@ public class WaveformView extends View {
 
     public boolean isLive() {
         return liveMode;
+    }
+
+    /** Live recording indicator: a sine wave from 0 to the current take
+     * time t, amplitude-modulated by the captured envelope, with a red
+     * vertical marker and time label at t (the right edge; the take fills
+     * the lane in live mode). */
+    private void drawLiveWave(android.graphics.Canvas canvas, float w,
+            float barH, float midY) {
+        float maxAmp = midY * 0.95f;
+        int n = liveArr.length;
+        android.graphics.Path path = new android.graphics.Path();
+        float cycles = 32f; // fixed visual frequency; envelope carries time
+        int step = Math.max(2, (int) (w / 300));
+        for (int px = 0; px <= (int) w; px += step) {
+            float frac = px / w;
+            int idx = n > 0 ? Math.min(n - 1, (int) (frac * n)) : 0;
+            float env = n > 0 ? liveArr[idx] : 0.12f; // idle ripple
+            float y = midY + (float) Math.sin(frac * cycles * 2 * Math.PI)
+                    * env * maxAmp;
+            if (px == 0) {
+                path.moveTo(px, y);
+            } else {
+                path.lineTo(px, y);
+            }
+        }
+        canvas.drawPath(path, liveWavePaint);
+        // Vertical marker at t.
+        float mx = w - 2f;
+        canvas.drawLine(mx, 0, mx, barH, liveHeadPaint);
+        String label = formatSeconds(durationSec);
+        float density = getResources().getDisplayMetrics().density;
+        float tw = textPaint.measureText(label);
+        canvas.drawText(label, Math.max(0, mx - tw - 6 * density),
+                14 * density, textPaint);
     }
 
     /**
@@ -523,8 +562,9 @@ public class WaveformView extends View {
         float barH = h - labelH;
         float midY = barH / 2f;
 
-        float[] drawPeaks = liveMode ? liveArr : peaks;
-        if (drawPeaks.length == 0) {
+        if (liveMode) {
+            drawLiveWave(canvas, w, barH, midY);
+        } else if (peaks.length == 0) {
             // Empty placeholder: faint center line until audio is picked.
             canvas.drawLine(0, midY, w, midY, placeholderPaint);
         } else {
@@ -533,23 +573,18 @@ public class WaveformView extends View {
             // [0, contentFrac] of the project width so lanes align.
             float cf = contentFrac();
             float startF = viewStart;
-            int i0 = (int) ((startF / cf) * drawPeaks.length);
-            int i1 = Math.min(drawPeaks.length,
+            int i0 = (int) ((startF / cf) * peaks.length);
+            int i1 = Math.min(peaks.length,
                     (int) Math.ceil(((viewStart + 1f / zoom) / cf)
-                            * drawPeaks.length) + 1);
-            float pxPerBucket = zoom * w * cf / drawPeaks.length;
+                            * peaks.length) + 1);
+            float pxPerBucket = zoom * w * cf / peaks.length;
             float drawnW = Math.max(1f, pxPerBucket * 0.7f);
             for (int i = Math.max(0, i0); i < i1; i++) {
-                float left = (i / (float) drawPeaks.length * cf - startF)
+                float left = (i / (float) peaks.length * cf - startF)
                         * zoom * w;
-                float amp = drawPeaks[i] * maxAmp;
+                float amp = peaks[i] * maxAmp;
                 canvas.drawRect(left, midY - amp, left + drawnW, midY + amp, barPaint);
             }
-        }
-
-        // Live recording: red record-head line at the frontier.
-        if (liveMode && liveArr.length > 0) {
-            canvas.drawLine(w - 2f, 0, w - 2f, barH, liveHeadPaint);
         }
 
         // Selection window shading + marker lines.
