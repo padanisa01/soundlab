@@ -144,6 +144,13 @@ public class MainActivity extends Activity {
     private String inputPath;   // cached WAV picked by the user, or a library pristine
     private String inputFileName = "audio.wav";
     private String currentOutputPath;  // mix file backing Play/Share; null until first render
+    /**
+     * True when the mix file is stale or missing relative to the tracks.
+     * refreshMix() updates only the waveform peaks (lazy) and sets this;
+     * ensureMixFile() writes the file on demand (playback, overdub,
+     * share) and clears it.
+     */
+    private boolean mixDirty = false;
     private String playerOutputPath;   // file the live player was built for
     private String currentEntryId;     // library entry being edited; null for picked files
     private LibraryDb libraryDb;
@@ -1880,7 +1887,7 @@ public class MainActivity extends Activity {
                         fix.optJSONObject("params").toString(),
                         fix.optString("label"),
                         "Applying fix...", "Fix applied.",
-                        () -> loadWaveformForPath(currentOutputPath));
+                        null);
             });
             body.addView(fixBtn);
         }
@@ -2348,7 +2355,7 @@ public class MainActivity extends Activity {
                         applyTuneUpOp(params.toString(), summary,
                                 "Tuning up...",
                                 "Tune-up complete. " + receipt,
-                                () -> loadWaveformForPath(currentOutputPath),
+                                null,
                                 preRendered, preRenderedDur);
                     } else {
                         // No converged audio (diagnosed file gone): build
@@ -2357,7 +2364,7 @@ public class MainActivity extends Activity {
                                 params.toString(), summary,
                                 "Tuning up...",
                                 "Tune-up complete. " + receipt,
-                                () -> loadWaveformForPath(currentOutputPath));
+                                null);
                     }
                 });
             } catch (Exception e) {
@@ -3027,16 +3034,10 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Blocking mixdown of rendered track WAVs (call off the UI thread).
-     * Muted track ids ride along; the Python side skips them and raises
-     * "no audible tracks to mix" when nothing audible remains.
-     * Returns the mix file path.
+     * Shared JSON args for the Python mix calls (mixdown/mix_peaks).
+     * Muted track ids ride along unfiltered: the Python side skips them.
      */
-    private String mixdownBlocking(String entryId, List<MixTrack> mixTracks)
-            throws Exception {
-        if (!Python.isStarted()) {
-            Python.start(new AndroidPlatform(this));
-        }
+    private JSONObject mixCallArgs(List<MixTrack> mixTracks) throws JSONException {
         JSONArray tracksJson = new JSONArray();
         for (MixTrack mt : mixTracks) {
             JSONObject o = new JSONObject();
@@ -3059,13 +3060,29 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {
             }
         }
-        final int sampleRate = targetRate > 0 ? targetRate : 44100;
+        JSONObject args = new JSONObject();
+        args.put("tracks", tracksJson.toString());
+        args.put("muted", mutedJson.toString());
+        args.put("rate", targetRate > 0 ? targetRate : 44100);
+        return args;
+    }
+
+    /**
+     * Blocking mixdown of rendered track WAVs (call off the UI thread).
+     * Returns the mix file path.
+     */
+    private String mixdownBlocking(String entryId, List<MixTrack> mixTracks)
+            throws Exception {
+        if (!Python.isStarted()) {
+            Python.start(new AndroidPlatform(this));
+        }
+        JSONObject a = mixCallArgs(mixTracks);
         File outFile = libraryDb.mixFile(entryId);
         PyObject result = Python.getInstance()
                 .getModule("audiofx.android_bridge")
-                .callAttr("mixdown", tracksJson.toString(),
-                        outFile.getAbsolutePath(), sampleRate,
-                        mutedJson.toString());
+                .callAttr("mixdown", a.getString("tracks"),
+                        outFile.getAbsolutePath(), a.getInt("rate"),
+                        a.getString("muted"));
         if (!"True".equals(result.callAttr("get", "ok").toString())) {
             throw new Exception("mixdown failed");
         }
@@ -3081,11 +3098,68 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Mix every rendered track into the entry mix and show it. Tracks
-     * without a rendered take are skipped; with no rendered audio at all
-     * the waveform is cleared (the existing empty behavior). When every
-     * audible track is muted the mix is empty too: the waveform clears
-     * with a muted notice instead of an error.
+     * In-memory mix peaks for the waveform display (call off the UI
+     * thread). Same mix as mixdownBlocking, but no file is written.
+     * Returns {"peaks_json", "duration_s"}.
+     */
+    private JSONObject mixPeaksBlocking(List<MixTrack> mixTracks)
+            throws Exception {
+        if (!Python.isStarted()) {
+            Python.start(new AndroidPlatform(this));
+        }
+        JSONObject a = mixCallArgs(mixTracks);
+        PyObject result = Python.getInstance()
+                .getModule("audiofx.android_bridge")
+                .callAttr("mix_peaks", a.getString("tracks"), a.getInt("rate"),
+                        a.getString("muted"), 1200);
+        if (!"True".equals(result.callAttr("get", "ok").toString())) {
+            throw new Exception("mix peaks failed");
+        }
+        JSONObject o = new JSONObject();
+        o.put("peaks_json", result.callAttr("get", "peaks_json").toString());
+        o.put("duration_s", result.callAttr("get", "duration_s").toString());
+        return o;
+    }
+
+    /**
+     * Returns the fresh mix file for the current entry, writing it when
+     * the mix is dirty (call off the UI thread). Null when there is no
+     * entry or no audible audio. Updates currentOutputPath and clears
+     * mixDirty.
+     */
+    private String ensureMixFile() throws Exception {
+        final String entryId = currentEntryId;
+        if (entryId == null) {
+            return null;
+        }
+        File mixFile = libraryDb.mixFile(entryId);
+        if (!mixDirty && mixFile.exists() && mixFile.length() > 44) {
+            currentOutputPath = mixFile.getAbsolutePath();
+            return currentOutputPath;
+        }
+        List<MixTrack> wavs = collectMixWavs();
+        try {
+            String path = mixdownBlocking(entryId, wavs);
+            currentOutputPath = path;
+            mixDirty = false;
+            return path;
+        } catch (Exception e) {
+            if (e.getMessage() != null
+                    && e.getMessage().contains("no audible tracks")) {
+                currentOutputPath = null;
+                mixDirty = true;
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Show the current mix in the waveform. The mix itself is lazy: this
+     * computes only the display peaks in memory (no file is written) and
+     * marks the mix file dirty; ensureMixFile() produces the file on
+     * demand for playback, overdub, and share. With no audible tracks at
+     * all, no Python runs: the view just clears.
      */
     private void refreshMix() {
         final String entryId = currentEntryId;
@@ -3093,8 +3167,25 @@ public class MainActivity extends Activity {
             return;
         }
         final List<MixTrack> mixTracks = collectMixWavs();
-        if (mixTracks.isEmpty()) {
+        final java.util.Set<String> mutedIds = new java.util.HashSet<>();
+        for (LibraryDb.Track t : mTracks) {
+            if (t.muted) {
+                mutedIds.add(t.id);
+            }
+        }
+        boolean anyAudible = false;
+        for (MixTrack mt : mixTracks) {
+            if (!mutedIds.contains(mt.id)) {
+                anyAudible = true;
+                break;
+            }
+        }
+        if (!anyAudible) {
             clearMixView();
+            mixDirty = true;
+            if (!mixTracks.isEmpty()) {
+                setStatus("All tracks muted.");
+            }
             return;
         }
         setBusy(true);
@@ -3102,24 +3193,36 @@ public class MainActivity extends Activity {
         setStatus("Mixing tracks...");
         new Thread(() -> {
             try {
-                final String finalMixPath =
-                        mixdownBlocking(entryId, mixTracks);
+                final JSONObject peaks = mixPeaksBlocking(mixTracks);
+                final JSONArray arr =
+                        new JSONArray(peaks.getString("peaks_json"));
+                final float[] peakArr = new float[arr.length()];
+                for (int i = 0; i < arr.length(); i++) {
+                    peakArr[i] = (float) arr.getDouble(i);
+                }
+                final double dur =
+                        Double.parseDouble(peaks.getString("duration_s"));
                 runOnUiThread(() -> {
-                    currentOutputPath = finalMixPath;
+                    waveformView.setPeaks(peakArr);
+                    waveformView.setDuration(dur);
+                    audioDurationSec = dur;
+                    tvTimeCur.setText("0:00");
+                    tvTimeTot.setText(fmtTime(dur));
+                    setPlayPauseEnabled(true);
+                    mixDirty = true;
                     releasePlayer();
                     btnStop.setEnabled(false);
-                    loadWaveformForPath(finalMixPath);
-                    setPlayPauseEnabled(true);
                     setBusy(false);
                     waveformView.finishProgressAnimation();
                 });
             } catch (Exception e) {
-                final boolean allMuted = e.getMessage() != null
+                final boolean noAudible = e.getMessage() != null
                         && e.getMessage().contains("no audible tracks");
                 runOnUiThread(() -> {
-                    if (allMuted) {
-                        // Every audible track is muted: empty mix, not an error.
+                    if (noAudible) {
+                        // A render vanished mid-mix: empty mix, not an error.
                         clearMixView();
+                        mixDirty = true;
                         setBusy(false);
                         waveformView.clearProgress();
                         setStatus("All tracks muted.");
@@ -3230,8 +3333,33 @@ public class MainActivity extends Activity {
         } else {
             pendingRecordTrackId = null;
         }
+        // The monitor mix must be fresh before capture starts; build it
+        // off the UI thread, then start capture and overdub together.
+        setBusy(true);
+        setStatus("Preparing...");
+        new Thread(() -> {
+            File monitor = null;
+            if (currentEntryId != null) {
+                try {
+                    String p = ensureMixFile();
+                    if (p != null) {
+                        monitor = new File(p);
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            final File monitorFinal = monitor;
+            runOnUiThread(() -> {
+                setBusy(false);
+                beginCapture(monitorFinal);
+            });
+        }).start();
+    }
+
+    /** Start the mic capture (UI thread); the monitor mix is already fresh. */
+    private void beginCapture(File monitorMixFile) {
         if (switchLiveFx.isChecked()) {
-            startLiveRecording();
+            startLiveRecording(monitorMixFile);
             return;
         }
         recorder.setPreprocessing(switchAgc.isChecked(), switchNs.isChecked());
@@ -3242,7 +3370,7 @@ public class MainActivity extends Activity {
             return;
         }
         recordingLive = false;
-        startOverdub();
+        startOverdub(monitorMixFile);
         pendingRecName = "Recording "
                 + new SimpleDateFormat("yyyy-MM-dd HH-mm", Locale.US).format(new Date())
                 + ".wav";
@@ -3267,7 +3395,7 @@ public class MainActivity extends Activity {
      * snapshotted into a Python LiveChain, the mic feeds it in blocks,
      * the wet signal plays back live and is baked into the take.
      */
-    private void startLiveRecording() {
+    private void startLiveRecording(File monitorMixFile) {
         try {
             if (!Python.isStarted()) {
                 Python.start(new AndroidPlatform(this));
@@ -3286,7 +3414,7 @@ public class MainActivity extends Activity {
             return;
         }
         recordingLive = true;
-        startOverdub();
+        startOverdub(monitorMixFile);
         pendingRecName = "Recording "
                 + new SimpleDateFormat("yyyy-MM-dd HH-mm", Locale.US).format(new Date())
                 + ".wav";
@@ -3306,12 +3434,12 @@ public class MainActivity extends Activity {
 
     /**
      * Start overdub playback of the existing mix while a take is
-     * recorded. A missing mix or a failed start just means the take is
-     * recorded without playback, exactly as before this feature.
+     * recorded. The mix file is ensured fresh by the caller before
+     * capture starts. A missing file just means the take is recorded
+     * without playback, exactly as before this feature.
      */
-    private void startOverdub() {
-        monitorMixFile = (currentOutputPath != null)
-                ? new File(currentOutputPath) : null;
+    private void startOverdub(File monitorMixFile) {
+        this.monitorMixFile = monitorMixFile;
         if (monitorMixFile != null && monitorMixFile.exists()
                 && monitorMixFile.length() > 44) {
             try {
@@ -3568,14 +3696,14 @@ public class MainActivity extends Activity {
         applyLibraryOp("fx", fxParamsJson(warmth, preset, echo, selStartSec, selEndSec),
                 label, "Processing...",
                 "Done — " + label + " (cumulative).",
-                () -> loadWaveformForPath(currentOutputPath));
+                null);
     }
 
     /** Library path for Normalize: append the op, re-render. */
     private void applyNormalizeOp() {
         applyLibraryOp("normalize", normalizeParamsJson(), "Normalize to -1 dBFS",
                 "Normalizing...", "Normalized to -1 dBFS.",
-                () -> loadWaveformForPath(currentOutputPath));
+                null);
     }
 
     /** Library path for Trim/Join: append the op, re-render. */
@@ -4103,6 +4231,27 @@ public class MainActivity extends Activity {
     }
 
     private void playOutputAt(float fraction) {
+        // The waveform shows a lazily-computed mix; make the mix file
+        // fresh before auditioning it.
+        if (currentEntryId != null && mixDirty) {
+            setBusy(true);
+            setStatus("Preparing mix...");
+            new Thread(() -> {
+                try {
+                    ensureMixFile();
+                    runOnUiThread(() -> {
+                        setBusy(false);
+                        playOutputAt(fraction);
+                    });
+                } catch (Exception e) {
+                    runOnUiThread(() -> {
+                        setBusy(false);
+                        setStatus("Play failed: " + e.getMessage());
+                    });
+                }
+            }).start();
+            return;
+        }
         // Audition the processed output when there is one, otherwise the
         // raw input — so a selection can be heard before any Apply.
         final String playPath = currentOutputPath != null ? currentOutputPath : inputPath;

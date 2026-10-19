@@ -14,7 +14,9 @@ sys.path.insert(
 )
 
 from audiofx import android_bridge
-from audiofx.android_bridge import mixdown, resample_linear, resolve_record_target
+from audiofx.android_bridge import (
+    mixdown, resample_linear, resolve_record_target, waveform_peaks as
+    waveform_peaks_of_file)
 from audiofx.pipeline import read_wav_mono, write_wav
 
 TARGET = 10.0 ** (-1.0 / 20.0)
@@ -227,6 +229,85 @@ class TestMixdown(unittest.TestCase):
         )
         self.assertEqual(res["tracks_mixed"], 1)
         self.assertEqual(read_int16(out), expected_mix_int16([pa], self.rate))
+
+
+
+class TestMixPeaks(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.rate = 8000
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def path(self, name):
+        return os.path.join(self.tmp.name, name)
+
+    def write_track(self, name, samples, rate=None):
+        p = self.path(name)
+        write_wav(p, samples, self.rate if rate is None else rate)
+        return p
+
+    def peaks_of(self, tracks_json, muted=None, n=120):
+        from audiofx.android_bridge import mix_peaks
+        res = mix_peaks(tracks_json, self.rate,
+                        json.dumps(muted or []), n)
+        self.assertTrue(res["ok"])
+        return res, json.loads(res["peaks_json"])
+
+    def test_peaks_match_mixdown_file_within_quantization(self):
+        # mix_peaks works on the float64 mix; the file path quantizes to
+        # int16 first. Bucket peaks must agree to int16 precision. Both
+        # are relative (0..1), exactly as the waveform displays them.
+        pa = self.write_track("a.wav", [0.05 + 0.008 * i for i in range(200)])
+        pb = self.write_track("b.wav", [0.1] * 200)
+        tracks = json.dumps([pa, pb])
+        _, mem_peaks = self.peaks_of(tracks)
+        out = self.path("mix.wav")
+        mixdown(tracks, out, self.rate)
+        file_peaks = json.loads(waveform_peaks_of_file(out, 120)["peaks_json"])
+        self.assertEqual(len(mem_peaks), len(file_peaks))
+        for a, b in zip(mem_peaks, file_peaks):
+            self.assertAlmostEqual(a, b, places=4)
+
+    def test_peaks_are_relative(self):
+        # The bucketing normalizes to 0..1, so the loudest bucket is 1.
+        pa = self.write_track("a.wav", [0.4] * 128)
+        pb = self.write_track("b.wav", [0.2] * 128)
+        _, peaks = self.peaks_of(json.dumps([pa, pb]))
+        self.assertAlmostEqual(max(peaks), 1.0, places=9)
+        self.assertTrue(all(0.0 <= p <= 1.0 for p in peaks))
+
+    def test_muted_track_excluded(self):
+        pa = self.write_track("a.wav", [0.3] * 128)
+        pb = self.write_track("b.wav", [0.15] * 128)
+        both = json.dumps([{"id": "a", "path": pa}, {"id": "b", "path": pb}])
+        _, muted_peaks = self.peaks_of(both, muted=["b"])
+        _, alone_peaks = self.peaks_of(json.dumps([{"id": "a", "path": pa}]))
+        self.assertEqual(muted_peaks, alone_peaks)
+
+    def test_all_muted_raises(self):
+        from audiofx.android_bridge import mix_peaks
+        pa = self.write_track("a.wav", [0.3] * 64)
+        with self.assertRaises(ValueError) as ctx:
+            mix_peaks(json.dumps([{"id": "a", "path": pa}]), self.rate,
+                      json.dumps(["a"]))
+        self.assertEqual(str(ctx.exception), "no audible tracks to mix")
+
+    def test_writes_no_file(self):
+        from audiofx.android_bridge import mix_peaks
+        pa = self.write_track("a.wav", [0.3] * 64)
+        before = set(os.listdir(self.tmp.name))
+        mix_peaks(json.dumps([pa]), self.rate)
+        self.assertEqual(set(os.listdir(self.tmp.name)), before)
+
+    def test_duration_and_track_count(self):
+        pa = self.write_track("a.wav", [0.2] * 160)
+        pb = self.write_track("b.wav", [0.1] * 80)
+        res, _ = self.peaks_of(json.dumps([pa, pb]))
+        self.assertEqual(res["tracks_mixed"], 2)
+        self.assertEqual(res["duration_s"], round(160 / self.rate, 2))
+        self.assertEqual(res["sample_rate"], self.rate)
 
 
 

@@ -258,6 +258,10 @@ or the plan changes.
 - A muted track is excluded from every mix: the monitor mix during
   recording, the main waveform mix, and the share mixdown. Mute is
   the way to silence a track everywhere; it persists per track.
+- **Lazy mix**: the waveform mix is computed in memory for display
+  only (no file is written); the mix file is produced on demand for
+  playback, overdub, and share. Muting to zero audible tracks clears
+  the waveform with no processing at all.
 - Effects, undo, diagnose, and tune-up target the selected track
   only. Each track renders incrementally from its own cached chain
   tip, so editing one track never re-renders the others.

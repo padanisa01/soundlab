@@ -787,6 +787,88 @@ def resample_linear(samples, from_rate, to_rate):
     return out
 
 
+def _parse_mix_args(tracks_json, muted_ids_json, target_sample_rate):
+    """Shared argument parsing for mixdown()/mix_peaks().
+
+    Returns (items, muted_ids_set, target_rate). Raises ValueError on
+    malformed JSON or a non-positive sample rate.
+    """
+    try:
+        items = json.loads(tracks_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("tracks_json is not valid JSON: %s" % exc)
+    if not isinstance(items, list):
+        raise ValueError("tracks_json must be a JSON array of tracks")
+    try:
+        muted_ids = json.loads(muted_ids_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("muted_ids_json is not valid JSON: %s" % exc)
+    if not isinstance(muted_ids, list):
+        raise ValueError("muted_ids_json must be a JSON array of ids")
+    muted = set(m for m in muted_ids if isinstance(m, str))
+    target_rate = int(target_sample_rate)
+    if target_rate <= 0:
+        raise ValueError("target_sample_rate must be positive: %r"
+                         % (target_sample_rate,))
+    return items, muted, target_rate
+
+
+def _load_audible_track_samples(items, muted, target_rate):
+    """Read each audible track's WAV as a float64 buffer at target_rate.
+
+    Muted ids are skipped before any file access; missing, undecodable,
+    or empty tracks contribute nothing. Tracks at other sample rates
+    are resampled with linear interpolation (see resample_linear).
+    """
+    tracks = []
+    for item in items:
+        if isinstance(item, dict):
+            track_id = item.get("id")
+            p = item.get("path")
+        else:
+            track_id, p = None, item
+        if track_id is not None and track_id in muted:
+            continue
+        if not isinstance(p, str) or not os.path.isfile(p):
+            continue
+        try:
+            samples, rate = read_wav_mono(p)
+        except Exception:
+            continue
+        if len(samples) == 0:
+            continue
+        if rate != target_rate:
+            samples = resample_linear(samples, rate, target_rate)
+        tracks.append(samples)
+    return tracks
+
+
+def _sum_and_normalize(tracks, target_rate):
+    """Zero-pad the track buffers to the longest, sum in float64, then
+    true-peak normalize to -1 dBFS (gain = 10**(-1/20) / peak, output
+    hard-clipped to +/-10**(-1/20)). Returns the normalized mix buffer.
+    """
+    target = 10.0 ** (-1.0 / 20.0)
+    n = max(len(t) for t in tracks)
+    if _HAVE_NP:
+        mix = _np.zeros(n, dtype=_np.float64)
+        for t in tracks:
+            mix[: len(t)] += _np.asarray(t, dtype=_np.float64)
+        peak = float(_np.max(_np.abs(mix))) if n else 0.0
+        if peak > 0:
+            return _np.clip(mix * (target / peak), -target, target)
+        return mix
+    mix = [0.0] * n
+    for t in tracks:
+        for i, s in enumerate(t):
+            mix[i] += float(s)
+    peak = max(abs(s) for s in mix) if mix else 0.0
+    if peak > 0:
+        gain = target / peak
+        return [min(max(s * gain, -target), target) for s in mix]
+    return mix
+
+
 def mixdown(tracks_json, output_path, target_sample_rate, muted_ids_json="[]"):
     """Mix rendered track WAVs down to one mono file.
 
@@ -810,73 +892,47 @@ def mixdown(tracks_json, output_path, target_sample_rate, muted_ids_json="[]"):
     "tracks_mixed": N}. Raises ValueError("no audible tracks to mix")
     when no track yields audio.
     """
-    try:
-        items = json.loads(tracks_json)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("tracks_json is not valid JSON: %s" % exc)
-    if not isinstance(items, list):
-        raise ValueError("tracks_json must be a JSON array of tracks")
-    try:
-        muted_ids = json.loads(muted_ids_json)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("muted_ids_json is not valid JSON: %s" % exc)
-    if not isinstance(muted_ids, list):
-        raise ValueError("muted_ids_json must be a JSON array of ids")
-    muted = set(m for m in muted_ids if isinstance(m, str))
-    target_rate = int(target_sample_rate)
-    if target_rate <= 0:
-        raise ValueError("target_sample_rate must be positive: %r"
-                         % (target_sample_rate,))
-    target = 10.0 ** (-1.0 / 20.0)
-    tracks = []
-    for item in items:
-        if isinstance(item, dict):
-            track_id = item.get("id")
-            p = item.get("path")
-        else:
-            track_id, p = None, item
-        if track_id is not None and track_id in muted:
-            continue
-        if not isinstance(p, str) or not os.path.isfile(p):
-            continue
-        try:
-            samples, rate = read_wav_mono(p)
-        except Exception:
-            continue
-        if len(samples) == 0:
-            continue
-        if rate != target_rate:
-            samples = resample_linear(samples, rate, target_rate)
-        tracks.append(samples)
+    items, muted, target_rate = _parse_mix_args(
+        tracks_json, muted_ids_json, target_sample_rate)
+    tracks = _load_audible_track_samples(items, muted, target_rate)
     if not tracks:
         raise ValueError("no audible tracks to mix")
-    n = max(len(t) for t in tracks)
-    if _HAVE_NP:
-        mix = _np.zeros(n, dtype=_np.float64)
-        for t in tracks:
-            mix[: len(t)] += _np.asarray(t, dtype=_np.float64)
-        peak = float(_np.max(_np.abs(mix))) if n else 0.0
-        if peak > 0:
-            out = _np.clip(mix * (target / peak), -target, target)
-        else:
-            out = mix
-    else:
-        mix = [0.0] * n
-        for t in tracks:
-            for i, s in enumerate(t):
-                mix[i] += float(s)
-        peak = max(abs(s) for s in mix) if mix else 0.0
-        if peak > 0:
-            gain = target / peak
-            out = [min(max(s * gain, -target), target) for s in mix]
-        else:
-            out = mix
+    out = _sum_and_normalize(tracks, target_rate)
     write_wav(output_path, out, target_rate)
     return {
         "ok": True,
         "output_path": output_path,
         "sample_rate": target_rate,
         "duration_s": round(len(out) / target_rate, 2),
+        "tracks_mixed": len(tracks),
+    }
+
+
+def mix_peaks(tracks_json, target_sample_rate, muted_ids_json="[]",
+              num_peaks=1200):
+    """Peak amplitudes of the peak-normalized mix, computed in memory.
+
+    Exactly the mix that mixdown() would write (same track selection,
+    resampling, sum, and -1 dBFS normalization), but no file is written:
+    this is the lazy-mix path for the waveform display, where the mix
+    file itself is only produced on demand (playback, overdub, share).
+    Returns {"ok": True, "peaks_json": ..., "duration_s": ...,
+    "sample_rate": ..., "tracks_mixed": N}, where peaks_json is a JSON
+    array of floats in 0..1. Raises ValueError("no audible tracks to
+    mix") when no track yields audio.
+    """
+    items, muted, target_rate = _parse_mix_args(
+        tracks_json, muted_ids_json, target_sample_rate)
+    tracks = _load_audible_track_samples(items, muted, target_rate)
+    if not tracks:
+        raise ValueError("no audible tracks to mix")
+    out = _sum_and_normalize(tracks, target_rate)
+    peaks = _waveform_peaks(out, int(num_peaks))
+    return {
+        "ok": True,
+        "peaks_json": json.dumps(peaks),
+        "duration_s": round(len(out) / target_rate, 2),
+        "sample_rate": target_rate,
         "tracks_mixed": len(tracks),
     }
 
