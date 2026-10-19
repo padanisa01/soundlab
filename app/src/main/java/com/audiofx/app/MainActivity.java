@@ -872,10 +872,11 @@ public class MainActivity extends Activity {
                 new Thread(() -> {
                     try {
                         File dest = new File(getCacheDir(), "input.wav");
-                        AudioDecoder.decodeToWav(this, uri, dest);
+                        AudioDecoder.DecodeResult dr = AudioDecoder
+                                .decodeToWav(this, uri, dest, 1200);
                         runOnUiThread(() -> {
                             showProgress(false);
-                            adoptAudioFile(dest, displayName);
+                            adoptAudioFile(dest, displayName, dr);
                         });
                     } catch (Exception e) {
                         runOnUiThread(() -> {
@@ -977,8 +978,24 @@ public class MainActivity extends Activity {
      * (Spec change 2026-10-17: picked files are no longer session-only.)
      */
     private void adoptAudioFile(File wavFile, String displayName) {
+        adoptAudioFile(wavFile, displayName, null);
+    }
+
+    /** Peaks computed during the MP3 decode; the render is a bit-identical
+     * copy, so refreshAllLanePeaks can reuse them with no Python pass. */
+    private float[] importPeaks;
+    private double importPeaksDurationSec;
+    private String importPeaksEntryId;
+
+    private void adoptAudioFile(File wavFile, String displayName,
+            AudioDecoder.DecodeResult decodeResult) {
         final String entryId = UUID.randomUUID().toString();
         final File dest = libraryDb.takeFile(entryId);
+        if (decodeResult != null) {
+            importPeaks = decodeResult.peaks;
+            importPeaksDurationSec = decodeResult.durationSec;
+            importPeaksEntryId = entryId;
+        }
         try {
             copyFile(wavFile, dest);
             double[] info = wavInfo(dest);
@@ -3365,6 +3382,20 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /** True if any lane's render file exists (has been rendered/copied). */
+    private boolean anyTrackRenderExists() {
+        for (TrackLane lane : lanes) {
+            try {
+                File render = libraryDb.trackRenderFile(lane.trackId);
+                if (render.exists() && render.length() > 44) {
+                    return true;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return false;
+    }
+
     /**
      * Reload every lane's peaks from its render file (entry open, full
      * re-render). The mix file goes stale (rebuilt on demand).
@@ -3372,6 +3403,47 @@ public class MainActivity extends Activity {
     private void refreshAllLanePeaks() {
         final String entryId = currentEntryId;
         if (entryId == null || lanes.isEmpty()) {
+            return;
+        }
+        // MP3 import fast path: peaks were accumulated during the
+        // MediaCodec decode and the render is a bit-identical copy,
+        // so apply them directly with no Python pass. Only once the
+        // render exists (reRenderEntry runs after the first refresh).
+        if (entryId.equals(importPeaksEntryId) && importPeaks != null
+                && anyTrackRenderExists()) {
+            final float[] peaks = importPeaks;
+            final double dur = importPeaksDurationSec;
+            importPeaks = null;
+            importPeaksEntryId = null;
+            boolean anyAudio = false;
+            for (TrackLane lane : lanes) {
+                File render;
+                try {
+                    render = libraryDb.trackRenderFile(lane.trackId);
+                } catch (Exception e) {
+                    continue;
+                }
+                if (render.exists() && render.length() > 44) {
+                    lane.wave.setPeaks(peaks);
+                    lane.wave.setDuration(dur);
+                    lane.contentDurSec = dur;
+                    anyAudio = true;
+                } else {
+                    lane.wave.setPeaks(new float[0]);
+                    lane.wave.setDuration(0);
+                    lane.contentDurSec = 0;
+                }
+            }
+            updateProjectDuration();
+            tvTimeCur.setText("0:00");
+            setPlayPauseEnabled(anyAudio);
+            mixDirty = true;
+            releasePlayer();
+            btnStop.setEnabled(false);
+            setBusy(false);
+            for (TrackLane lane : lanes) {
+                lane.wave.finishProgressAnimation();
+            }
             return;
         }
         setBusy(true);
