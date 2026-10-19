@@ -955,6 +955,13 @@ public class MainActivity extends Activity {
         progressBar.setVisibility(show ? View.VISIBLE : View.GONE);
     }
 
+    /** Disable the edit controls + progress bar while background work runs. */
+    private void setBusy(boolean busy) {
+        setEditButtonsEnabled(!busy);
+        btnUndo.setEnabled(!busy);
+        showProgress(busy);
+    }
+
     private void copyUriToFile(Uri uri, File dest) throws Exception {
         try (InputStream in = getContentResolver().openInputStream(uri);
              OutputStream out = new FileOutputStream(dest)) {
