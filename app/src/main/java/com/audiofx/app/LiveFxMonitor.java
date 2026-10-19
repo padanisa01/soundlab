@@ -23,6 +23,11 @@ import java.io.RandomAccessFile;
  * Monitoring latency is one block plus device buffering (roughly
  * 0.1-0.3 s); this is a creative monitor, not a pro-audio path.
  * Headphones are strongly recommended: the mic hears the speaker.
+ *
+ * Supports pause/resume: pause() halts capture and the monitor but
+ * keeps the session and the take file open (the RandomAccessFile keeps
+ * its position); resume() continues appending to the same take.
+ * isRecording() stays true while paused; isPaused() distinguishes.
  */
 public class LiveFxMonitor {
 
@@ -34,10 +39,12 @@ public class LiveFxMonitor {
     private final CaptureFx fx = new CaptureFx();
     private Thread worker;
     private volatile boolean running;
+    private volatile boolean paused;
     private RandomAccessFile wav;
     private File outFile;
     private long dataBytes;
     private long startMs;
+    private volatile long elapsedBaseMs;
     private String activeLabel = "";
     private PyObject chain;
     private volatile MicCapture.BlockListener blockListener;
@@ -46,15 +53,32 @@ public class LiveFxMonitor {
         return running;
     }
 
+    /** True while a pause is in effect; the session is still active. */
+    public synchronized boolean isPaused() {
+        return paused;
+    }
+
+    /** Frames captured so far; 0 when no session is active. */
+    public synchronized long dataFrames() {
+        if (cap == null) {
+            return 0;
+        }
+        return dataBytes / (cap.channels * 2L);
+    }
+
     public synchronized String activeLabel() {
         return activeLabel;
     }
 
+    /** Elapsed capture time; frozen while paused, 0 when idle. */
     public double elapsedSec() {
         if (!running) {
             return 0;
         }
-        return (System.currentTimeMillis() - startMs) / 1000.0;
+        if (paused) {
+            return elapsedBaseMs / 1000.0;
+        }
+        return (elapsedBaseMs + System.currentTimeMillis() - startMs) / 1000.0;
     }
 
     public synchronized boolean agcActive() {
@@ -190,16 +214,33 @@ public class LiveFxMonitor {
         this.outFile = outFile;
         dataBytes = 0;
         startMs = System.currentTimeMillis();
+        elapsedBaseMs = 0;
+        paused = false;
         activeLabel = h.label + " live FX";
         running = true;
-        final AudioRecord rec = h.rec;
-        final int blockBytes = BLOCK_SAMPLES * h.channels * 2;
+        spawnWorker();
+        return true;
+    }
+
+    /**
+     * Shared capture worker: reads mic blocks, runs them through the
+     * Python live chain, appends the wet signal to the take file and
+     * plays it on the monitor track. Used by start() and resume().
+     */
+    private void spawnWorker() {
+        final AudioRecord rec = cap.rec;
+        final RandomAccessFile rw = wav;
+        final AudioTrack t = track;
+        final PyObject c = chain;
+        final int channels = cap.channels;
+        final int outCh = channels == 2 ? 2 : 1;
+        final int blockBytes = BLOCK_SAMPLES * channels * 2;
         worker = new Thread(() -> {
             byte[] inBuf = new byte[blockBytes];
             int filled = 0;
             try {
-                newTrack.play();
-                while (running) {
+                t.play();
+                while (running && !paused) {
                     int n = rec.read(inBuf, filled, blockBytes - filled);
                     if (n < 0) {
                         break;
@@ -214,35 +255,104 @@ public class LiveFxMonitor {
                     filled = 0;
                     final byte[] wet;
                     try {
-                        wet = chain.callAttr("process_pcm_block", inBuf)
+                        wet = c.callAttr("process_pcm_block", inBuf)
                                 .toJava(byte[].class);
                     } catch (Exception e) {
+                        break;
+                    }
+                    // Recheck after the Python call: a pause() or stop()
+                    // may have landed while the block was processing.
+                    if (!running || paused) {
                         break;
                     }
                     rw.write(wet);
                     dataBytes += wet.length;
                     MicCapture.BlockListener bl = blockListener;
                     if (bl != null) {
-                        bl.onBlockPeak(MicCapture.blockPeak(wet, wet.length, outChannels));
+                        bl.onBlockPeak(MicCapture.blockPeak(wet, wet.length, outCh));
                     }
-                    newTrack.write(wet, 0, wet.length);
+                    t.write(wet, 0, wet.length);
                 }
             } catch (IOException ignored) {
             }
         }, "LiveFxMonitor");
         worker.start();
+    }
+
+    /**
+     * Halt capture and the monitor but keep the session and the take
+     * file. The worker thread is stopped and joined, the AudioRecord is
+     * stopped but NOT released, the monitor track is paused and flushed
+     * (stale buffered audio is discarded), and the RandomAccessFile
+     * stays open at its current position for resume(). The elapsed
+     * clock freezes. No-op when not recording or already paused.
+     */
+    public synchronized void pause() {
+        if (!running || paused) {
+            return;
+        }
+        paused = true;
+        elapsedBaseMs += System.currentTimeMillis() - startMs;
+        if (cap != null) {
+            try {
+                cap.rec.stop();
+            } catch (Exception ignored) {
+            }
+        }
+        Thread t = worker;
+        worker = null;
+        if (t != null) {
+            try {
+                t.join(4000);
+            } catch (InterruptedException ignored) {
+            }
+        }
+        if (track != null) {
+            try {
+                track.pause();
+            } catch (Exception ignored) {
+            }
+            try {
+                track.flush();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /**
+     * Resume a paused session, appending to the same take file and
+     * restarting the monitor. Returns false when not paused or the
+     * capture session cannot restart.
+     */
+    public synchronized boolean resume() {
+        if (!running || !paused || cap == null) {
+            return false;
+        }
+        try {
+            cap.rec.startRecording();
+        } catch (Exception e) {
+            return false;
+        }
+        if (cap.rec.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
+            return false;
+        }
+        paused = false;
+        startMs = System.currentTimeMillis();
+        spawnWorker();
         return true;
     }
 
     /**
-     * Stop capture and monitoring, finalize the WAV header. Returns the
-     * finished wet take, or null when nothing usable was recorded.
+     * Stop capture and monitoring, finalize the WAV header. Safe to
+     * call while paused. Returns the finished wet take, or null when
+     * nothing usable was recorded.
      */
     public synchronized File stop() {
         if (!running) {
             return null;
         }
         running = false;
+        paused = false;
         Thread t = worker;
         worker = null;
         if (t != null) {
@@ -286,6 +396,7 @@ public class LiveFxMonitor {
         outFile = null;
         chain = null;
         activeLabel = "";
+        elapsedBaseMs = 0;
         if (f == null || dataBytes <= 0) {
             if (f != null) {
                 f.delete();
