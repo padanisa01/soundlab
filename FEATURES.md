@@ -223,13 +223,18 @@ or the plan changes.
 - One library entry is a project of N tracks (`tracks` table, DB v3):
   each track has a UUID, an editable name, its own pristine WAV, its
   own op chain, a lock flag, and a mute flag.
-- **Track panel** above the waveform: tap a row to select it
-  (highlighted), tap the name to rename it, tap the lock toggle to
-  lock or unlock it, tap the speaker toggle to mute or unmute it.
-- **Waveform header** shows the selected track's name (tap to rename),
-  its lock toggle, its mute toggle, and the "+" button, which adds a
-  track ("Track N"). The old zoom +/- buttons are gone; pinch to zoom
-  on the waveform instead (1x-8x, already supported).
+- **Per-track waveform lanes** (no mix lane): each track shows its own
+  waveform on a shared project timeline (the longest track), so lanes
+  of different lengths align. A slim TRACKS bar (label + "+") sits
+  above the lanes; the "+" button adds a track ("Track N").
+- Each lane's header shows the track name (tap to rename), a lock
+  toggle, and a mute toggle. Tap a lane's header or its waveform to
+  select it (highlighted); the first tap on a non-selected lane's
+  waveform selects only, taps on the selected lane's waveform place
+  trim markers. Playback cursor and trim selection are shown on all
+  lanes in project time; pinch to zoom per lane (1x-8x).
+- A muted lane dims (alpha 0.4); mute is display-free: no peaks are
+  recomputed, the mix file just goes stale and is rebuilt on demand.
 - **Record** targets the selected track when it is empty and
   unlocked, else the first empty unlocked track, else a new track is
   auto-created ("Track N"). Recording never overwrites existing
@@ -256,12 +261,13 @@ or the plan changes.
   included in the mix, and diagnosing a locked track (read-only) is
   allowed.
 - A muted track is excluded from every mix: the monitor mix during
-  recording, the main waveform mix, and the share mixdown. Mute is
-  the way to silence a track everywhere; it persists per track.
-- **Lazy mix**: the waveform mix is computed in memory for display
-  only (no file is written); the mix file is produced on demand for
-  playback, overdub, and share. Muting to zero audible tracks clears
-  the waveform with no processing at all.
+  recording and the share mixdown. Mute is the way to silence a track
+  everywhere; it persists per track. Muting is display-free (the lane
+  dims, no peak recompute).
+- **Lazy mix**: the mix file is produced on demand for playback,
+  overdub, and share; each lane's peaks are loaded from its own
+  render file. Muting to zero audible tracks leaves the lanes as-is
+  with no processing at all.
 - Effects, undo, diagnose, and tune-up target the selected track
   only. Each track renders incrementally from its own cached chain
   tip, so editing one track never re-renders the others.
