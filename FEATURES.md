@@ -190,10 +190,11 @@ or the plan changes.
   entry points in `android_bridge.py`.
 
 ### Library of recordings
-- Every recording becomes a durable project in `filesDir/library/`:
-  one immutable pristine WAV (`takes/<uuid>.wav`) plus an ordered,
-  re-runnable op chain in SQLite (`soundlab_library.db`), surviving
-  app restarts. Since 2026-10-17 picked/imported files are first-class
+- Every recording becomes a durable project in `filesDir/library/`,
+  holding one or more tracks: each track has an immutable pristine WAV
+  (`tracks/<uuid>.wav`) plus its own ordered, re-runnable op chain in
+  SQLite (`soundlab_library.db`, DB v2), surviving app restarts. Legacy
+  single-take entries adopt a "Track 1" in place on first open. Since 2026-10-17 picked/imported files are first-class
   too: opening audio imports a pristine copy as a new entry (named
   after the file), with the same op chain, undo history and exports.
 - **Library screen** (`LibraryActivity`, via the header icon or the
@@ -217,6 +218,75 @@ or the plan changes.
 - History is keyed by entry ID: renames never orphan it. Duplicate
   forks an independent copy with a "Forked from" marker. Edits
   auto-persist; there is no save-project step.
+
+### Multi-track recording
+- One library entry is a project of N tracks (`tracks` table, DB v3):
+  each track has a UUID, an editable name, its own pristine WAV, its
+  own op chain, a lock flag, and a mute flag.
+- **Per-track waveform lanes** (no mix lane): each track shows its own
+  waveform on a shared project timeline (the longest track), so lanes
+  of different lengths align. A slim TRACKS bar (label + "+") sits
+  above the lanes; the "+" button adds a track ("Track N").
+- Each lane's header shows the track name (tap to rename), a lock
+  toggle, and a mute toggle. Tap a lane's header or its waveform to
+  select it (highlighted); the first tap on a non-selected lane's
+  waveform selects only, taps on the selected lane's waveform place
+  trim markers. Playback cursor and trim selection are shown on all
+  lanes in project time; pinch to zoom per lane (1x-8x).
+- A muted lane dims (alpha 0.4); mute is display-free: no peaks are
+  recomputed, the mix file just goes stale and is rebuilt on demand.
+- **Record** targets the selected track when it is empty and
+  unlocked, else the first empty unlocked track, else a new track is
+  auto-created ("Track N"). Recording never overwrites existing
+  audio. Pressing record with no project open creates one first. The
+  mic pipeline (AGC/NS/limiter/auto-normalize) applies unchanged to
+  each take.
+- **Overdub**: when recording starts, the current mix of all
+  non-empty, unmuted tracks plays back on a dedicated thread while
+  the mic captures, so you can play along with existing tracks. If
+  nothing is audible, recording proceeds without playback. No
+  latency compensation between playback and capture in this version
+  (known limitation); use headphones to avoid the mic picking up
+  the monitor.
+- **Punch-in**: select an unlocked track that has audio, tap the
+  waveform to set a start marker, then hit record. The take replaces
+  the track's audio from the marker (crossfaded at the splice, track
+  extends if the take runs past the end). Implemented as an undoable
+  `punch_in` op; the take is stored durably and cleaned up on undo,
+  entry delete, or fork (forks get their own copy).
+- **Pause/resume**: while recording, the stop button becomes a pause
+  button. Pause halts capture and playback, keeping the partial take;
+  tapping record resumes, appending to the same take file, with
+  playback restarting from the take-length offset to stay in sync.
+  The record head shows a steady paused state. Pause-then-stop with
+  zero audio keeps the track empty. Pause affects only the
+  recording session, never already-recorded tracks.
+- A locked track is immune to change: effects, trim, tune-up, Fix
+  buttons, undo, and re-recording all no-op with a "Track locked"
+  toast. Lock blocks changes, not playback: locked tracks are
+  included in the mix, and diagnosing a locked track (read-only) is
+  allowed.
+- A muted track is excluded from every mix: the monitor mix during
+  recording and the share mixdown. Mute is the way to silence a track
+  everywhere; it persists per track. Muting is display-free (the lane
+  dims, no peak recompute).
+- **Lazy mix**: the mix file is produced on demand for playback,
+  overdub, and share; each lane's peaks are loaded from its own
+  render file. Muting to zero audible tracks leaves the lanes as-is
+  with no processing at all.
+- Effects, undo, diagnose, and tune-up target the selected track
+  only. Each track renders incrementally from its own cached chain
+  tip, so editing one track never re-renders the others.
+- The main waveform and playback always show the current mix of all
+  tracks: each track is resampled to the project rate (linear
+  interpolation), zero-padded to the longest, summed in float64, and
+  peak-normalized to -1 dBFS (`mixdown` in `android_bridge.py`).
+  Empty tracks are skipped.
+- **Save**: each audible track is written as `<sanitized track
+  name>.wav` into the user-chosen folder; empty tracks are skipped.
+- **Share**: mixes all tracks down, then the existing 96 kbps MP3
+  FileProvider share runs on the mix.
+- Not included by design: solo, per-track volume, pan.
 
 ### Save
 - **Save as MP3**: encodes with `lameenc` (CBR 192 kbps), in the Python

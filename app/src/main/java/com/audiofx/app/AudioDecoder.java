@@ -21,12 +21,27 @@ public final class AudioDecoder {
     private AudioDecoder() {
     }
 
+    /** Result of a decode: the WAV was written, and peaks were accumulated
+     * from the PCM as it arrived (zero extra passes). Peaks are normalized
+     * 0..1 and cover the whole file. */
+    public static final class DecodeResult {
+        public final float[] peaks;
+        public final double durationSec;
+        public final int sampleRate;
+
+        DecodeResult(float[] peaks, double durationSec, int sampleRate) {
+            this.peaks = peaks;
+            this.durationSec = durationSec;
+            this.sampleRate = sampleRate;
+        }
+    }
+
     /**
      * Decodes {@code uri} to 16-bit PCM WAV at {@code outWav}.
      * Throws on missing audio track or decode failure.
      */
-    public static void decodeToWav(Context context, Uri uri, File outWav)
-            throws Exception {
+    public static DecodeResult decodeToWav(Context context, Uri uri,
+            File outWav, int numPeaks) throws Exception {
         MediaExtractor extractor = new MediaExtractor();
         try {
             extractor.setDataSource(context, uri, null);
@@ -51,6 +66,12 @@ public final class AudioDecoder {
 
             MediaCodec codec = MediaCodec.createDecoderByType(
                     format.getString(MediaFormat.KEY_MIME));
+            long pcmBytes = 0;
+            // Peak accumulation: per-chunk maxima, bucketed at the end.
+            // The decode sees every PCM sample, so the waveform comes for
+            // free with zero extra passes.
+            java.util.ArrayList<Float> chunkPeaks =
+                    new java.util.ArrayList<>();
             try {
                 codec.configure(format, null, null, 0);
                 codec.start();
@@ -59,7 +80,6 @@ public final class AudioDecoder {
                 RandomAccessFile raf = new RandomAccessFile(outWav, "rw");
                 try {
                     raf.write(new byte[44]); // WAV header placeholder
-                    long pcmBytes = 0;
                     boolean sawInputEos = false;
                     boolean sawOutputEos = false;
                     MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
@@ -88,6 +108,7 @@ public final class AudioDecoder {
                                 outBuf.get(chunk);
                                 raf.write(chunk);
                                 pcmBytes += info.size;
+                                chunkPeaks.add(chunkPeak(chunk, channels));
                             }
                             codec.releaseOutputBuffer(outIdx, false);
                             if ((info.flags
@@ -124,9 +145,62 @@ public final class AudioDecoder {
                 }
                 codec.release();
             }
+            long totalFrames = pcmBytes / Math.max(1, channels * 2);
+            double durationSec = sampleRate > 0
+                    ? (double) totalFrames / sampleRate : 0;
+            return new DecodeResult(bucketPeaks(chunkPeaks, numPeaks),
+                    durationSec, sampleRate);
         } finally {
             extractor.release();
         }
+    }
+
+    /** Max abs 16-bit sample in a PCM chunk, across channels, 0..1. */
+    private static float chunkPeak(byte[] chunk, int channels) {
+        float peak = 0f;
+        int n = chunk.length / 2;
+        for (int i = 0; i < n; i++) {
+            int s = (chunk[2 * i] & 0xff) | (chunk[2 * i + 1] << 8);
+            float a = Math.abs(s / 32768f);
+            if (a > peak) {
+                peak = a;
+            }
+        }
+        return peak;
+    }
+
+    /** Reduce per-chunk peaks to numPeaks buckets (max), normalized 0..1. */
+    private static float[] bucketPeaks(
+            java.util.ArrayList<Float> chunkPeaks, int numPeaks) {
+        float[] out = new float[Math.max(1, numPeaks)];
+        int n = chunkPeaks.size();
+        if (n == 0) {
+            return out;
+        }
+        for (int b = 0; b < out.length; b++) {
+            int from = (int) ((long) b * n / out.length);
+            int to = (int) ((long) (b + 1) * n / out.length);
+            float m = 0f;
+            for (int i = from; i < to && i < n; i++) {
+                float v = chunkPeaks.get(i);
+                if (v > m) {
+                    m = v;
+                }
+            }
+            out[b] = m;
+        }
+        float top = 0f;
+        for (float v : out) {
+            if (v > top) {
+                top = v;
+            }
+        }
+        if (top > 0) {
+            for (int b = 0; b < out.length; b++) {
+                out[b] /= top;
+            }
+        }
+        return out;
     }
 
     private static void writeWavHeader(RandomAccessFile raf, int sampleRate,

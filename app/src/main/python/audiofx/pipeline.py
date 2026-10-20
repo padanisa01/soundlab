@@ -34,7 +34,11 @@ def _unpack_frames(raw, sampwidth, n_channels, n_frames):
 
 
 def read_wav_mono(path):
-    """Read a WAV file, mixing channels to mono. Returns (samples, sample_rate)."""
+    """Read a WAV file, mixing channels to mono. Returns (samples, sample_rate).
+
+    Samples are a plain Python list of floats. Uses a NumPy fast path when
+    available (vectorized unpack); otherwise falls back to stdlib.
+    """
     with wave.open(path, "rb") as w:
         n_channels = w.getnchannels()
         sampwidth = w.getsampwidth()
@@ -43,6 +47,23 @@ def read_wav_mono(path):
         raw = w.readframes(n_frames)
     if n_frames == 0:
         raise ValueError("WAV file has no audio frames: %s" % path)
+    try:
+        import numpy as _np
+    except ImportError:
+        _np = None
+    if _np is not None:
+        if sampwidth == 2:
+            vals = _np.frombuffer(raw, dtype="<i2").astype(_np.float64)
+            vals /= 32768.0
+        elif sampwidth == 1:
+            vals = _np.frombuffer(raw, dtype=_np.uint8).astype(_np.float64)
+            vals = (vals - 128.0) / 128.0
+        else:
+            raise ValueError("unsupported WAV bit depth: %d-bit"
+                             % (sampwidth * 8,))
+        if n_channels > 1:
+            vals = vals.reshape(n_frames, n_channels).mean(axis=1)
+        return vals.tolist(), sample_rate
     vals = _unpack_frames(raw, sampwidth, n_channels, n_frames)
     if n_channels == 1:
         return vals, sample_rate

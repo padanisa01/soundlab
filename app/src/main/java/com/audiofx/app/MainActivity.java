@@ -27,10 +27,12 @@ import android.view.animation.AlphaAnimation;
 import android.view.animation.Animation;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.Switch;
 import android.widget.TextView;
@@ -48,6 +50,7 @@ import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
 
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.File;
@@ -122,7 +125,18 @@ public class MainActivity extends Activity {
     private LinearLayout histCard;
     private LinearLayout histList;
     private TextView tvHistCount;
+    /**
+     * Selected lane's waveform. Null when no lane exists. Most call
+     * sites use this alias; background ops capture their lane's view
+     * directly so a mid-op selection change can't misroute progress.
+     */
     private WaveformView waveformView;
+    /** Per-track waveform lanes, in track position order. */
+    private final List<TrackLane> lanes = new ArrayList<>();
+    private final Map<String, TrackLane> laneById = new HashMap<>();
+    private LinearLayout laneList;
+    private LinearLayout tracksBar;
+    private Button btnAddTrack;
     private LinearLayout selChipRow;
     private TextView selChipText;
     private Button btnSelClear;
@@ -130,10 +144,20 @@ public class MainActivity extends Activity {
     private Button btnJoin;
     private TextView tvTimeCur;
     private TextView tvTimeTot;
+    /** Multitrack: tracks of the open entry, in position order. */
+    private List<LibraryDb.Track> mTracks = new ArrayList<>();
+    /** Id of the selected track; null when no entry is open. */
+    private String selectedTrackId;
 
     private String inputPath;   // cached WAV picked by the user, or a library pristine
     private String inputFileName = "audio.wav";
-    private String currentOutputPath;  // file backing Play/Save; null until first Apply
+    private String currentOutputPath;  // mix file backing Play/Share; null until first render
+    /**
+     * True when the mix file is stale or missing relative to the tracks.
+     * Lane peak refreshes set this; ensureMixFile() writes the file on
+     * demand (playback, overdub, share) and clears it.
+     */
+    private boolean mixDirty = false;
     private String playerOutputPath;   // file the live player was built for
     private String currentEntryId;     // library entry being edited; null for picked files
     private LibraryDb libraryDb;
@@ -148,6 +172,21 @@ public class MainActivity extends Activity {
     private final LiveFxMonitor liveMonitor = new LiveFxMonitor();
     private String pendingRecName;
     private ObjectAnimator recPulse;
+    /** Id of the track the active recording lands in; null on the new-project path. */
+    private String pendingRecordTrackId;
+    /** Non-null while a punch-in recording is armed: the selected start
+     * point in seconds (track time) where the take will replace audio. */
+    private Double pendingPunchStartSec;
+    /** True when the entry was pre-created at record start (no project
+     * was open); stopRecording finalizes its metadata instead of
+     * creating it. */
+    private boolean pendingPreCreatedEntry;
+    /** True when the active recording is the live-FX monitor. */
+    private boolean recordingLive;
+    /** Plays the existing mix back while a take is recorded (overdub). */
+    private final OverdubPlayer overdubPlayer = new OverdubPlayer();
+    /** Mix file feeding overdub playback; null when there is none. */
+    private File monitorMixFile;
     /** Peak accumulator fed by the capture threads; drained by recTick. */
     private volatile float livePeakAcc;
     private android.app.AlertDialog saveDialog;
@@ -157,19 +196,22 @@ public class MainActivity extends Activity {
     private String cachedDiagJson;
     private String cachedDiagPath;
     /** Path of the audio file the current diagnosis (and its Tune Up) refers
-     * to: currentOutputPath at diagnosis time, else the pristine input. */
+     * to: the selected track's render file at diagnosis time. */
     private String diagLastPath;
-    /** Library entry id whose exact float chain tip is cached in Python
-     * (see _tip_cache in android_bridge). Valid only while it equals the
-     * entry being rendered; entry switches invalidate it implicitly. */
+    /** Id of the track the current diagnosis was computed for; cleared
+     * with the diagnosis cache so a stale report can never be tuned up
+     * onto the wrong track. */
+    private String diagTrackId;
+    /** Chain-tip cache key whose exact float chain tip is cached in Python
+     * (see _tip_cache in android_bridge): "track:" + track id. A key
+     * mismatch falls back to a full render, so switching tracks or
+     * entries invalidates it implicitly. */
     private String tipCacheKey;
-    /** Tune-up step tracker overlay on the waveform (per-pass step list). */
-    private LinearLayout tuneupOverlay;
-    private LinearLayout tuneupSteps;
-    private TextView tuneupPassTitle;
-    private String tuneupProfileLabel = "";
     /** Tune-up profile metadata JSON (from list_tune_up_profiles). */
     private String cachedProfilesJson;
+    /** Track id whose lane hosts the active tune-up step overlay. */
+    private String tuneUpLaneId;
+    private String tuneupProfileLabel = "";
     /** Live refs to the open diagnosis dialog's profile UI. */
     private java.util.ArrayList<Button> diagProfileBtns;
     private TextView diagProfileDesc;
@@ -194,8 +236,13 @@ public class MainActivity extends Activity {
                 tvTimeCur.setText(fmtTime(elapsed));
                 float peak = livePeakAcc;
                 livePeakAcc = 0f;
-                waveformView.addLivePeak(peak);
-                waveformView.setDuration(elapsed);
+                // Live growth shows on the record target's lane; with no
+                // project open yet there is no lane and only the timer runs.
+                TrackLane recLane = laneById.get(pendingRecordTrackId);
+                if (recLane != null) {
+                    recLane.wave.addLivePeak(peak);
+                    recLane.wave.setDuration(elapsed);
+                }
                 mainHandler.postDelayed(this, 200);
             }
         }
@@ -215,7 +262,12 @@ public class MainActivity extends Activity {
             if (player != null && audioDurationSec > 0) {
                 try {
                     int ms = player.getCurrentPosition();
-                    waveformView.setPlaybackPosition((float) (ms / 1000.0 / audioDurationSec));
+                    // Project-time position on every lane; each lane
+                    // clamps to its own content.
+                    float pos = (float) (ms / 1000.0 / audioDurationSec);
+                    for (TrackLane lane : lanes) {
+                        lane.wave.setPlaybackPosition(pos);
+                    }
                     tvTimeCur.setText(fmtTime(ms / 1000.0));
                 } catch (Exception ignored) {
                 }
@@ -393,10 +445,6 @@ public class MainActivity extends Activity {
         histCard = findViewById(R.id.hist_card);
         histList = findViewById(R.id.hist_list);
         tvHistCount = findViewById(R.id.tv_hist_count);
-        waveformView = findViewById(R.id.waveform);
-        tuneupOverlay = findViewById(R.id.tuneup_overlay);
-        tuneupSteps = findViewById(R.id.tuneup_steps);
-        tuneupPassTitle = findViewById(R.id.tuneup_pass_title);
         selChipRow = findViewById(R.id.sel_chip_row);
         selChipText = findViewById(R.id.sel_chip_text);
         btnSelClear = findViewById(R.id.btn_sel_clear);
@@ -406,16 +454,19 @@ public class MainActivity extends Activity {
         btnJoin.setOnClickListener(v -> joinSelection());
         tvTimeCur = findViewById(R.id.tv_time_cur);
         tvTimeTot = findViewById(R.id.tv_time_tot);
-        waveformView.setOnSelectionListener(this::onSelectionChanged);
+        // Lanes are built programmatically per track; each lane wires its
+        // own tap/selection listeners in buildLane().
 
         selectReverb(reverbPreset);
 
         seekWarmth.setOnSeekBarChangeListener(sliderListener());
         seekEcho.setOnSeekBarChangeListener(sliderListener());
         updateSliderLabels();
-        findViewById(R.id.btn_zoom_in).setOnClickListener(v -> waveformView.zoomBy(1.4f));
-        findViewById(R.id.btn_zoom_out).setOnClickListener(v -> waveformView.zoomBy(1f / 1.4f));
-        btnSelClear.setOnClickListener(v -> waveformView.clearSelection());
+        btnSelClear.setOnClickListener(v -> {
+            if (waveformView != null) {
+                waveformView.clearSelection();
+            }
+        });
         chipStudio.setOnClickListener(v -> selectReverb("studio"));
         chipHall.setOnClickListener(v -> selectReverb("concert_hall"));
         chipBath.setOnClickListener(v -> selectReverb("bathroom"));
@@ -437,7 +488,18 @@ public class MainActivity extends Activity {
         btnUndo.setOnClickListener(v -> undoLastEffect());
         btnPlayPause.setOnClickListener(v -> togglePlayPause());
         btnRecord.setOnClickListener(v -> onRecordClicked());
-        btnStop.setOnClickListener(v -> stopPlayback());
+        tracksBar = findViewById(R.id.tracks_bar);
+        laneList = findViewById(R.id.lane_list);
+        btnAddTrack = findViewById(R.id.btn_add_track);
+        btnAddTrack.setOnClickListener(v -> onAddTrackClicked());
+        btnStop.setOnClickListener(v -> {
+            if (isRecordingSession()) {
+                // During a recording session btnStop is the pause button.
+                pauseRecording();
+            } else {
+                stopPlayback();
+            }
+        });
 
         libraryDb = new LibraryDb(this);
         restoreSaveFolderUri(prefs);
@@ -567,9 +629,11 @@ public class MainActivity extends Activity {
     /** Effect history panel: library ops or legacy picked-file history. */
     private void refreshHistoryPanel() {
         List<String[]> rows = new ArrayList<>();
-        if (currentEntryId != null) {
+        if (currentEntryId != null && selectedTrackId != null) {
+            // History follows the selected track.
             try {
-                for (LibraryDb.Op op : libraryDb.listOps(currentEntryId)) {
+                for (LibraryDb.Op op
+                        : libraryDb.listOps(currentEntryId, selectedTrackId)) {
                     rows.add(new String[]{op.label, fmtDateTime(op.createdAt)});
                 }
             } catch (Exception ignored) {
@@ -743,7 +807,8 @@ public class MainActivity extends Activity {
         // Library entries use the persisted op chain; picked files use the
         // legacy session-only history.
         int depth = currentEntryId != null
-                ? undoDepth() : historyDb.depth(fileHash(inputFileName));
+                ? undoDepth(selectedTrackId)
+                : historyDb.depth(fileHash(inputFileName));
         undoBadge.setText(String.valueOf(depth));
         undoBadge.setBackgroundResource(
                 depth > 0 ? R.drawable.bg_badge : R.drawable.bg_badge_zero);
@@ -814,10 +879,11 @@ public class MainActivity extends Activity {
                 new Thread(() -> {
                     try {
                         File dest = new File(getCacheDir(), "input.wav");
-                        AudioDecoder.decodeToWav(this, uri, dest);
+                        AudioDecoder.DecodeResult dr = AudioDecoder
+                                .decodeToWav(this, uri, dest, 1200);
                         runOnUiThread(() -> {
                             showProgress(false);
-                            adoptAudioFile(dest, displayName);
+                            adoptAudioFile(dest, displayName, dr);
                         });
                     } catch (Exception e) {
                         runOnUiThread(() -> {
@@ -879,46 +945,15 @@ public class MainActivity extends Activity {
         return audioName + ".mp3";
     }
 
-    private void loadWaveform() {
-        loadWaveformForPath(inputPath);
-    }
-
-    /** Reload peaks/duration for any file: the input or an edited output. */
-    private void loadWaveformForPath(String path) {
-        new Thread(() -> {
-            try {
-                if (!Python.isStarted()) {
-                    Python.start(new AndroidPlatform(this));
-                }
-                PyObject result = Python.getInstance().getModule("audiofx.android_bridge")
-                        .callAttr("waveform_peaks", path, 1200);
-                // peaks_json is a Python str; PyObject.toString() gives str().
-                JSONArray arr = new JSONArray(result.callAttr("get", "peaks_json").toString());
-                final float[] peaks = new float[arr.length()];
-                for (int i = 0; i < arr.length(); i++) {
-                    peaks[i] = (float) arr.getDouble(i);
-                }
-                final double dur = Double.parseDouble(
-                        result.callAttr("get", "duration_s").toString());
-                final int bitDepth = Integer.parseInt(
-                        result.callAttr("get", "bit_depth").toString());
-                runOnUiThread(() -> {
-                    waveformView.setPeaks(peaks);
-                    waveformView.setDuration(dur);
-                    audioDurationSec = dur;
-                    tvTimeCur.setText("0:00");
-                    tvTimeTot.setText(fmtTime(dur));
-                    // The raw input can be auditioned before any Apply.
-                    setPlayPauseEnabled(true);
-                });
-            } catch (Exception e) {
-                runOnUiThread(() -> setStatus("Waveform failed: " + e.getMessage()));
-            }
-        }).start();
-    }
-
     private void showProgress(boolean show) {
         progressBar.setVisibility(show ? View.VISIBLE : View.GONE);
+    }
+
+    /** Disable the edit controls + progress bar while background work runs. */
+    private void setBusy(boolean busy) {
+        setEditButtonsEnabled(!busy);
+        btnUndo.setEnabled(!busy);
+        showProgress(busy);
     }
 
     private void copyUriToFile(Uri uri, File dest) throws Exception {
@@ -950,8 +985,24 @@ public class MainActivity extends Activity {
      * (Spec change 2026-10-17: picked files are no longer session-only.)
      */
     private void adoptAudioFile(File wavFile, String displayName) {
+        adoptAudioFile(wavFile, displayName, null);
+    }
+
+    /** Peaks computed during the MP3 decode; the render is a bit-identical
+     * copy, so refreshAllLanePeaks can reuse them with no Python pass. */
+    private float[] importPeaks;
+    private double importPeaksDurationSec;
+    private String importPeaksEntryId;
+
+    private void adoptAudioFile(File wavFile, String displayName,
+            AudioDecoder.DecodeResult decodeResult) {
         final String entryId = UUID.randomUUID().toString();
         final File dest = libraryDb.takeFile(entryId);
+        if (decodeResult != null) {
+            importPeaks = decodeResult.peaks;
+            importPeaksDurationSec = decodeResult.durationSec;
+            importPeaksEntryId = entryId;
+        }
         try {
             copyFile(wavFile, dest);
             double[] info = wavInfo(dest);
@@ -1019,19 +1070,21 @@ public class MainActivity extends Activity {
         cachedDiagJson = null;
         cachedDiagPath = null;
         diagLastPath = null;
+        diagTrackId = null;
         diagSummaryCache.clear();
         audioDurationSec = 0;
         selStartSec = null;
         selEndSec = null;
         setPlayPauseEnabled(false);
         refreshPlayPause(); // the take is savable as-is, no Apply needed
-        waveformView.setPeaks(new float[0]);
-        waveformView.setDuration(0);
         tvTimeCur.setText("0:00");
         tvTimeTot.setText("0:00");
         updateTrackActions();
         updateProjectName();
-        int depth = undoDepth();
+        // ---- Multitrack: every open entry shows its tracks ----
+        ensureTracksForEntry(entryId);
+        refreshLanes();
+        int depth = undoDepth(selectedTrackId);
         setStatus(depth > 0
                 ? "Loaded from library — " + depth + " effects in history."
                 : "Loaded from library — pristine take.");
@@ -1039,23 +1092,25 @@ public class MainActivity extends Activity {
         if (!loadNow) {
             return; // the caller chains straight into an op that loads
         }
+        refreshAllLanePeaks();
         boolean engineOk = LibraryDb.DSP_VERSION.equals(e.dspVersion);
-        File render = libraryDb.renderFile(entryId);
-        if (!engineOk && render.exists()) {
-            // Engine moved on: keep the last render as the audible truth
-            // and warn instead of silently re-rendering.
-            currentOutputPath = render.getAbsolutePath();
-            setStatus("Note: rendered with an older engine — re-apply to refresh.");
-            loadWaveformForPath(currentOutputPath);
-            return;
-        }
         if (!engineOk) {
             setStatus("Note: engine updated since this take — re-rendering.");
         }
-        if (hasRenderableOps(entryId)) {
+        // The mix is the audible truth: render every track that holds
+        // audio, then mix. refreshMix above shows the cached mix (if any)
+        // while the fresh render runs.
+        boolean anyAudio = false;
+        for (LibraryDb.Track t : mTracks) {
+            if (trackHasAudio(t)) {
+                anyAudio = true;
+                break;
+            }
+        }
+        if (anyAudio) {
             reRenderEntry("Rendering...");
         } else {
-            loadWaveformForPath(inputPath);
+            refreshAllLanePeaks();
         }
     }
 
@@ -1068,29 +1123,19 @@ public class MainActivity extends Activity {
                 || "declip".equals(opType) || "denoise".equals(opType)
                 || "deplosive".equals(opType) || "deess".equals(opType)
                 || "level".equals(opType) || "loudness".equals(opType)
-                || "eq_balance".equals(opType) || "tune_up".equals(opType);
+                || "eq_balance".equals(opType) || "tune_up".equals(opType)
+                || "punch_in".equals(opType);
     }
 
-    private boolean hasRenderableOps(String entryId) {
-        try {
-            for (LibraryDb.Op op : libraryDb.listOps(entryId)) {
-                if (isRenderableOp(op.opType)) {
-                    return true;
-                }
-            }
-        } catch (Exception ignored) {
-        }
-        return false;
-    }
-
-    /** Undo depth = persisted renderable op count; survives restarts. */
-    private int undoDepth() {
-        if (currentEntryId == null) {
+    /** Undo depth = the given track's persisted renderable op count;
+     * survives restarts. */
+    private int undoDepth(String trackId) {
+        if (currentEntryId == null || trackId == null) {
             return 0;
         }
         int n = 0;
         try {
-            for (LibraryDb.Op op : libraryDb.listOps(currentEntryId)) {
+            for (LibraryDb.Op op : libraryDb.listOps(currentEntryId, trackId)) {
                 if (isRenderableOp(op.opType)) {
                     n++;
                 }
@@ -1100,11 +1145,11 @@ public class MainActivity extends Activity {
         return n;
     }
 
-    /** ops_json for render_chain: renderable ops only, in seq order. */
-    private String buildOpsJson(String entryId) throws Exception {
+    /** ops_json for render_chain: the track's renderable ops, in seq order. */
+    private String buildOpsJson(String entryId, String trackId) throws Exception {
         StringBuilder sb = new StringBuilder("[");
         boolean first = true;
-        for (LibraryDb.Op op : libraryDb.listOps(entryId)) {
+        for (LibraryDb.Op op : libraryDb.listOps(entryId, trackId)) {
             if (!isRenderableOp(op.opType)) {
                 continue; // livefx / fork are display-only
             }
@@ -1112,51 +1157,36 @@ public class MainActivity extends Activity {
                 sb.append(",");
             }
             first = false;
-            sb.append("{\"op\":\"").append(op.opType)
-                    .append("\",\"params\":").append(op.paramsJson).append("}");
+            sb.append("{\"op\":").append(JSONObject.quote(op.opType))
+                    .append(",\"params\":").append(op.paramsJson).append("}");
         }
         sb.append("]");
         return sb.toString();
     }
 
     /**
-     * Render the entry's op chain to the render cache (call on a background
-     * thread). Writes to a temp file and atomically renames into place.
-     * Seeds the Python chain-tip cache under the entry id, so the next
-     * apply can render incrementally. Returns the rendered duration.
+     * Full render of one track's op chain to its render file (call on a
+     * background thread). Seeds the Python chain-tip cache under
+     * "track:"+trackId, so the next apply on the track can render
+     * incrementally. Returns the rendered duration.
      */
-    private double renderChainToCache(String entryId) throws Exception {
-        LibraryDb.LibraryEntry e = libraryDb.getEntry(entryId);
-        if (e == null) {
-            throw new Exception("Library entry not found");
-        }
-        if (!Python.isStarted()) {
-            Python.start(new AndroidPlatform(this));
-        }
-        String opsJson = buildOpsJson(entryId);
-        File render = libraryDb.renderFile(entryId);
-        File tmp = new File(render.getParentFile(), render.getName() + ".tmp");
-        PyObject result = Python.getInstance().getModule("audiofx.android_bridge")
-                .callAttr("render_chain", e.pristinePath, opsJson,
-                        tmp.getAbsolutePath(), null, entryId);
-        double dur = Double.parseDouble(
-                result.callAttr("get", "duration_s").toString());
-        if (!tmp.renameTo(render)) {
-            copyFile(tmp, render);
-            tmp.delete();
-        }
-        tipCacheKey = entryId;
+    private double renderChainToCache(String entryId, String trackId)
+            throws Exception {
+        double dur = renderTrackChain(entryId, trackId);
+        tipCacheKey = "track:" + trackId;
         return dur;
     }
 
     /**
-     * Render a single new op starting from the cached chain tip (call on a
-     * background thread). Falls back to a full renderChainToCache on a
-     * cache miss. Returns the rendered duration in seconds.
+     * Render a single new op on the track starting from the cached chain
+     * tip (call on a background thread). Falls back to a full
+     * renderChainToCache on a cache miss. Returns the rendered duration
+     * in seconds.
      */
-    private double renderIncrementalOrFull(String entryId, String opType,
-            String paramsJson) throws Exception {
-        if (tipCacheKey != null && tipCacheKey.equals(entryId)) {
+    private double renderIncrementalOrFull(String entryId, String trackId,
+            String opType, String paramsJson) throws Exception {
+        final String cacheKey = "track:" + trackId;
+        if (tipCacheKey != null && tipCacheKey.equals(cacheKey)) {
             try {
                 if (!Python.isStarted()) {
                     Python.start(new AndroidPlatform(this));
@@ -1164,12 +1194,12 @@ public class MainActivity extends Activity {
                 String opJson = "[{\"op\":" + JSONObject.quote(opType)
                         + ",\"params\":" + (paramsJson != null ? paramsJson : "{}")
                         + "}]";
-                File render = libraryDb.renderFile(entryId);
+                File render = libraryDb.trackRenderFile(trackId);
                 File tmp = new File(render.getParentFile(),
                         render.getName() + ".tmp");
                 PyObject r = Python.getInstance()
                         .getModule("audiofx.android_bridge")
-                        .callAttr("render_chain_from_tip", entryId, opJson,
+                        .callAttr("render_chain_from_tip", cacheKey, opJson,
                                 tmp.getAbsolutePath());
                 if ("True".equals(r.callAttr("get", "cache_hit").toString())) {
                     double dur = Double.parseDouble(
@@ -1185,20 +1215,20 @@ public class MainActivity extends Activity {
                         "incremental render failed; full render", e);
             }
         }
-        return renderChainToCache(entryId);
+        return renderChainToCache(entryId, trackId);
     }
 
     /**
      * Adopt a pre-rendered WAV (e.g. the tune-up's converged output) as the
-     * entry's render cache without re-rendering. The Python tip cache was
+     * track's render cache without re-rendering. The Python tip cache was
      * already seeded by the producer. Returns the adopted duration.
      */
-    private double adoptPreRendered(String entryId, File preRendered,
+    private double adoptPreRendered(String trackId, File preRendered,
             double dur) throws Exception {
         if (preRendered == null || !preRendered.exists()) {
             throw new Exception("pre-rendered audio missing");
         }
-        File render = libraryDb.renderFile(entryId);
+        File render = libraryDb.trackRenderFile(trackId);
         if (!preRendered.renameTo(render)) {
             copyFile(preRendered, render);
             if (!preRendered.delete()) {
@@ -1206,13 +1236,13 @@ public class MainActivity extends Activity {
                         "could not delete tune-up temp file");
             }
         }
-        tipCacheKey = entryId;
+        tipCacheKey = "track:" + trackId;
         return dur;
     }
 
     /**
-     * Re-render the current entry in the background with the standard
-     * progress UI, then reload the waveform.
+     * Re-render every track holding audio, then rebuild the mix (the
+     * audible truth). The mix owns the progress tail via refreshMix.
      */
     private void reRenderEntry(String workingMsg) {
         final String entryId = currentEntryId;
@@ -1220,28 +1250,36 @@ public class MainActivity extends Activity {
             return;
         }
         setBusy(true);
-        waveformView.startProgressAnimation();
+        lanesProgressStart();
         setStatus(workingMsg);
         new Thread(() -> {
             try {
-                final double dur = renderChainToCache(entryId);
+                for (LibraryDb.Track t : mTracks) {
+                    if (trackHasAudio(t)) {
+                        if (undoDepth(t.id) > 0) {
+                            renderChainToCache(entryId, t.id);
+                        } else {
+                            // No ops: the render IS the pristine. A file
+                            // copy skips the Python DSP pass entirely.
+                            copyFile(new File(t.wavPath),
+                                    libraryDb.trackRenderFile(t.id));
+                            // The Python tip cache was not seeded: force
+                            // the next op to take the full render path.
+                            if (("track:" + t.id).equals(tipCacheKey)) {
+                                tipCacheKey = null;
+                            }
+                        }
+                    }
+                }
                 runOnUiThread(() -> {
-                    currentOutputPath =
-                            libraryDb.renderFile(entryId).getAbsolutePath();
-                    audioDurationSec = dur;
-                    releasePlayer();
-                    btnStop.setEnabled(false);
-                    loadWaveformForPath(currentOutputPath);
-                    setPlayPauseEnabled(true);
-                    setBusy(false);
-                    waveformView.finishProgressAnimation();
                     updateUndoBadge();
+                    refreshAllLanePeaks();
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     setStatus("Error: " + e.getMessage());
                     setBusy(false);
-                    waveformView.clearProgress();
+                    lanesProgressClear();
                     updateUndoBadge();
                 });
             }
@@ -1249,9 +1287,9 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Append an op to the current library entry and re-render the whole
-     * chain (cumulative semantics). The op row is rolled back if the
-     * render fails, so the DB never disagrees with the audio.
+     * Append an op to the selected track and re-render (cumulative
+     * semantics). The op row is rolled back if the render fails, so the
+     * DB never disagrees with the audio.
      */
     private void applyLibraryOp(final String opType, final String paramsJson,
                                 final String label, final String workingMsg,
@@ -1272,6 +1310,12 @@ public class MainActivity extends Activity {
                 onRendered, false, preRendered, preRenderedDur);
     }
 
+    /**
+     * Append an op to the SELECTED track and re-render (cumulative
+     * semantics). Locked tracks are never touched: toast and no-op. The
+     * op row is rolled back if the render fails, so the DB never
+     * disagrees with the audio. The mix is rebuilt at the end.
+     */
     private void applyLibraryOp(final String opType, final String paramsJson,
                                 final String label, final String workingMsg,
                                 final String doneMsg, final Runnable onRendered,
@@ -1281,6 +1325,17 @@ public class MainActivity extends Activity {
         if (entryId == null) {
             return;
         }
+        final LibraryDb.Track track = getSelectedTrack();
+        if (track == null) {
+            return;
+        }
+        if (!checkTrackUnlocked(track.id)) {
+            return;
+        }
+        final String trackId = track.id;
+        // Capture the lane's view now: a mid-op selection change must not
+        // misroute progress onto another lane.
+        final WaveformView opWave = laneWave(trackId);
         setBusy(true);
         if (selStartSec != null && audioDurationSec > 0
                 && ("fx".equals(opType))) {
@@ -1289,32 +1344,33 @@ public class MainActivity extends Activity {
             if (selEndSec != null) {
                 toFrac = (float) Math.min(1.0, selEndSec / audioDurationSec);
             }
-            waveformView.startProgressAnimation(fromFrac, toFrac);
-        } else {
-            waveformView.startProgressAnimation();
+            if (opWave != null) {
+                opWave.startProgressAnimation(fromFrac, toFrac);
+            }
+        } else if (opWave != null) {
+            opWave.startProgressAnimation();
         }
         setStatus(workingMsg);
         new Thread(() -> {
             boolean added = false;
             try {
-                libraryDb.addOp(entryId, opType, paramsJson, label);
+                libraryDb.addOp(entryId, trackId, opType, paramsJson, label);
                 added = true;
                 cachedDiagJson = null;
                 cachedDiagPath = null;
                 diagLastPath = null;
+                diagTrackId = null;
                 diagSummaryCache.clear();
                 final double dur;
                 if (preRendered != null) {
-                    dur = adoptPreRendered(entryId, preRendered, preRenderedDur);
+                    dur = adoptPreRendered(trackId, preRendered, preRenderedDur);
                 } else if (incremental) {
-                    dur = renderIncrementalOrFull(entryId, opType, paramsJson);
+                    dur = renderIncrementalOrFull(entryId, trackId, opType,
+                            paramsJson);
                 } else {
-                    dur = renderChainToCache(entryId);
+                    dur = renderChainToCache(entryId, trackId);
                 }
                 runOnUiThread(() -> {
-                    currentOutputPath =
-                            libraryDb.renderFile(entryId).getAbsolutePath();
-                    audioDurationSec = dur;
                     releasePlayer();
                     btnStop.setEnabled(false);
                     if (onRendered != null) {
@@ -1323,47 +1379,118 @@ public class MainActivity extends Activity {
                     setStatus(doneMsg);
                     setPlayPauseEnabled(true);
                     setBusy(false);
-                    waveformView.finishProgressAnimation();
+                    if (opWave != null) {
+                        opWave.finishProgressAnimation();
+                    }
                     updateUndoBadge();
+                    // Refresh the edited lane; the mix file goes stale.
+                    refreshLanePeaks(trackId);
                 });
             } catch (Exception e) {
                 if (added) {
                     try {
-                        libraryDb.popLastOp(entryId);
+                        libraryDb.popLastOp(entryId, trackId);
                     } catch (Exception ignored) {
                     }
                 }
                 runOnUiThread(() -> {
                     setStatus("Error: " + e.getMessage());
                     setBusy(false);
-                    waveformView.clearProgress();
+                    if (opWave != null) {
+                        opWave.clearProgress();
+                    }
                     updateUndoBadge();
                 });
             }
         }).start();
     }
 
-    /** Run the diagnostics on the current output, then show the report. */
+    /** Run the diagnostics, then show the report. Library entries diagnose
+     * the selected track's freshly rendered file; picked files diagnose
+     * the current output as before. */
     private void onDiagnoseClicked() {
         final String entryId = currentEntryId;
+        if (entryId != null) {
+            diagnoseSelectedTrack(entryId);
+            return;
+        }
+        // Legacy path for picked files (unchanged).
         // Same fallback playback uses: the render when there is one,
         // otherwise the pristine input (fresh picks have no render yet).
         String path = (currentOutputPath != null
                 && new File(currentOutputPath).exists()) ? currentOutputPath
                         : inputPath;
-        if (entryId == null || path == null || !new File(path).exists()) {
+        if (path == null || !new File(path).exists()) {
             setStatus("Open or record audio first.");
             return;
         }
         final String diagPath = path;
         diagLastPath = diagPath;
+        diagTrackId = null;
         if (diagPath.equals(cachedDiagPath) && cachedDiagJson != null) {
             showDiagnosisReport(cachedDiagJson);
             return;
         }
+        runDiagnosis(diagPath, null); // legacy picked-file path: no lane
+    }
+
+    /**
+     * Diagnose the selected track: render it fresh so the report matches
+     * the current chain, then diagnose its render file. Diagnosing is
+     * read-only, so locked tracks may be diagnosed; their Fix buttons
+     * still no-op via applyLibraryOp's guard.
+     */
+    private void diagnoseSelectedTrack(final String entryId) {
+        final LibraryDb.Track track = getSelectedTrack();
+        if (track == null) {
+            setStatus("Open or record audio first.");
+            return;
+        }
+        if (!trackHasAudio(track)) {
+            setStatus("The selected track has no audio to diagnose.");
+            return;
+        }
+        final String trackId = track.id;
+        final String diagPath =
+                libraryDb.trackRenderFile(trackId).getAbsolutePath();
+        if (diagPath.equals(cachedDiagPath) && cachedDiagJson != null
+                && trackId.equals(diagTrackId)) {
+            diagLastPath = diagPath;
+            showDiagnosisReport(cachedDiagJson);
+            return;
+        }
+        final WaveformView diagWave = laneWave(trackId);
         setBusy(true);
         setStatus("Diagnosing...");
-        waveformView.startProgressAnimation();
+        if (diagWave != null) {
+            diagWave.startProgressAnimation();
+        }
+        new Thread(() -> {
+            try {
+                renderTrackBlocking(entryId, trackId);
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    if (diagWave != null) {
+                        diagWave.clearProgress();
+                    }
+                    setStatus("Diagnosis failed: " + e.getMessage());
+                });
+                return;
+            }
+            diagTrackId = trackId;
+            diagLastPath = diagPath;
+            runDiagnosis(diagPath, laneWave(trackId));
+        }).start();
+    }
+
+    /** Run diagnose_file on a path and show the report card. */
+    private void runDiagnosis(final String diagPath, final WaveformView diagWave) {
+        setBusy(true);
+        setStatus("Diagnosing...");
+        if (diagWave != null) {
+            diagWave.startProgressAnimation();
+        }
         new Thread(() -> {
             try {
                 if (!Python.isStarted()) {
@@ -1379,7 +1506,9 @@ public class MainActivity extends Activity {
                 warmDiagSummaryCache(findingsJson);
                 runOnUiThread(() -> {
                     setBusy(false);
-                    waveformView.finishProgressAnimation();
+                    if (diagWave != null) {
+                        diagWave.finishProgressAnimation();
+                    }
                     cachedDiagPath = diagPath;
                     cachedDiagJson = findingsJson;
                     showDiagnosisReport(findingsJson);
@@ -1387,7 +1516,9 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     setBusy(false);
-                    waveformView.clearProgress();
+                    if (diagWave != null) {
+                        diagWave.clearProgress();
+                    }
                     setStatus("Diagnosis failed: " + e.getMessage());
                 });
             }
@@ -1766,7 +1897,7 @@ public class MainActivity extends Activity {
                         fix.optJSONObject("params").toString(),
                         fix.optString("label"),
                         "Applying fix...", "Fix applied.",
-                        () -> loadWaveformForPath(currentOutputPath));
+                        null);
             });
             body.addView(fixBtn);
         }
@@ -2060,25 +2191,31 @@ public class MainActivity extends Activity {
                 + profile.substring(1);
     }
 
-    /** Show this pass's steps on the waveform overlay, all grey (pending). */
+    /** The lane hosting the tune-up overlay, or null when none. */
+    private TrackLane tuneUpLane() {
+        return tuneUpLaneId != null ? laneById.get(tuneUpLaneId) : null;
+    }
+
+    /** Show this pass's steps on the tune-up lane's overlay, all grey (pending). */
     private void showTuneUpPass(int passNumber, int maxPasses,
             String labelsJson) {
-        if (tuneupOverlay == null) {
+        TrackLane lane = tuneUpLane();
+        if (lane == null) {
             return;
         }
-        tuneupSteps.removeAllViews();
+        lane.steps.removeAllViews();
         try {
             JSONArray labels = new JSONArray(labelsJson);
             for (int i = 0; i < labels.length(); i++) {
-                tuneupSteps.addView(makeTuneUpStepRow(
+                lane.steps.addView(makeTuneUpStepRow(
                         labels.optString(i, "")));
             }
         } catch (Exception ignored) {
         }
-        tuneupPassTitle.setText("Tune Up (" + tuneupProfileLabel + ") - pass "
+        lane.passTitle.setText("Tune Up (" + tuneupProfileLabel + ") - pass "
                 + passNumber + " of " + maxPasses);
-        tuneupOverlay.setVisibility(View.VISIBLE);
-        tuneupOverlay.bringToFront();
+        lane.overlay.setVisibility(View.VISIBLE);
+        lane.overlay.bringToFront();
     }
 
     private View makeTuneUpStepRow(String label) {
@@ -2114,8 +2251,8 @@ public class MainActivity extends Activity {
 
     /** Mark a step in-progress: blinking green label, bar filling. */
     private void setTuneUpStepActive(int stepIndex) {
-        View row = tuneupSteps == null ? null
-                : tuneupSteps.getChildAt(stepIndex);
+        TrackLane lane = tuneUpLane();
+        View row = lane == null ? null : lane.steps.getChildAt(stepIndex);
         if (!(row != null && row.getTag() instanceof TuneUpRow)) {
             return;
         }
@@ -2136,8 +2273,8 @@ public class MainActivity extends Activity {
 
     /** Mark a step done: solid green label, bar to 100%. */
     private void setTuneUpStepDone(int stepIndex) {
-        View row = tuneupSteps == null ? null
-                : tuneupSteps.getChildAt(stepIndex);
+        TrackLane lane = tuneUpLane();
+        View row = lane == null ? null : lane.steps.getChildAt(stepIndex);
         if (!(row != null && row.getTag() instanceof TuneUpRow)) {
             return;
         }
@@ -2152,30 +2289,49 @@ public class MainActivity extends Activity {
         h.bar.setProgress(100);
     }
 
-    /** Remove the step tracker from the waveform. */
+    /** Remove the step tracker from the tune-up lane. */
     private void hideTuneUpOverlay() {
-        if (tuneupOverlay == null) {
-            return;
+        for (TrackLane lane : lanes) {
+            lane.overlay.setVisibility(View.GONE);
+            lane.steps.removeAllViews();
         }
-        tuneupOverlay.setVisibility(View.GONE);
-        tuneupSteps.removeAllViews();
+        tuneUpLaneId = null;
     }
 
     /** One-button Tune Up: converge the profile's fixes over up to 3 passes
      * and adopt the converged audio directly (no re-render, no automatic
      * re-diagnosis). Falls back to the single-pass build if the diagnosed
      * file is gone. */
+    /** Tune Up the SELECTED track: converge on its own rendered file and
+     * adopt the composite tune_up op onto that track. Locked tracks
+     * no-op with the "Track locked" toast. */
     private void runTuneUp(final String findingsJson, final String profile) {
         final String entryId = currentEntryId;
-        if (entryId == null) {
+        final LibraryDb.Track track = getSelectedTrack();
+        if (entryId == null || track == null) {
             setStatus("Open or record audio first.");
             return;
         }
+        if (!checkTrackUnlocked(track.id)) {
+            return;
+        }
+        if (!trackHasAudio(track)) {
+            setStatus("The selected track has no audio to tune up.");
+            return;
+        }
+        final String trackId = track.id;
+        if (diagTrackId != null && !diagTrackId.equals(trackId)) {
+            setStatus("Track changed since diagnosis. Diagnose again first.");
+            return;
+        }
+        final WaveformView tuneWave = laneWave(trackId);
+        tuneUpLaneId = trackId;
         setBusy(true);
         setStatus("Tuning up...");
-        waveformView.startProgressAnimation();
+        if (tuneWave != null) {
+            tuneWave.startProgressAnimation();
+        }
         tuneupProfileLabel = tuneUpProfileLabel(profile);
-        final String convergePath = diagLastPath;
         final TuneUpProgress progress = new TuneUpProgress();
         new Thread(() -> {
             try {
@@ -2184,15 +2340,21 @@ public class MainActivity extends Activity {
                 }
                 final PyObject bridge = Python.getInstance()
                         .getModule("audiofx.android_bridge");
+                // Converge on the selected track's own rendered file.
+                File trackRender = libraryDb.trackRenderFile(trackId);
+                if (!trackRender.exists()) {
+                    renderTrackBlocking(entryId, trackId);
+                }
+                final String convergePath = trackRender.getAbsolutePath();
                 final String tuneUpJson;
                 final File preRendered;
                 final double preRenderedDur;
-                if (convergePath != null
-                        && new File(convergePath).exists()) {
+                if (new File(convergePath).exists()) {
                     preRendered = new File(getCacheDir(), "tune_up_render.wav");
                     String out = bridge.callAttr("tune_up_converge",
                             convergePath, findingsJson, profile, progress, 3,
-                            preRendered.getAbsolutePath(), entryId).toString();
+                            preRendered.getAbsolutePath(),
+                            "track:" + trackId).toString();
                     tuneUpJson = out;
                     preRenderedDur = new JSONObject(out)
                             .optDouble("duration_s", -1);
@@ -2213,7 +2375,7 @@ public class MainActivity extends Activity {
                         applyTuneUpOp(params.toString(), summary,
                                 "Tuning up...",
                                 "Tune-up complete. " + receipt,
-                                () -> loadWaveformForPath(currentOutputPath),
+                                null,
                                 preRendered, preRenderedDur);
                     } else {
                         // No converged audio (diagnosed file gone): build
@@ -2222,29 +2384,40 @@ public class MainActivity extends Activity {
                                 params.toString(), summary,
                                 "Tuning up...",
                                 "Tune-up complete. " + receipt,
-                                () -> loadWaveformForPath(currentOutputPath));
+                                null);
                     }
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     hideTuneUpOverlay();
                     setBusy(false);
-                    waveformView.clearProgress();
+                    if (tuneWave != null) {
+                        tuneWave.clearProgress();
+                    }
                     setStatus("Tune-up failed: " + e.getMessage());
                 });
             }
         }).start();
     }
 
-    /** Pop the last renderable op and re-render (cross-session undo). */
+    /** Pop the selected track's last renderable op and re-render
+     * (cross-session undo). Locked tracks no-op with the toast. */
     private void undoLibraryOp() {
         final String entryId = currentEntryId;
         if (entryId == null) {
             return;
         }
+        final LibraryDb.Track track = getSelectedTrack();
+        if (track == null) {
+            return;
+        }
+        if (!checkTrackUnlocked(track.id)) {
+            return;
+        }
+        final String trackId = track.id;
         final LibraryDb.Op last;
         try {
-            List<LibraryDb.Op> ops = libraryDb.listOps(entryId);
+            List<LibraryDb.Op> ops = libraryDb.listOps(entryId, trackId);
             LibraryDb.Op found = null;
             for (int i = ops.size() - 1; i >= 0; i--) {
                 if (isRenderableOp(ops.get(i).opType)) {
@@ -2263,68 +2436,62 @@ public class MainActivity extends Activity {
             setStatus("Undo failed: " + e.getMessage());
             return;
         }
+        final WaveformView undoWave = laneWave(trackId);
         setBusy(true);
-        waveformView.startProgressAnimation();
+        if (undoWave != null) {
+            undoWave.startProgressAnimation();
+        }
         setStatus("Undoing...");
         new Thread(() -> {
             try {
-                libraryDb.popLastOp(entryId);
+                // Punch-in takes are durable files referenced by the op;
+                // delete the take when its op is undone.
+                if ("punch_in".equals(last.opType)) {
+                    try {
+                        String takePath = new JSONObject(last.paramsJson)
+                                .optString("take_path", null);
+                        if (takePath != null) {
+                            new File(takePath).delete();
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+                libraryDb.popLastOp(entryId, trackId);
                 cachedDiagJson = null;
                 cachedDiagPath = null;
                 diagLastPath = null;
+                diagTrackId = null;
                 diagSummaryCache.clear();
-                final boolean remaining = hasRenderableOps(entryId);
-                final String refreshPath;
-                if (remaining) {
-                    renderChainToCache(entryId);
-                    refreshPath = libraryDb.renderFile(entryId).getAbsolutePath();
-                } else {
-                    // Back to pristine: drop the render cache.
-                    File render = libraryDb.renderFile(entryId);
-                    if (render.exists()) {
-                        render.delete();
-                    }
-                    LibraryDb.LibraryEntry e = libraryDb.getEntry(entryId);
-                    refreshPath = e != null ? e.pristinePath : null;
-                }
-                if (refreshPath == null || !(new File(refreshPath).exists())) {
-                    throw new Exception("audio missing after undo");
-                }
+                // Re-render the track (a bare take renders through the
+                // empty chain, so undoing to zero ops still sounds right),
+                // then rebuild the mix.
+                renderChainToCache(entryId, trackId);
+                final int depth = undoDepth(trackId);
                 runOnUiThread(() -> {
-                    currentOutputPath = remaining ? refreshPath : null;
-                    releasePlayer();
-                    btnStop.setEnabled(false);
-                    loadWaveformForPath(refreshPath);
-                    int depth = undoDepth();
+                    updateUndoBadge();
+                    refreshLanePeaks(trackId);
                     setStatus("Undone: " + last.label + (depth > 0
                             ? " — " + depth + " op(s) left."
                             : " — back to the original audio."));
-                    setBusy(false);
-                    waveformView.finishProgressAnimation();
-                    updateUndoBadge();
                 });
             } catch (Exception e) {
                 // Roll the popped op back on: re-add with the same content
                 // (it regains the top seq, preserving order).
                 try {
-                    libraryDb.addOp(entryId, last.opType, last.paramsJson, last.label);
+                    libraryDb.addOp(entryId, trackId, last.opType,
+                            last.paramsJson, last.label);
                 } catch (Exception ignored) {
                 }
                 runOnUiThread(() -> {
                     setStatus("Undo failed: " + e.getMessage());
                     setBusy(false);
-                    waveformView.clearProgress();
+                    if (undoWave != null) {
+                        undoWave.clearProgress();
+                    }
                     updateUndoBadge();
                 });
             }
         }).start();
-    }
-
-    /** Disable the edit controls + progress bar while background work runs. */
-    private void setBusy(boolean busy) {
-        setEditButtonsEnabled(!busy);
-        btnUndo.setEnabled(!busy);
-        showProgress(busy);
     }
 
     // ---- Library op params (spec section 6) ----
@@ -2369,9 +2536,1158 @@ public class MainActivity extends Activity {
         }
     }
 
+    // ---- Multitrack: track panel, record targeting, render/mix ----
+
+    /**
+     * Load the entry's tracks, creating them for legacy entries
+     * (Track 1 adopts the entry's pristine take and its ops). The selected
+     * track defaults to the first track; a stale selection is reset.
+     */
+    private void ensureTracksForEntry(String entryId) {
+        try {
+            LibraryDb.LibraryEntry e = libraryDb.getEntry(entryId);
+            mTracks = libraryDb.ensureTracks(entryId,
+                    e != null ? e.pristinePath : null);
+            if (mTracks == null) {
+                mTracks = new ArrayList<>();
+            }
+        } catch (Exception ex) {
+            setStatus("Could not load tracks: " + ex.getMessage());
+            mTracks = new ArrayList<>();
+        }
+        if (selectedTrackId == null || getTrackById(selectedTrackId) == null) {
+            selectedTrackId = mTracks.isEmpty() ? null : mTracks.get(0).id;
+        }
+    }
+
+    private LibraryDb.Track getTrackById(String trackId) {
+        if (trackId == null) {
+            return null;
+        }
+        for (LibraryDb.Track t : mTracks) {
+            if (trackId.equals(t.id)) {
+                return t;
+            }
+        }
+        return null;
+    }
+
+    /** The currently selected track, or null when no entry is open. */
+    private LibraryDb.Track getSelectedTrack() {
+        return getTrackById(selectedTrackId);
+    }
+
+    /**
+     * Guard for track edits: shows the "Track locked" toast and returns
+     * false when the track is locked.
+     */
+    private boolean checkTrackUnlocked(String trackId) {
+        LibraryDb.Track t = getTrackById(trackId);
+        if (t != null && t.locked) {
+            Toast.makeText(this, R.string.track_locked,
+                    Toast.LENGTH_SHORT).show();
+            return false;
+        }
+        return true;
+    }
+
+    private void selectTrack(String trackId) {
+        selectedTrackId = trackId;
+        // Diagnosis is per-track: drop the old track's cached report.
+        cachedDiagJson = null;
+        cachedDiagPath = null;
+        diagLastPath = null;
+        diagTrackId = null;
+        diagSummaryCache.clear();
+        refreshLanes();
+        // History and the undo badge follow the selection.
+        updateUndoBadge();
+    }
+
+    /** The selected track's lane, or null when there is none. */
+    private TrackLane selectedLane() {
+        return selectedTrackId != null ? laneById.get(selectedTrackId) : null;
+    }
+
+    /** A track's lane waveform, or null when the lane doesn't exist. */
+    private WaveformView laneWave(String trackId) {
+        TrackLane lane = trackId != null ? laneById.get(trackId) : null;
+        return lane != null ? lane.wave : null;
+    }
+
+    /** Progress fill on every lane (multi-track background work). */
+    private void lanesProgressStart() {
+        for (TrackLane lane : lanes) {
+            lane.wave.startProgressAnimation();
+        }
+    }
+
+    private void lanesProgressFinish() {
+        for (TrackLane lane : lanes) {
+            lane.wave.finishProgressAnimation();
+        }
+    }
+
+    private void lanesProgressClear() {
+        for (TrackLane lane : lanes) {
+            lane.wave.clearProgress();
+        }
+    }
+
+    /** Only the selected lane drives the trim window. */
+    private void onLaneSelectionChanged(String trackId, Float s, Float e) {
+        if (!trackId.equals(selectedTrackId)) {
+            return;
+        }
+        onSelectionChanged(s, e);
+    }
+
+    /**
+     * Sync the per-track lanes with mTracks. Existing lanes are reused
+     * so zoom, selection, and peaks survive; only structural changes
+     * (add/remove/reorder) rebuild. Also refreshes the waveformView
+     * alias (selected lane), the selection highlight, and the project
+     * timeline.
+     */
+    private void refreshLanes() {
+        if (laneList == null) {
+            return;
+        }
+        if (currentEntryId == null) {
+            lanes.clear();
+            laneById.clear();
+            laneList.removeAllViews();
+            tracksBar.setVisibility(View.GONE);
+            waveformView = null;
+            audioDurationSec = 0;
+            return;
+        }
+        tracksBar.setVisibility(View.VISIBLE);
+        Map<String, TrackLane> old = new HashMap<>(laneById);
+        lanes.clear();
+        laneById.clear();
+        laneList.removeAllViews();
+        float density = getResources().getDisplayMetrics().density;
+        for (LibraryDb.Track t : mTracks) {
+            TrackLane lane = old.get(t.id);
+            if (lane == null) {
+                lane = buildLane(t, density);
+            } else {
+                lane.trackId = t.id;
+            }
+            updateLaneHeader(lane, t);
+            lanes.add(lane);
+            laneById.put(t.id, lane);
+            laneList.addView(lane.root);
+        }
+        if (getSelectedTrack() == null) {
+            selectedTrackId = mTracks.isEmpty() ? null : mTracks.get(0).id;
+        }
+        TrackLane sel = selectedLane();
+        waveformView = sel != null ? sel.wave : null;
+        updateLaneSelectionHighlights();
+        updateProjectDuration();
+    }
+
+    /** Selection highlight across lanes. */
+    private void updateLaneSelectionHighlights() {
+        for (TrackLane lane : lanes) {
+            lane.root.setBackgroundResource(
+                    lane.trackId.equals(selectedTrackId)
+                            ? R.drawable.bg_chip_selected : R.drawable.bg_card);
+        }
+    }
+
+    /** Project timeline = longest lane; every lane draws against it. */
+    private void updateProjectDuration() {
+        double max = 0;
+        for (TrackLane lane : lanes) {
+            if (lane.contentDurSec > max) {
+                max = lane.contentDurSec;
+            }
+        }
+        audioDurationSec = max;
+        for (TrackLane lane : lanes) {
+            lane.wave.setProjectDuration(max);
+        }
+        tvTimeTot.setText(fmtTime(max));
+    }
+
+    /**
+     * One lane: card with a header (name tap=rename, lock, mute) and the
+     * track's own waveform on the shared project timeline, plus a
+     * per-lane tune-up overlay. Tapping the header or a first tap on a
+     * non-selected lane's waveform selects the track; taps on the
+     * selected lane's waveform place trim markers. Track changes are
+     * frozen during a recording session so the record target stays
+     * stable.
+     */
+    private TrackLane buildLane(final LibraryDb.Track track, float density) {
+        final TrackLane lane = new TrackLane();
+        lane.trackId = track.id;
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (14 * density);
+        root.setPadding(pad, pad, pad, pad);
+        root.setBackgroundResource(R.drawable.bg_card);
+        root.setClickable(true);
+        root.setFocusable(true);
+        root.setOnClickListener(v -> {
+            if (isRecordingSession()) {
+                return; // silent: the record target stays put
+            }
+            selectTrack(track.id);
+        });
+        LinearLayout.LayoutParams rootLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        rootLp.topMargin = (int) (14 * density);
+        root.setLayoutParams(rootLp);
+        lane.root = root;
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        root.addView(header, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        TextView name = new TextView(this);
+        name.setTextSize(14f);
+        name.setTypeface(null, android.graphics.Typeface.BOLD);
+        name.setTextColor(getColor(R.color.sl_txt));
+        name.setSingleLine(true);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams nameLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        nameLp.rightMargin = (int) (8 * density);
+        header.addView(name, nameLp);
+        name.setOnClickListener(v -> {
+            LibraryDb.Track t = getTrackById(track.id);
+            if (t != null) {
+                showRenameTrackDialog(t);
+            }
+        });
+        lane.nameView = name;
+
+        Button lockBtn = new Button(this);
+        lockBtn.setTextSize(14f);
+        lockBtn.setBackgroundResource(R.drawable.bg_zoom_btn);
+        lockBtn.setMinHeight(0);
+        lockBtn.setMinimumHeight(0);
+        lockBtn.setPadding(0, 0, 0, 0);
+        LinearLayout.LayoutParams lockLp = new LinearLayout.LayoutParams(
+                (int) (28 * density), (int) (28 * density));
+        lockBtn.setOnClickListener(v -> {
+            LibraryDb.Track t = getTrackById(track.id);
+            if (t != null) {
+                toggleTrackLock(t.id, !t.locked);
+            }
+        });
+        header.addView(lockBtn, lockLp);
+        lane.lockBtn = lockBtn;
+
+        Button muteBtn = new Button(this);
+        muteBtn.setTextSize(14f);
+        muteBtn.setBackgroundResource(R.drawable.bg_zoom_btn);
+        muteBtn.setMinHeight(0);
+        muteBtn.setMinimumHeight(0);
+        muteBtn.setPadding(0, 0, 0, 0);
+        LinearLayout.LayoutParams muteLp = new LinearLayout.LayoutParams(
+                (int) (28 * density), (int) (28 * density));
+        muteLp.leftMargin = (int) (6 * density);
+        muteBtn.setOnClickListener(v -> {
+            LibraryDb.Track t = getTrackById(track.id);
+            if (t != null) {
+                toggleTrackMute(t.id, !t.muted);
+            }
+        });
+        header.addView(muteBtn, muteLp);
+        lane.muteBtn = muteBtn;
+
+        Button deleteBtn = new Button(this);
+        deleteBtn.setTextSize(14f);
+        deleteBtn.setText("\uD83D\uDDD1"); // wastebasket
+        deleteBtn.setBackgroundResource(R.drawable.bg_zoom_btn);
+        deleteBtn.setMinHeight(0);
+        deleteBtn.setMinimumHeight(0);
+        deleteBtn.setPadding(0, 0, 0, 0);
+        LinearLayout.LayoutParams delLp = new LinearLayout.LayoutParams(
+                (int) (28 * density), (int) (28 * density));
+        delLp.leftMargin = (int) (6 * density);
+        deleteBtn.setOnClickListener(v -> {
+            LibraryDb.Track t = getTrackById(track.id);
+            if (t != null) {
+                confirmDeleteTrack(t);
+            }
+        });
+        header.addView(deleteBtn, delLp);
+        lane.deleteBtn = deleteBtn;
+
+        FrameLayout frame = new FrameLayout(this);
+        LinearLayout.LayoutParams frameLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, (int) (110 * density));
+        frameLp.topMargin = (int) (8 * density);
+        root.addView(frame, frameLp);
+
+        final WaveformView wv = new WaveformView(this);
+        wv.setBackgroundResource(R.drawable.bg_wave);
+        wv.setLayoutParams(new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        wv.setOnTapListener(frac -> {
+            if (isRecordingSession()) {
+                return;
+            }
+            if (!track.id.equals(selectedTrackId)) {
+                selectTrack(track.id); // first tap selects only
+            } else {
+                wv.placeMarkerTap(frac);
+            }
+        });
+        wv.setOnSelectionListener((s, e) -> onLaneSelectionChanged(track.id, s, e));
+        frame.addView(wv);
+        lane.wave = wv;
+
+        // Per-lane tune-up step overlay, initially hidden.
+        LinearLayout overlay = new LinearLayout(this);
+        overlay.setOrientation(LinearLayout.VERTICAL);
+        overlay.setGravity(Gravity.CENTER);
+        int opad = (int) (10 * density);
+        overlay.setPadding(opad, opad, opad, opad);
+        overlay.setBackgroundColor(0xD8141316);
+        overlay.setVisibility(View.GONE);
+        overlay.setLayoutParams(new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        TextView passTitle = new TextView(this);
+        passTitle.setTextColor(getColor(R.color.sl_txt));
+        passTitle.setTextSize(13f);
+        passTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams ptLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        ptLp.bottomMargin = (int) (6 * density);
+        overlay.addView(passTitle, ptLp);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        LinearLayout steps = new LinearLayout(this);
+        steps.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(steps);
+        overlay.addView(scroll);
+        frame.addView(overlay);
+        lane.overlay = overlay;
+        lane.steps = steps;
+        lane.passTitle = passTitle;
+
+        updateLaneHeader(lane, track);
+        return lane;
+    }
+
+    /** Name, lock/mute icons, and the muted dim for one lane. */
+    private void updateLaneHeader(TrackLane lane, LibraryDb.Track t) {
+        lane.nameView.setText(t.name);
+        lane.lockBtn.setText(t.locked ? "\uD83D\uDD12" : "\uD83D\uDD13");
+        lane.lockBtn.setTextColor(getColor(
+                t.locked ? R.color.sl_teal2 : R.color.sl_mut));
+        // Locked is unmistakable: solid red chip, not just a tint.
+        lane.lockBtn.setBackgroundResource(t.locked
+                ? R.drawable.bg_chip_locked : R.drawable.bg_zoom_btn);
+        lane.muteBtn.setText(t.muted ? "\uD83D\uDD07" : "\uD83D\uDD0A");
+        lane.muteBtn.setTextColor(getColor(
+                t.muted ? R.color.sl_teal2 : R.color.sl_mut));
+        // A muted lane dims; it is still excluded from every mix.
+        lane.wave.setAlpha(t.muted ? 0.4f : 1f);
+    }
+
+    private void onAddTrackClicked() {
+        if (currentEntryId == null) {
+            return;
+        }
+        if (isRecordingSession()) {
+            setStatus("Stop recording first.");
+            return;
+        }
+        try {
+            LibraryDb.Track created =
+                    createNumberedTrack(currentEntryId);
+            selectedTrackId = created.id;
+            refreshLanes();
+            setStatus("Track added.");
+        } catch (Exception e) {
+            setStatus("Could not add track: " + e.getMessage());
+        }
+    }
+
+    private void toggleTrackLock(String trackId, boolean locked) {
+        if (currentEntryId == null) {
+            return;
+        }
+        if (isRecordingSession()) {
+            setStatus("Stop recording first.");
+            return;
+        }
+        try {
+            libraryDb.setTrackLocked(trackId, locked);
+            mTracks = libraryDb.listTracks(currentEntryId);
+            refreshLanes();
+            setStatus(getString(locked
+                    ? R.string.track_locked : R.string.track_unlocked));
+        } catch (Exception e) {
+            setStatus("Could not change lock: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Mute toggle. Display-free: the lane dims and the mix file goes
+     * stale (rebuilt on demand for play/overdub/share). No peak
+     * recompute — each lane shows its own audio independently.
+     */
+    private void toggleTrackMute(String trackId, boolean muted) {
+        if (currentEntryId == null) {
+            return;
+        }
+        if (isRecordingSession()) {
+            setStatus("Stop recording first.");
+            return;
+        }
+        try {
+            libraryDb.setTrackMuted(trackId, muted);
+            mTracks = libraryDb.listTracks(currentEntryId);
+            refreshLanes();
+            mixDirty = true;
+            releasePlayer(); // the playing mix no longer matches
+            setStatus(getString(muted
+                    ? R.string.track_muted : R.string.track_unmuted));
+        } catch (Exception e) {
+            setStatus("Could not change mute: " + e.getMessage());
+        }
+    }
+
+    /** Rename dialog: EditText prefilled, trimmed, empty input ignored. */
+    private void showRenameTrackDialog(final LibraryDb.Track track) {
+        if (isRecordingSession()) {
+            return; // silent: the record target stays put
+        }
+        final float density = getResources().getDisplayMetrics().density;
+        int pad = (int) (20 * density);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(pad, (int) (8 * density), pad, (int) (8 * density));
+        final EditText nameInput = new EditText(this);
+        nameInput.setText(track.name);
+        nameInput.setTextColor(getColor(R.color.sl_txt));
+        nameInput.setHintTextColor(getColor(R.color.sl_dim));
+        nameInput.setSelectAllOnFocus(true);
+        nameInput.setSingleLine(true);
+        root.addView(nameInput, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        final AlertDialog dialog =
+                new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+                        .setTitle(R.string.rename_track)
+                        .setView(root)
+                        .setPositiveButton("Rename", null)
+                        .setNegativeButton("Cancel", null)
+                        .show();
+        // The dialog theme inherits light Material buttons; re-tint them.
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setTextColor(getColor(R.color.sl_teal2));
+        dialog.getButton(AlertDialog.BUTTON_NEGATIVE)
+                .setTextColor(getColor(R.color.sl_mut));
+        // Manual click handling so an empty name keeps nothing and
+        // a valid rename refreshes the panel before dismissing.
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    String name = nameInput.getText().toString().trim();
+                    dialog.dismiss();
+                    if (name.isEmpty()) {
+                        return; // ignore empty
+                    }
+                    try {
+                        libraryDb.renameTrack(track.id, name);
+                        mTracks = libraryDb.listTracks(currentEntryId);
+                        refreshLanes();
+                    } catch (Exception e) {
+                        setStatus("Rename failed: " + e.getMessage());
+                    }
+                });
+    }
+
+    /** Confirm then delete a track: DB row, ops, audio files, and lane. */
+    private void confirmDeleteTrack(final LibraryDb.Track track) {
+        if (isRecordingSession()) {
+            return; // silent: the record target stays put
+        }
+        if (track.locked) {
+            Toast.makeText(this, "Track locked — unlock to delete",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+                .setTitle("Delete track?")
+                .setMessage("Delete \"" + track.name + "\" and its audio?"
+                        + " This cannot be undone.")
+                .setPositiveButton("Delete", (d, w) -> deleteTrack(track.id))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void deleteTrack(String trackId) {
+        final String entryId = currentEntryId;
+        if (entryId == null) {
+            return;
+        }
+        setBusy(true);
+        setStatus("Deleting track...");
+        new Thread(() -> {
+            try {
+                libraryDb.deleteTrack(trackId);
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    setStatus("Delete failed: " + e.getMessage());
+                });
+                return;
+            }
+            runOnUiThread(() -> {
+                // If the deleted track was selected, pick another.
+                if (trackId.equals(selectedTrackId)) {
+                    selectedTrackId = null;
+                }
+                // Reload without ensureTracks: deleting the last track
+                // must leave zero tracks, not auto-recreate one.
+                try {
+                    mTracks = libraryDb.listTracks(entryId);
+                } catch (Exception ignored) {
+                    mTracks = new ArrayList<>();
+                }
+                if (selectedTrackId == null && !mTracks.isEmpty()) {
+                    selectedTrackId = mTracks.get(0).id;
+                }
+                refreshLanes();
+                updateProjectDuration();
+                mixDirty = true;
+                setBusy(false);
+                setStatus(mTracks.isEmpty() ? "Track deleted."
+                        : "Track deleted.");
+            });
+        }).start();
+    }
+
+    /**
+     * The existing new-project/entry-creation flow, extracted for the
+     * no-project record case: durable home for the take under
+     * filesDir/library/takes, then the library row. The take stays raw;
+     * auto-normalize becomes a track op in stopRecording.
+     */
+    private String createProjectForTake(File take, boolean wasLive,
+            String captureLabel) throws Exception {
+        final String entryId = UUID.randomUUID().toString();
+        final File dest = libraryDb.takeFile(entryId);
+        try {
+            copyFile(take, dest);
+            take.delete();
+            double[] info = wavInfo(dest);
+            String name = pendingRecName;
+            if (name.toLowerCase(Locale.US).endsWith(".wav")) {
+                name = name.substring(0, name.length() - 4);
+            }
+            libraryDb.createEntryWithId(entryId, name,
+                    System.currentTimeMillis(),
+                    info[2], (int) info[0], (int) info[1],
+                    wasLive ? "mic-livefx" : "mic", captureLabel,
+                    LibraryDb.DSP_VERSION, dest.getAbsolutePath());
+            return entryId;
+        } catch (Exception e) {
+            dest.delete(); // don't orphan a take file with no DB row
+            throw e;
+        }
+    }
+
+    /** A track counts as having audio when its take WAV holds samples. */
+    private boolean trackHasAudio(LibraryDb.Track track) {
+        if (track == null || track.wavPath == null) {
+            return false;
+        }
+        File f = new File(track.wavPath);
+        return f.exists() && f.length() > 44;
+    }
+
+    /** Track facts for resolve_record_target, in position order. */
+    private String buildTracksJson() {
+        JSONArray arr = new JSONArray();
+        for (LibraryDb.Track t : mTracks) {
+            try {
+                JSONObject o = new JSONObject();
+                o.put("id", t.id);
+                o.put("locked", t.locked);
+                o.put("has_audio", trackHasAudio(t));
+                o.put("position", t.position);
+                o.put("selected", t.id.equals(selectedTrackId));
+                arr.put(o);
+            } catch (Exception ignored) {
+            }
+        }
+        return arr.toString();
+    }
+
+    /** Create "Track N" (N = max position + 1) and reload the list. */
+    private LibraryDb.Track createNumberedTrack(String entryId)
+            throws Exception {
+        int maxPos = 0;
+        for (LibraryDb.Track t : mTracks) {
+            maxPos = Math.max(maxPos, t.position);
+        }
+        LibraryDb.Track created =
+                libraryDb.createTrack(entryId, "Track " + (maxPos + 1));
+        mTracks = libraryDb.listTracks(entryId);
+        return created;
+    }
+
+    /**
+     * Pick the take's track via Python's never-overwrite rule: only empty,
+     * unlocked tracks are eligible, otherwise a new track is created.
+     * A stale or busy pick is never overwritten either; the Java-side
+     * fallback keeps the same invariant when the bridge fails.
+     */
+    private LibraryDb.Track resolveRecordTarget() {
+        final String entryId = currentEntryId;
+        if (entryId == null) {
+            return null;
+        }
+        try {
+            if (!Python.isStarted()) {
+                Python.start(new AndroidPlatform(this));
+            }
+            PyObject result = Python.getInstance()
+                    .getModule("audiofx.android_bridge")
+                    .callAttr("resolve_record_target", buildTracksJson());
+            String action = pyResultField(result, "action");
+            if ("create".equals(action)) {
+                return createNumberedTrack(entryId);
+            }
+            LibraryDb.Track picked =
+                    getTrackById(pyResultField(result, "track_id"));
+            if (picked != null && !picked.locked && !trackHasAudio(picked)) {
+                return picked;
+            }
+            return createNumberedTrack(entryId);
+        } catch (Exception e) {
+            Log.w("AudioMechanic", "resolve_record_target failed", e);
+            for (LibraryDb.Track t : mTracks) {
+                if (!t.locked && !trackHasAudio(t)) {
+                    return t;
+                }
+            }
+            try {
+                return createNumberedTrack(entryId);
+            } catch (Exception ex) {
+                return null;
+            }
+        }
+    }
+
+    /**
+     * Read a field from a Python bridge result. The bridge contract is a
+     * JSON string; a dict result is tolerated too.
+     */
+    private static String pyResultField(PyObject result, String key) {
+        try {
+            JSONObject o = new JSONObject(result.toString());
+            if (!o.isNull(key)) {
+                return String.valueOf(o.get(key));
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            String v = result.callAttr("get", key).toString();
+            return "None".equals(v) ? null : v;
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /**
+     * Full render of one track's op chain to its render file (blocking;
+     * call off the UI thread). Display-only ops (livefx, fork) are
+     * filtered out. See renderTrackChain for the duration-returning form.
+     */
+    private void renderTrackBlocking(String entryId, String trackId)
+            throws Exception {
+        renderTrackChain(entryId, trackId);
+    }
+
+    /**
+     * Full render of one track's op chain to its render file, returning
+     * the rendered duration. Writes to a temp file and atomically
+     * renames into place. The Python tip cache is seeded under
+     * "track:"+trackId; use renderChainToCache when the Java-side
+     * tipCacheKey must track it too.
+     */
+    private double renderTrackChain(String entryId, String trackId)
+            throws Exception {
+        LibraryDb.Track track = getTrackById(trackId);
+        if (track == null) {
+            throw new Exception("track not found");
+        }
+        if (!Python.isStarted()) {
+            Python.start(new AndroidPlatform(this));
+        }
+        String opsJson = buildOpsJson(entryId, trackId);
+        File render = libraryDb.trackRenderFile(trackId);
+        File tmp = new File(render.getParentFile(),
+                render.getName() + ".tmp");
+        PyObject result = Python.getInstance()
+                .getModule("audiofx.android_bridge")
+                .callAttr("render_chain", track.wavPath, opsJson,
+                        tmp.getAbsolutePath(), null, "track:" + trackId);
+        double dur = Double.parseDouble(
+                result.callAttr("get", "duration_s").toString());
+        if (!tmp.renameTo(render)) {
+            copyFile(tmp, render);
+            tmp.delete();
+        }
+        return dur;
+    }
+
+    /** Full render of one track only, with the standard progress UI. */
+    private void renderTrack(String trackId) {
+        final String entryId = currentEntryId;
+        if (entryId == null || trackId == null) {
+            return;
+        }
+        final WaveformView rtWave = laneWave(trackId);
+        setBusy(true);
+        if (rtWave != null) {
+            rtWave.startProgressAnimation();
+        }
+        setStatus("Rendering track...");
+        new Thread(() -> {
+            try {
+                renderTrackBlocking(entryId, trackId);
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    if (rtWave != null) {
+                        rtWave.finishProgressAnimation();
+                    }
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setStatus("Render failed: " + e.getMessage());
+                    setBusy(false);
+                    if (rtWave != null) {
+                        rtWave.clearProgress();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /**
+     * One audible track for the mix: stable id (for mute) plus its
+     * rendered WAV path.
+     */
+    static final class MixTrack {
+        final String id;
+        final String path;
+
+        MixTrack(String id, String path) {
+            this.id = id;
+            this.path = path;
+        }
+    }
+
+    /**
+     * One per-track waveform lane: header (name/lock/mute), the track's
+     * own waveform on the shared project timeline, and a per-lane
+     * tune-up step overlay. contentDurSec is the lane's audio length;
+     * the project timeline is the max across lanes.
+     */
+    static final class TrackLane {
+        String trackId;
+        LinearLayout root;
+        TextView nameView;
+        Button lockBtn;
+        Button muteBtn;
+        Button deleteBtn;
+        WaveformView wave;
+        LinearLayout overlay;
+        LinearLayout steps;
+        TextView passTitle;
+        double contentDurSec;
+    }
+
+    /**
+     * Rendered track WAVs for the mix, in track position order.
+     * Tracks without a rendered take are skipped. Muted tracks are
+     * NOT filtered here: the Python mixdown needs their ids.
+     */
+    private List<MixTrack> collectMixWavs() {
+        final List<MixTrack> mixTracks = new ArrayList<>();
+        for (LibraryDb.Track t : mTracks) {
+            try {
+                File render = libraryDb.trackRenderFile(t.id);
+                if (render.exists() && render.length() > 44) {
+                    mixTracks.add(new MixTrack(t.id,
+                            render.getAbsolutePath()));
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return mixTracks;
+    }
+
+    /**
+     * Shared JSON args for the Python mix calls (mixdown/mix_peaks).
+     * Muted track ids ride along unfiltered: the Python side skips them.
+     */
+    private JSONObject mixCallArgs(List<MixTrack> mixTracks) throws JSONException {
+        JSONArray tracksJson = new JSONArray();
+        for (MixTrack mt : mixTracks) {
+            JSONObject o = new JSONObject();
+            o.put("id", mt.id);
+            o.put("path", mt.path);
+            tracksJson.put(o);
+        }
+        JSONArray mutedJson = new JSONArray();
+        for (LibraryDb.Track t : mTracks) {
+            if (t.muted) {
+                mutedJson.put(t.id);
+            }
+        }
+        // The entry's sample rate: the first track's rate.
+        int targetRate = 0;
+        for (MixTrack mt : mixTracks) {
+            try {
+                targetRate = (int) wavInfo(new File(mt.path))[0];
+                break;
+            } catch (Exception ignored) {
+            }
+        }
+        JSONObject args = new JSONObject();
+        args.put("tracks", tracksJson.toString());
+        args.put("muted", mutedJson.toString());
+        args.put("rate", targetRate > 0 ? targetRate : 44100);
+        return args;
+    }
+
+    /**
+     * Blocking mixdown of rendered track WAVs (call off the UI thread).
+     * Returns the mix file path.
+     */
+    private String mixdownBlocking(String entryId, List<MixTrack> mixTracks)
+            throws Exception {
+        if (!Python.isStarted()) {
+            Python.start(new AndroidPlatform(this));
+        }
+        JSONObject a = mixCallArgs(mixTracks);
+        File outFile = libraryDb.mixFile(entryId);
+        PyObject result = Python.getInstance()
+                .getModule("audiofx.android_bridge")
+                .callAttr("mixdown", a.getString("tracks"),
+                        outFile.getAbsolutePath(), a.getInt("rate"),
+                        a.getString("muted"));
+        if (!"True".equals(result.callAttr("get", "ok").toString())) {
+            throw new Exception("mixdown failed");
+        }
+        String mixPath = result.callAttr("get", "output_path").toString();
+        if (mixPath == null || mixPath.isEmpty()
+                || !(new File(mixPath).exists())) {
+            mixPath = outFile.getAbsolutePath();
+        }
+        if (!(new File(mixPath).exists())) {
+            throw new Exception("mixdown produced no file");
+        }
+        return mixPath;
+    }
+
+    /** Peaks + duration for a WAV file (call off the UI thread). */
+    private static final class PeaksResult {
+        float[] peaks;
+        double dur;
+    }
+
+    private PeaksResult waveformPeaksBlocking(String path) throws Exception {
+        if (!Python.isStarted()) {
+            Python.start(new AndroidPlatform(this));
+        }
+        PyObject result = Python.getInstance().getModule("audiofx.android_bridge")
+                .callAttr("waveform_peaks", path, 1200);
+        // peaks_json is a Python str; PyObject.toString() gives str().
+        JSONArray arr = new JSONArray(result.callAttr("get", "peaks_json").toString());
+        PeaksResult r = new PeaksResult();
+        r.peaks = new float[arr.length()];
+        for (int i = 0; i < arr.length(); i++) {
+            r.peaks[i] = (float) arr.getDouble(i);
+        }
+        r.dur = Double.parseDouble(
+                result.callAttr("get", "duration_s").toString());
+        return r;
+    }
+
+    /**
+     * Reload one lane's peaks from its render file. The mix file goes
+     * stale (rebuilt on demand). A track with no render clears its lane.
+     */
+    private void refreshLanePeaks(String trackId) {
+        final String entryId = currentEntryId;
+        final TrackLane lane = trackId != null ? laneById.get(trackId) : null;
+        if (entryId == null || lane == null) {
+            return;
+        }
+        File render;
+        try {
+            render = libraryDb.trackRenderFile(trackId);
+        } catch (Exception e) {
+            return;
+        }
+        if (!render.exists() || render.length() <= 44) {
+            lane.wave.setPeaks(new float[0]);
+            lane.wave.setDuration(0);
+            lane.contentDurSec = 0;
+            updateProjectDuration();
+            mixDirty = true;
+            return;
+        }
+        final String path = render.getAbsolutePath();
+        final WaveformView wv = lane.wave;
+        setBusy(true);
+        wv.startProgressAnimation();
+        setStatus("Loading track...");
+        new Thread(() -> {
+            try {
+                final PeaksResult r = waveformPeaksBlocking(path);
+                runOnUiThread(() -> {
+                    wv.setPeaks(r.peaks);
+                    wv.setDuration(r.dur);
+                    lane.contentDurSec = r.dur;
+                    updateProjectDuration();
+                    tvTimeCur.setText("0:00");
+                    setPlayPauseEnabled(true);
+                    mixDirty = true;
+                    releasePlayer();
+                    btnStop.setEnabled(false);
+                    setBusy(false);
+                    wv.finishProgressAnimation();
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setStatus("Waveform failed: " + e.getMessage());
+                    setBusy(false);
+                    wv.clearProgress();
+                });
+            }
+        }).start();
+    }
+
+    /** True if any lane's render file exists (has been rendered/copied). */
+    private boolean anyTrackRenderExists() {
+        for (TrackLane lane : lanes) {
+            try {
+                File render = libraryDb.trackRenderFile(lane.trackId);
+                if (render.exists() && render.length() > 44) {
+                    return true;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Reload every lane's peaks from its render file (entry open, full
+     * re-render). The mix file goes stale (rebuilt on demand).
+     */
+    private void refreshAllLanePeaks() {
+        final String entryId = currentEntryId;
+        if (entryId == null || lanes.isEmpty()) {
+            return;
+        }
+        // MP3 import fast path: peaks were accumulated during the
+        // MediaCodec decode and the render is a bit-identical copy,
+        // so apply them directly with no Python pass. Only once the
+        // render exists (reRenderEntry runs after the first refresh).
+        if (entryId.equals(importPeaksEntryId) && importPeaks != null
+                && anyTrackRenderExists()) {
+            final float[] peaks = importPeaks;
+            final double dur = importPeaksDurationSec;
+            importPeaks = null;
+            importPeaksEntryId = null;
+            boolean anyAudio = false;
+            for (TrackLane lane : lanes) {
+                File render;
+                try {
+                    render = libraryDb.trackRenderFile(lane.trackId);
+                } catch (Exception e) {
+                    continue;
+                }
+                if (render.exists() && render.length() > 44) {
+                    lane.wave.setPeaks(peaks);
+                    lane.wave.setDuration(dur);
+                    lane.contentDurSec = dur;
+                    anyAudio = true;
+                } else {
+                    lane.wave.setPeaks(new float[0]);
+                    lane.wave.setDuration(0);
+                    lane.contentDurSec = 0;
+                }
+            }
+            updateProjectDuration();
+            tvTimeCur.setText("0:00");
+            setPlayPauseEnabled(anyAudio);
+            mixDirty = true;
+            releasePlayer();
+            btnStop.setEnabled(false);
+            setBusy(false);
+            for (TrackLane lane : lanes) {
+                lane.wave.finishProgressAnimation();
+            }
+            return;
+        }
+        setBusy(true);
+        for (TrackLane lane : lanes) {
+            lane.wave.startProgressAnimation();
+        }
+        setStatus("Loading tracks...");
+        new Thread(() -> {
+            try {
+                final Map<String, PeaksResult> got = new HashMap<>();
+                for (TrackLane lane : lanes) {
+                    File render = libraryDb.trackRenderFile(lane.trackId);
+                    if (render.exists() && render.length() > 44) {
+                        got.put(lane.trackId, waveformPeaksBlocking(
+                                render.getAbsolutePath()));
+                    }
+                }
+                runOnUiThread(() -> {
+                    boolean anyAudio = false;
+                    for (TrackLane lane : lanes) {
+                        PeaksResult r = got.get(lane.trackId);
+                        if (r != null) {
+                            lane.wave.setPeaks(r.peaks);
+                            lane.wave.setDuration(r.dur);
+                            lane.contentDurSec = r.dur;
+                            anyAudio = true;
+                        } else {
+                            lane.wave.setPeaks(new float[0]);
+                            lane.wave.setDuration(0);
+                            lane.contentDurSec = 0;
+                        }
+                    }
+                    updateProjectDuration();
+                    tvTimeCur.setText("0:00");
+                    setPlayPauseEnabled(anyAudio);
+                    mixDirty = true;
+                    releasePlayer();
+                    btnStop.setEnabled(false);
+                    setBusy(false);
+                    for (TrackLane lane : lanes) {
+                        lane.wave.finishProgressAnimation();
+                    }
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setStatus("Waveform failed: " + e.getMessage());
+                    setBusy(false);
+                    for (TrackLane lane : lanes) {
+                        lane.wave.clearProgress();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /**
+     * Returns the fresh mix file for the current entry, writing it when
+     * the mix is dirty (call off the UI thread). Null when there is no
+     * entry or no audible audio. Updates currentOutputPath and clears
+     * mixDirty.
+     */
+    private String ensureMixFile() throws Exception {
+        final String entryId = currentEntryId;
+        if (entryId == null) {
+            return null;
+        }
+        File mixFile = libraryDb.mixFile(entryId);
+        if (!mixDirty && mixFile.exists() && mixFile.length() > 44) {
+            currentOutputPath = mixFile.getAbsolutePath();
+            return currentOutputPath;
+        }
+        List<MixTrack> wavs = collectMixWavs();
+        try {
+            String path = mixdownBlocking(entryId, wavs);
+            currentOutputPath = path;
+            mixDirty = false;
+            return path;
+        } catch (Exception e) {
+            if (e.getMessage() != null
+                    && e.getMessage().contains("no audible tracks")) {
+                currentOutputPath = null;
+                mixDirty = true;
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Show the current mix in the waveform. The mix itself is lazy: this
+     * computes only the display peaks in memory (no file is written) and
+     * marks the mix file dirty; ensureMixFile() produces the file on
+     * demand for playback, overdub, and share. With no audible tracks at
+     * all, no Python runs: the view just clears.
+     */
+    /** A track's content changed: re-render that track, refresh its lane. */
+    private void onTrackContentChanged(String trackId) {
+        final String entryId = currentEntryId;
+        if (entryId == null || trackId == null) {
+            return;
+        }
+        // The track's audio changed: any diagnosis of it is stale.
+        cachedDiagJson = null;
+        cachedDiagPath = null;
+        diagLastPath = null;
+        diagTrackId = null;
+        diagSummaryCache.clear();
+        final WaveformView tcWave = laneWave(trackId);
+        setBusy(true);
+        if (tcWave != null) {
+            tcWave.startProgressAnimation();
+        }
+        setStatus("Rendering track...");
+        new Thread(() -> {
+            try {
+                renderTrackBlocking(entryId, trackId);
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setStatus("Render failed: " + e.getMessage());
+                    setBusy(false);
+                    if (tcWave != null) {
+                        tcWave.clearProgress();
+                    }
+                });
+                return;
+            }
+            // Hand the running progress animation to the lane refresh.
+            runOnUiThread(() -> refreshLanePeaks(trackId));
+        }).start();
+    }
+
     // ---- Microphone recording ----
 
+    /** True while a recording session is active, including a paused one. */
+    private boolean isRecordingSession() {
+        return recorder.isRecording() || liveMonitor.isRecording();
+    }
+
     private void onRecordClicked() {
+        if (recorder.isPaused() || liveMonitor.isPaused()) {
+            resumeRecording();
+            return;
+        }
         if (recorder.isRecording() || liveMonitor.isRecording()) {
             stopRecording();
             return;
@@ -2403,16 +3719,103 @@ public class MainActivity extends Activity {
         if (player != null && player.isPlaying()) {
             stopPlayback();
         }
+        // Resolve the take's track now so pause/stop use a stable target.
+        if (currentEntryId == null) {
+            // No project open: create an empty one now so the live lane
+            // exists and the recording indicator has a waveform to draw
+            // in. The take lands on Track 1 at stop via the normal path.
+            try {
+                String entryId = UUID.randomUUID().toString();
+                String name = "Recording " + new SimpleDateFormat(
+                        "yyyy-MM-dd HH-mm", Locale.US).format(new Date());
+                pendingRecName = name + ".wav";
+                libraryDb.createEntryWithId(entryId, name,
+                        System.currentTimeMillis(), 0, 44100, 2, "mic",
+                        "Mic", LibraryDb.DSP_VERSION, "");
+                currentEntryId = entryId;
+                inputFileName = name;
+                // Create Track 1 directly (reserves its take-file path);
+                // ensureTracks would adopt the entry's empty pristine path.
+                libraryDb.createTrack(entryId, "Track 1");
+                ensureTracksForEntry(entryId);
+                refreshLanes();
+                updateProjectName();
+                updateTrackActions();
+                pendingPreCreatedEntry = true;
+                setStatus("Recording — tap the red button to stop.");
+            } catch (Exception e) {
+                currentEntryId = null;
+                setStatus("Could not create project.");
+                return;
+            }
+        }
+        if (currentEntryId != null) {
+            ensureTracksForEntry(currentEntryId);
+            // Punch-in: the selected track is unlocked, holds audio, and
+            // the user set a start marker. The take replaces audio from
+            // the marker; otherwise the normal target rule applies.
+            LibraryDb.Track selected = getSelectedTrack();
+            pendingPunchStartSec = null;
+            LibraryDb.Track target;
+            if (selected != null && !selected.locked
+                    && trackHasAudio(selected) && selStartSec != null) {
+                target = selected;
+                pendingPunchStartSec = selStartSec;
+                setStatus("Punch-in at " + fmtSec(selStartSec)
+                        + " on " + selected.name + " — tap the red button"
+                        + " to stop.");
+            } else {
+                target = resolveRecordTarget();
+            }
+            if (target == null) {
+                pendingPunchStartSec = null;
+                setStatus("Could not start recording.");
+                return;
+            }
+            pendingRecordTrackId = target.id;
+            // The target may be freshly auto-created: make sure its lane
+            // exists before capture, or the live peaks have nowhere to go.
+            refreshLanes();
+        }
+        // The monitor mix must be fresh before capture starts; build it
+        // off the UI thread, then start capture and overdub together.
+        setBusy(true);
+        setStatus("Preparing...");
+        new Thread(() -> {
+            File monitor = null;
+            if (currentEntryId != null) {
+                try {
+                    String p = ensureMixFile();
+                    if (p != null) {
+                        monitor = new File(p);
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            final File monitorFinal = monitor;
+            runOnUiThread(() -> {
+                setBusy(false);
+                beginCapture(monitorFinal);
+            });
+        }).start();
+    }
+
+    /** Start the mic capture (UI thread); the monitor mix is already fresh. */
+    private void beginCapture(File monitorMixFile) {
         if (switchLiveFx.isChecked()) {
-            startLiveRecording();
+            startLiveRecording(monitorMixFile);
             return;
         }
         recorder.setPreprocessing(switchAgc.isChecked(), switchNs.isChecked());
         File take = new File(getCacheDir(), "rec_take.wav");
         if (!recorder.start(take)) {
+            pendingRecordTrackId = null;
+            pendingPunchStartSec = null;
             setStatus("Microphone unavailable on this device.");
             return;
         }
+        recordingLive = false;
+        startOverdub(monitorMixFile);
         pendingRecName = "Recording "
                 + new SimpleDateFormat("yyyy-MM-dd HH-mm", Locale.US).format(new Date())
                 + ".wav";
@@ -2437,7 +3840,7 @@ public class MainActivity extends Activity {
      * snapshotted into a Python LiveChain, the mic feeds it in blocks,
      * the wet signal plays back live and is baked into the take.
      */
-    private void startLiveRecording() {
+    private void startLiveRecording(File monitorMixFile) {
         try {
             if (!Python.isStarted()) {
                 Python.start(new AndroidPlatform(this));
@@ -2451,9 +3854,12 @@ public class MainActivity extends Activity {
         File take = new File(getCacheDir(), "rec_take.wav");
         if (!liveMonitor.start(take, warmth, reverbPreset, echo,
                 switchAgc.isChecked(), switchNs.isChecked())) {
+            pendingRecordTrackId = null;
             setStatus("Live FX unavailable on this device.");
             return;
         }
+        recordingLive = true;
+        startOverdub(monitorMixFile);
         pendingRecName = "Recording "
                 + new SimpleDateFormat("yyyy-MM-dd HH-mm", Locale.US).format(new Date())
                 + ".wav";
@@ -2471,16 +3877,95 @@ public class MainActivity extends Activity {
                 + ") — use headphones. Tap the red button to stop.");
     }
 
-    /** Shared recording UI: pulsing red button, REC pill, elapsed timer. */
-    private void enterRecordingUi(boolean live) {
+    /**
+     * Start overdub playback of the existing mix while a take is
+     * recorded. The mix file is ensured fresh by the caller before
+     * capture starts. A missing file just means the take is recorded
+     * without playback, exactly as before this feature.
+     */
+    private void startOverdub(File monitorMixFile) {
+        this.monitorMixFile = monitorMixFile;
+        if (monitorMixFile != null && monitorMixFile.exists()
+                && monitorMixFile.length() > 44) {
+            try {
+                overdubPlayer.start(monitorMixFile, 0);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /** Pause capture and overdub playback; the record-head UI freezes. */
+    private void pauseRecording() {
+        if (!isRecordingSession()) {
+            return;
+        }
+        if (recordingLive) {
+            liveMonitor.pause();
+        } else {
+            recorder.pause();
+        }
+        overdubPlayer.pause();
+        // Freeze the record-head UI distinctly: steady pause icon, no pulse.
+        if (recPulse != null) {
+            recPulse.cancel();
+            recPulse = null;
+        }
+        btnRecord.setAlpha(1f);
+        btnRecord.setImageResource(R.drawable.ic_pause);
+        // The pause button stays disabled until the session resumes.
+        btnStop.setEnabled(false);
+        setStatus("Recording paused. Tap the record button to resume.");
+    }
+
+    /** Resume a paused capture session, picking overdub playback back up. */
+    private void resumeRecording() {
+        if (!(recorder.isPaused() || liveMonitor.isPaused())) {
+            return;
+        }
+        long offset = recordingLive
+                ? liveMonitor.dataFrames() : recorder.dataFrames();
+        boolean ok = recordingLive
+                ? liveMonitor.resume() : recorder.resume();
+        if (!ok) {
+            setStatus("Could not resume recording.");
+            return;
+        }
         btnRecord.setImageResource(R.drawable.ic_stop_white);
+        startRecPulse();
+        btnStop.setEnabled(true);
+        setStatus(recordingLive
+                ? "Recording resumed (live FX). Tap the red button to stop."
+                : "Recording resumed. Tap the red button to stop.");
+        if (monitorMixFile != null && monitorMixFile.exists()) {
+            try {
+                // An offset past EOF starts nothing: the take continues
+                // without playback, which is the correct fallback.
+                overdubPlayer.start(monitorMixFile, offset);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /** The pulsing record-button animation used while a take is running. */
+    private void startRecPulse() {
+        if (recPulse != null) {
+            recPulse.cancel();
+        }
         recPulse = ObjectAnimator.ofFloat(btnRecord, "alpha", 1f, 0.35f);
         recPulse.setDuration(600);
         recPulse.setRepeatMode(ValueAnimator.REVERSE);
         recPulse.setRepeatCount(ValueAnimator.INFINITE);
         recPulse.start();
+    }
+
+    /** Shared recording UI: pulsing red button, REC pill, elapsed timer. */
+    private void enterRecordingUi(boolean live) {
+        btnRecord.setImageResource(R.drawable.ic_stop_white);
+        startRecPulse();
         setPlayPauseEnabled(false);
-        btnStop.setEnabled(false);
+        // During a recording session btnStop is the pause button.
+        btnStop.setImageResource(R.drawable.ic_pause);
+        btnStop.setEnabled(true);
         btnProcess.setEnabled(false);
         btnProcess.setAlpha(0.55f);
         btnTrim.setEnabled(false);
@@ -2491,7 +3976,10 @@ public class MainActivity extends Activity {
         livePeakAcc = 0f;
         recorder.setBlockListener(this::onCaptureBlock);
         liveMonitor.setBlockListener(this::onCaptureBlock);
-        waveformView.startLive();
+        TrackLane recLane = laneById.get(pendingRecordTrackId);
+        if (recLane != null) {
+            recLane.wave.startLive();
+        }
         if (live) {
             // Effect params are snapshotted at record start; moving
             // sliders mid-take would do nothing, so lock them.
@@ -2515,13 +4003,18 @@ public class MainActivity extends Activity {
         }
         btnRecord.setAlpha(1f);
         btnRecord.setImageResource(0);
+        // Restore btnStop's normal role: stop playback, look, and state.
+        btnStop.setImageResource(R.drawable.ic_stop);
+        btnStop.setEnabled(false);
         btnProcess.setEnabled(true);
         btnProcess.setAlpha(1f);
         btnTrim.setEnabled(true);
         btnJoin.setEnabled(true);
         btnNormalize.setEnabled(true);
         btnNormalize.setAlpha(1f);
-        waveformView.endLive();
+        for (TrackLane lane : lanes) {
+            lane.wave.endLive();
+        }
         recorder.setBlockListener(null);
         liveMonitor.setBlockListener(null);
         seekWarmth.setEnabled(true);
@@ -2533,6 +4026,8 @@ public class MainActivity extends Activity {
     }
 
     private void stopRecording() {
+        // Overdub playback always stops with the take, even from a pause.
+        overdubPlayer.stop();
         final boolean wasLive = liveMonitor.isRecording();
         // Snapshot UI state before stop() resets the session labels.
         final String captureLabel = wasLive
@@ -2549,28 +4044,101 @@ public class MainActivity extends Activity {
         }
         exitRecordingUi();
         if (take == null) {
-            setStatus("Recording failed — nothing captured.");
+            // Zero audio captured: not a failure, keep the (empty) track.
+            refreshLanes();
+            if (pendingRecordTrackId != null) {
+                selectTrack(pendingRecordTrackId);
+            }
+            setStatus("No audio captured.");
+            pendingRecordTrackId = null;
+            pendingPunchStartSec = null;
+            monitorMixFile = null;
             return;
         }
-        // Durable home for the take: filesDir/library/takes/<uuid>.wav.
-        // The pristine stays raw; auto-normalize becomes op #1 below.
-        final String entryId = UUID.randomUUID().toString();
-        final File dest = libraryDb.takeFile(entryId);
+        // Multitrack: the take lands in a track's take file, never as a
+        // fresh entry per take. The target rule only ever picks empty,
+        // unlocked tracks, so recording never overwrites.
+        final boolean newProject = currentEntryId == null;
+        final String entryId;
+        final String trackId;
         try {
-            copyFile(take, dest);
-            take.delete();
-            double[] info = wavInfo(dest);
-            String name = pendingRecName;
-            if (name.toLowerCase(Locale.US).endsWith(".wav")) {
-                name = name.substring(0, name.length() - 4);
+            if (newProject) {
+                // No project open: create one first (the existing
+                // new-entry flow), then its tracks. The take becomes
+                // Track 1's audio, so no target resolution is needed.
+                entryId = createProjectForTake(take, wasLive, captureLabel);
+                ensureTracksForEntry(entryId);
+                if (mTracks.isEmpty()) {
+                    throw new Exception("new project has no tracks");
+                }
+                trackId = mTracks.get(0).id;
+            } else {
+                entryId = currentEntryId;
+                ensureTracksForEntry(entryId);
+                // Use the track picked at record start; resolve again
+                // only if it somehow vanished mid-session.
+                LibraryDb.Track target =
+                        getTrackById(pendingRecordTrackId);
+                if (target == null) {
+                    target = resolveRecordTarget();
+                }
+                if (target == null) {
+                    throw new Exception("no empty track available");
+                }
+                trackId = target.id;
+                if (pendingPunchStartSec != null) {
+                    // Punch-in: the take becomes a durable file referenced
+                    // by the op; the op splices it into the track at the
+                    // marker. Undoable like any other op.
+                    String punchUuid = UUID.randomUUID().toString();
+                    File punchTake = libraryDb.punchTakeFile(punchUuid);
+                    try {
+                        copyFile(take, punchTake);
+                        take.delete();
+                    } catch (Exception e) {
+                        punchTake.delete();
+                        throw e;
+                    }
+                    double[] info = wavInfo(new File(target.wavPath));
+                    long startFrame =
+                            (long) (pendingPunchStartSec * info[0]);
+                    String params = "{\"take_path\":"
+                            + JSONObject.quote(
+                                    punchTake.getAbsolutePath())
+                            + ",\"start_frame\":" + startFrame + "}";
+                    libraryDb.addOp(entryId, trackId, "punch_in", params,
+                            "Punch-in at " + fmtSec(pendingPunchStartSec));
+                    // The marker served its purpose; clear the selection.
+                    selStartSec = null;
+                    selEndSec = null;
+                    setSelChip(null, null);
+                    pendingPunchStartSec = null;
+                } else {
+                    final File dest = libraryDb.trackTakeFile(trackId);
+                    try {
+                        copyFile(take, dest);
+                        take.delete();
+                    } catch (Exception e) {
+                        dest.delete(); // keep the empty slot empty
+                        throw e;
+                    }
+                    // Pre-created entry (record from app open): finalize
+                    // its audio metadata now that the take has landed.
+                    if (pendingPreCreatedEntry) {
+                        try {
+                            double[] info = wavInfo(dest);
+                            libraryDb.updateEntryAudio(entryId, info[2],
+                                    (int) info[0], (int) info[1],
+                                    dest.getAbsolutePath());
+                        } catch (Exception ignored) {
+                        }
+                        pendingPreCreatedEntry = false;
+                    }
+                }
             }
-            libraryDb.createEntryWithId(entryId, name, System.currentTimeMillis(),
-                    info[2], (int) info[0], (int) info[1],
-                    wasLive ? "mic-livefx" : "mic", captureLabel,
-                    LibraryDb.DSP_VERSION, dest.getAbsolutePath());
             if (wasLive) {
-                // Display-only first op: the wet take IS the pristine.
-                libraryDb.addOp(entryId, "livefx",
+                // Display-only first op: the wet take IS the track audio.
+                libraryDb.addOp(entryId, trackId, "livefx",
                         "{\"warmth\":" + (liveWarmthPct / 100.0)
                                 + ",\"reverb_preset\":\"" + livePreset + "\""
                                 + ",\"echo\":" + (liveEchoPct / 100.0) + "}",
@@ -2578,18 +4146,34 @@ public class MainActivity extends Activity {
                                 + reverbDisplayName(livePreset)
                                 + ", Echo " + liveEchoPct + "%");
             }
+            if (switchAutoNorm.isChecked()) {
+                // Track-scoped op; rendered with the track below.
+                libraryDb.addOp(entryId, trackId, "normalize",
+                        normalizeParamsJson(), "Normalize to -1 dBFS");
+            }
         } catch (Exception e) {
-            dest.delete(); // don't orphan a take file with no DB row
             setStatus("Could not save recording: " + e.getMessage());
+            pendingRecordTrackId = null;
+            pendingPunchStartSec = null;
+            pendingPreCreatedEntry = false;
+            monitorMixFile = null;
             return;
         }
-        // Adopt without an initial load when auto-normalize follows: the
-        // normalize op's own render completion loads the waveform, which
-        // avoids a pristine-load racing the normalized render.
-        adoptLibraryEntry(entryId, !switchAutoNorm.isChecked());
-        if (switchAutoNorm.isChecked()) {
-            normalizeAudio();
+        // Select the recorded track, show it, render it, refresh the mix.
+        selectedTrackId = trackId;
+        if (newProject) {
+            // Adopt without an initial load: onTrackContentChanged renders
+            // the track and loads the mix waveform, which avoids a
+            // pristine-load racing it.
+            adoptLibraryEntry(entryId, false);
         }
+        refreshLanes();
+        onTrackContentChanged(trackId);
+        setStatus(switchAutoNorm.isChecked()
+                ? "Take saved and normalized."
+                : "Take saved.");
+        pendingRecordTrackId = null;
+        monitorMixFile = null;
     }
 
     /** Library path for Apply: append an fx op, re-render cumulatively. */
@@ -2606,14 +4190,14 @@ public class MainActivity extends Activity {
         applyLibraryOp("fx", fxParamsJson(warmth, preset, echo, selStartSec, selEndSec),
                 label, "Processing...",
                 "Done — " + label + " (cumulative).",
-                () -> loadWaveformForPath(currentOutputPath));
+                null);
     }
 
     /** Library path for Normalize: append the op, re-render. */
     private void applyNormalizeOp() {
         applyLibraryOp("normalize", normalizeParamsJson(), "Normalize to -1 dBFS",
                 "Normalizing...", "Normalized to -1 dBFS.",
-                () -> loadWaveformForPath(currentOutputPath));
+                null);
     }
 
     /** Library path for Trim/Join: append the op, re-render. */
@@ -2634,11 +4218,10 @@ public class MainActivity extends Activity {
                     if (op.equals("trim")) {
                         // Duration unchanged: zero the affected peak buckets
                         // locally; the selection stays exactly as it was.
-                        // (audioDurationSec is already the rendered duration.)
                         zeroPeakRange(s, e != null ? e : audioDurationSec);
-                    } else {
-                        loadWaveformForPath(currentOutputPath);
                     }
+                    // Join changes duration: the end-of-op lane refresh
+                    // covers the display.
                 });
     }
 
@@ -2827,7 +4410,9 @@ public class MainActivity extends Activity {
         Double e = selEndSec;
         // The joined region disappears; drop the selection first so the
         // later waveform reload has nothing stale to clear.
-        waveformView.clearSelection();
+        if (waveformView != null) {
+            waveformView.clearSelection();
+        }
         editSelection("join", s, e);
     }
 
@@ -2897,9 +4482,9 @@ public class MainActivity extends Activity {
                         // Duration unchanged: zero the affected peak buckets
                         // locally; the selection stays exactly as it was.
                         zeroPeakRange(startSec, endSec != null ? endSec : dur);
-                    } else {
-                        loadWaveformForPath(outPath);
                     }
+                    // Join: legacy picked-file path (unreachable now that
+                    // picks become library entries); lanes cover display.
                     setStatus(msg);
                     setPlayPauseEnabled(true);
                     updateUndoBadge();
@@ -2919,19 +4504,26 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    /** Zero the displayed peak buckets overlapping the startSec/endSec window. */
+    /** Zero the displayed peak buckets overlapping the startSec/endSec window.
+     * The lane's peaks cover its own content (tracks start at 0, so
+     * project seconds are track seconds). */
     private void zeroPeakRange(double startSec, double endSec) {
-        float[] peaks = waveformView.getPeaks();
-        int n = peaks.length;
-        if (n == 0 || audioDurationSec <= 0) {
+        TrackLane lane = selectedLane();
+        if (lane == null) {
             return;
         }
-        int from = Math.max(0, (int) (startSec / audioDurationSec * n));
-        int to = Math.min(n, (int) Math.ceil(endSec / audioDurationSec * n));
+        float[] peaks = lane.wave.getPeaks();
+        int n = peaks.length;
+        double dur = lane.contentDurSec;
+        if (n == 0 || dur <= 0) {
+            return;
+        }
+        int from = Math.max(0, (int) (startSec / dur * n));
+        int to = Math.min(n, (int) Math.ceil(endSec / dur * n));
         for (int i = from; i < to; i++) {
             peaks[i] = 0f;
         }
-        waveformView.updatePeaks(peaks);
+        lane.wave.updatePeaks(peaks);
     }
 
     /** Enable/disable the buttons that must not run during an edit. */
@@ -2970,20 +4562,18 @@ public class MainActivity extends Activity {
         if (currentOutputPath == null || !(new File(currentOutputPath).exists())) {
             setPlayPauseEnabled(inputPath != null && new File(inputPath).exists());
         }
-        // Structural edits (trim/join) change the audio itself: reload the
-        // waveform so peaks and duration match the restored file.
-        String refreshPath = (currentOutputPath != null
-                && new File(currentOutputPath).exists()) ? currentOutputPath : inputPath;
-        if (refreshPath != null) {
-            loadWaveformForPath(refreshPath);
-        }
+        // Structural edits (trim/join) change the audio itself. Legacy
+        // picked-file path (unreachable now that picks become library
+        // entries); lanes cover the display.
         updateUndoBadge();
     }
 
     private void releasePlayer() {
         cancelScheduledStop();
         stopPositionUpdates();
-        waveformView.clearPlayback();
+        for (TrackLane lane : lanes) {
+            lane.wave.clearPlayback();
+        }
         if (player != null) {
             try {
                 player.stop();
@@ -3065,8 +4655,10 @@ public class MainActivity extends Activity {
                 e = Math.min(1f, se);
             }
         }
-        waveformView.setPlaybackRange(s, e);
-        waveformView.setPlaybackPosition(positionMs / 1000f / dur);
+        for (TrackLane lane : lanes) {
+            lane.wave.setPlaybackRange(s, e);
+            lane.wave.setPlaybackPosition(positionMs / 1000f / dur);
+        }
     }
 
     private void cancelScheduledStop() {
@@ -3141,6 +4733,27 @@ public class MainActivity extends Activity {
     }
 
     private void playOutputAt(float fraction) {
+        // The waveform shows a lazily-computed mix; make the mix file
+        // fresh before auditioning it.
+        if (currentEntryId != null && mixDirty) {
+            setBusy(true);
+            setStatus("Preparing mix...");
+            new Thread(() -> {
+                try {
+                    ensureMixFile();
+                    runOnUiThread(() -> {
+                        setBusy(false);
+                        playOutputAt(fraction);
+                    });
+                } catch (Exception e) {
+                    runOnUiThread(() -> {
+                        setBusy(false);
+                        setStatus("Play failed: " + e.getMessage());
+                    });
+                }
+            }).start();
+            return;
+        }
         // Audition the processed output when there is one, otherwise the
         // raw input — so a selection can be heard before any Apply.
         final String playPath = currentOutputPath != null ? currentOutputPath : inputPath;
@@ -3207,7 +4820,9 @@ public class MainActivity extends Activity {
             player.setOnCompletionListener(mp -> {
                 isPaused = false;
                 stopPositionUpdates();
-                waveformView.clearPlayback();
+                for (TrackLane lane : lanes) {
+                    lane.wave.clearPlayback();
+                }
                 setStatus("Playback finished.");
                 setPlayPauseEnabled(true);
                 refreshPlayPause();
@@ -3252,7 +4867,180 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "Pick an audio file or record first", Toast.LENGTH_SHORT).show();
             return;
         }
+        if (currentEntryId != null) {
+            // Multitrack project: one WAV per track.
+            showSaveTracksDialog();
+            return;
+        }
         showSaveDialog();
+    }
+
+    /**
+     * Save dialog for multitrack projects: each track with audio is
+     * saved as a separate WAV named after the track, inside the chosen
+     * folder. The MP3 flow's per-file name field does not apply here;
+     * name collisions are kept as numbered copies.
+     */
+    private void showSaveTracksDialog() {
+        if (saveDialog != null && saveDialog.isShowing()) {
+            return;
+        }
+        final float density = getResources().getDisplayMetrics().density;
+        int pad = (int) (20 * density);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(pad, (int) (8 * density), pad, (int) (8 * density));
+
+        int audible = 0;
+        StringBuilder names = new StringBuilder();
+        for (LibraryDb.Track t : mTracks) {
+            if (trackHasAudio(t)) {
+                if (audible > 0) {
+                    names.append(", ");
+                }
+                names.append(sanitizeWavName(t.name));
+                audible++;
+            }
+        }
+        TextView info = new TextView(this);
+        info.setText(audible == 0
+                ? "No recorded audio to save yet."
+                : "Saves " + audible
+                        + (audible == 1 ? " track as WAV: " : " tracks as WAV: ")
+                        + names);
+        info.setTextColor(getColor(R.color.sl_txt));
+        info.setTextSize(14);
+        LinearLayout.LayoutParams infoLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        infoLp.bottomMargin = (int) (16 * density);
+        root.addView(info, infoLp);
+
+        TextView folderLabel = new TextView(this);
+        folderLabel.setText("Save folder");
+        folderLabel.setTextColor(getColor(R.color.sl_mut));
+        folderLabel.setTextSize(12);
+        root.addView(folderLabel);
+
+        LinearLayout folderRow = new LinearLayout(this);
+        folderRow.setOrientation(LinearLayout.HORIZONTAL);
+        folderRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        saveFolderLabel = new TextView(this);
+        saveFolderLabel.setText(saveFolderName());
+        saveFolderLabel.setTextColor(getColor(R.color.sl_txt));
+        saveFolderLabel.setTextSize(14);
+        LinearLayout.LayoutParams folderLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        folderRow.addView(saveFolderLabel, folderLp);
+        Button chooseBtn = new Button(this);
+        chooseBtn.setText("Choose…");
+        chooseBtn.setTextColor(getColor(R.color.sl_teal2));
+        chooseBtn.setBackgroundResource(R.drawable.bg_ghost);
+        chooseBtn.setOnClickListener(v -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            startActivityForResult(intent, PICK_FOLDER);
+        });
+        folderRow.addView(chooseBtn);
+        root.addView(folderRow);
+
+        saveDialog = new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+                .setTitle("Save tracks as WAV")
+                .setView(root)
+                .setPositiveButton("Save", null)
+                .setNegativeButton("Cancel", null)
+                .setOnDismissListener(d -> saveDialog = null)
+                .show();
+        // The dialog theme inherits light Material buttons; re-tint them.
+        saveDialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setTextColor(getColor(R.color.sl_teal2));
+        saveDialog.getButton(AlertDialog.BUTTON_NEGATIVE)
+                .setTextColor(getColor(R.color.sl_mut));
+        // Manual click handling: the Save tap needs a folder first.
+        saveDialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    if (saveFolderUri == null) {
+                        Toast.makeText(this, "Choose a save folder first",
+                                Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    saveDialog.dismiss();
+                    doSaveTracksWav();
+                });
+    }
+
+    /**
+     * Save every audible track as its own WAV in the chosen folder,
+     * re-rendering each first so the file matches the current chain.
+     * Empty tracks are skipped; collisions are kept as numbered copies.
+     * Each saved file is logged as an export on the entry.
+     */
+    private void doSaveTracksWav() {
+        final String entryId = currentEntryId;
+        if (entryId == null || saveFolderUri == null) {
+            return;
+        }
+        final List<LibraryDb.Track> audible = new ArrayList<>();
+        for (LibraryDb.Track t : mTracks) {
+            if (trackHasAudio(t)) {
+                audible.add(t);
+            }
+        }
+        if (audible.isEmpty()) {
+            Toast.makeText(this, "No recorded audio to save",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        setBusy(true);
+        setStatus("Saving tracks...");
+        lanesProgressStart();
+        new Thread(() -> {
+            final List<String> saved = new ArrayList<>();
+            String error = null;
+            for (LibraryDb.Track t : audible) {
+                try {
+                    renderTrackBlocking(entryId, t.id);
+                    File render = libraryDb.trackRenderFile(t.id);
+                    String savedAs = copyToSaveFolder(render,
+                            sanitizeWavName(t.name), false, "audio/wav");
+                    saved.add(savedAs);
+                    try {
+                        libraryDb.logExport(entryId, savedAs, saveFolderName(),
+                                undoDepth(t.id));
+                    } catch (Exception logEx) {
+                        Log.w("AudioMechanic", "logExport failed", logEx);
+                    }
+                } catch (Exception e) {
+                    error = e.getMessage();
+                    break;
+                }
+            }
+            final int n = saved.size();
+            final String err = error;
+            runOnUiThread(() -> {
+                setBusy(false);
+                lanesProgressClear();
+                if (err != null) {
+                    setStatus("Save failed: " + err
+                            + (n > 0 ? " (" + n + " saved before the error)"
+                                    : ""));
+                } else {
+                    setStatus("Saved " + n
+                            + (n == 1 ? " track." : " tracks."));
+                }
+            });
+        }).start();
+    }
+
+    private static String sanitizeWavName(String raw) {
+        String name = raw.trim().replaceAll("[/\\\\]", "_");
+        if (name.isEmpty()) {
+            name = "track";
+        }
+        if (!name.toLowerCase(Locale.US).endsWith(".wav")) {
+            name += ".wav";
+        }
+        return name;
     }
 
     /**
@@ -3433,7 +5221,7 @@ public class MainActivity extends Activity {
                     if (currentEntryId != null) {
                         try {
                             libraryDb.logExport(currentEntryId, savedAs,
-                                    saveFolderName(), undoDepth());
+                                    saveFolderName(), undoDepth(selectedTrackId));
                         } catch (Exception e) {
                             Log.w("AudioMechanic", "logExport failed", e);
                         }
@@ -3618,9 +5406,16 @@ public class MainActivity extends Activity {
     /**
      * Share entry point: encoding starts in the background and the
      * split-screen wait dialog covers it (progress on top, ads below).
+     * Multitrack projects share the mix: every audible track is
+     * re-rendered and mixed fresh, then the existing 96 kbps MP3 encode
+     * + FileProvider chooser runs on the mix file.
      */
     private void shareAudio() {
         if (shareInProgress) {
+            return;
+        }
+        if (currentEntryId != null) {
+            shareMixFresh();
             return;
         }
         final String srcPath = (currentOutputPath != null
@@ -3635,6 +5430,60 @@ public class MainActivity extends Activity {
         shareEncodeError = null;
         showEncodeWaitScreen("Preparing share file...", !isPremium());
         new Thread(() -> encodeShareFile(srcPath)).start();
+    }
+
+    /**
+     * Share for multitrack projects: re-render every audible track and
+     * rebuild the mix, then run the existing share pipeline on the
+     * fresh mix file.
+     */
+    private void shareMixFresh() {
+        final String entryId = currentEntryId;
+        if (entryId == null) {
+            return;
+        }
+        shareInProgress = true;
+        setBusy(true);
+        setStatus("Preparing mix...");
+        lanesProgressStart();
+        new Thread(() -> {
+            try {
+                for (LibraryDb.Track t : mTracks) {
+                    if (trackHasAudio(t)) {
+                        renderTrackBlocking(entryId, t.id);
+                    }
+                }
+                List<MixTrack> wavs = collectMixWavs();
+                if (wavs.isEmpty()) {
+                    throw new Exception("Nothing to share yet.");
+                }
+                final String mixPath = mixdownBlocking(entryId, wavs);
+                runOnUiThread(() -> {
+                    currentOutputPath = mixPath;
+                    releasePlayer();
+                    btnStop.setEnabled(false);
+                    setBusy(false);
+                    lanesProgressFinish();
+                    // Now the existing share pipeline on the fresh mix.
+                    shareEncodeDone = false;
+                    shareMp3Result = null;
+                    shareEncodeError = null;
+                    showEncodeWaitScreen("Preparing share file...",
+                            !isPremium());
+                    new Thread(() -> encodeShareFile(mixPath)).start();
+                });
+            } catch (Exception e) {
+                final boolean allMuted = e.getMessage() != null
+                        && e.getMessage().contains("no audible tracks");
+                runOnUiThread(() -> {
+                    shareInProgress = false;
+                    setStatus(allMuted ? "All tracks muted."
+                            : "Share failed: " + e.getMessage());
+                    setBusy(false);
+                    lanesProgressClear();
+                });
+            }
+        }).start();
     }
 
     /** Background MP3 encode for the share flow. */
@@ -3706,6 +5555,11 @@ public class MainActivity extends Activity {
 
     private String copyToSaveFolder(File src, String baseName, boolean overwrite)
             throws Exception {
+        return copyToSaveFolder(src, baseName, overwrite, "audio/mpeg");
+    }
+
+    private String copyToSaveFolder(File src, String baseName, boolean overwrite,
+            String mimeType) throws Exception {
         DocumentFile dir = DocumentFile.fromTreeUri(this, saveFolderUri);
         if (dir == null || !dir.canWrite()) {
             throw new Exception("Save folder is not writable");
@@ -3725,7 +5579,7 @@ public class MainActivity extends Activity {
                 name = stem + " (" + (copy++) + ")" + ext;
             }
         }
-        DocumentFile dest = dir.createFile("audio/mpeg", name);
+        DocumentFile dest = dir.createFile(mimeType, name);
         if (dest == null) {
             throw new Exception("Could not create file in save folder");
         }
@@ -3746,6 +5600,9 @@ public class MainActivity extends Activity {
             premiumBilling.destroy();
         }
         super.onDestroy();
+        // A paused session still counts as recording: capture and
+        // overdub playback both stop here.
+        overdubPlayer.stop();
         if (recorder.isRecording()) {
             recorder.stop();
         }

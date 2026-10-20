@@ -83,7 +83,7 @@ public class LibraryActivity extends Activity {
             List<RowData> rows = new ArrayList<>();
             List<LibraryDb.LibraryEntry> entries = libraryDb.listEntries();
             for (LibraryDb.LibraryEntry e : entries) {
-                List<LibraryDb.Op> ops = libraryDb.listOps(e.id);
+                List<LibraryDb.Op> ops = listOpsAcrossTracks(e.id);
                 boolean hasExports = !libraryDb.listExports(e.id).isEmpty();
                 rows.add(new RowData(e, ops, hasExports));
             }
@@ -93,6 +93,24 @@ public class LibraryActivity extends Activity {
                 updateHeader(rows.size(), totalBytes);
             });
         }).start();
+    }
+
+    /**
+     * Effect chips for a row: ops across all of the entry's tracks, in
+     * track order. Read-only and cheap: this never creates tracks, so a
+     * legacy entry that has not been opened in the editor yet shows "No
+     * effects yet" until its Track 1 is adopted there (ensureTracks runs
+     * on open in MainActivity and re-points the old ops at it).
+     */
+    private List<LibraryDb.Op> listOpsAcrossTracks(String entryId) {
+        List<LibraryDb.Op> ops = new ArrayList<>();
+        try {
+            for (LibraryDb.Track t : libraryDb.listTracks(entryId)) {
+                ops.addAll(libraryDb.listOps(entryId, t.id));
+            }
+        } catch (Exception ignored) {
+        }
+        return ops;
     }
 
     private void updateHeader(int count, long totalBytes) {

@@ -29,6 +29,12 @@ import android.view.animation.DecelerateInterpolator;
  *
  * A translucent left-to-right gradient fill can overlay the bars to
  * indicate background progress (e.g. while Apply effects is running).
+ *
+ * <p>For multitrack lanes, {@link #setProjectDuration(double)} puts the
+ * view on a shared project timeline: the lane's own audio is drawn
+ * scaled into [0, duration/project] of the width, and touch, trim
+ * selection, and the playback cursor all work in project-time
+ * fractions so lanes align.
  */
 public class WaveformView extends View {
 
@@ -37,9 +43,15 @@ public class WaveformView extends View {
         void onSelectionChanged(Float startFraction, Float endFraction);
     }
 
+    /** Fired on a confirmed single tap, before any selection marker logic. */
+    public interface OnTapListener {
+        void onTap(float fraction);
+    }
+
     private static final int BAR_COLOR = 0xFF4DB6AC;
     private static final int PLACEHOLDER_COLOR = 0xFFB0BEC5;
     private static final int LIVE_HEAD_COLOR = 0xFFE53935; // record-head line
+    private static final int LIVE_WAVE_COLOR = 0xFFFFFFFF; // live sine wave
     private static final int LIVE_MAX_BUCKETS = 600; // 2 min at 5 buckets/s
     private static final int GRADIENT_START = 0x3326A69A; // translucent teal
     private static final int GRADIENT_END = 0xCC26A69A;   // more opaque teal
@@ -71,6 +83,17 @@ public class WaveformView extends View {
     private Float selStartFrac;
     private Float selEndFrac;
     private OnSelectionListener selectionListener;
+    private OnTapListener tapListener;
+
+    /**
+     * Shared project timeline in seconds. When positive, the lane's own
+     * audio (durationSec) is drawn scaled into
+     * [0, durationSec/projectDurationSec] of the width, so lanes of
+     * different lengths align; touch, selection, and the playback
+     * cursor all work in project-time fractions. Zero (default) keeps
+     * the legacy behavior: the content fills the full width.
+     */
+    private double projectDurationSec;
 
     // Playback progress: a track spanning [pbStartFrac, pbEndFrac] that
     // fills up to pbPositionFrac. Null start hides the indicator.
@@ -100,7 +123,12 @@ public class WaveformView extends View {
     private final Paint pbFillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pbHeadPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint liveHeadPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint liveWavePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF pbRect = new RectF();
+
+    public WaveformView(Context context) {
+        this(context, null);
+    }
 
     public WaveformView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -122,6 +150,9 @@ public class WaveformView extends View {
         pbHeadPaint.setStrokeWidth(3f);
         liveHeadPaint.setColor(LIVE_HEAD_COLOR);
         liveHeadPaint.setStrokeWidth(3f);
+        liveWavePaint.setColor(LIVE_WAVE_COLOR);
+        liveWavePaint.setStyle(Paint.Style.STROKE);
+        liveWavePaint.setStrokeWidth(2.5f);
         touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
         scaleDetector = new ScaleGestureDetector(context, new ScaleListener());
         gestureDetector = new GestureDetector(context, new GestureListener());
@@ -203,6 +234,44 @@ public class WaveformView extends View {
         return liveMode;
     }
 
+    /** Live recording indicator: a sine wave from 0 to the current take
+     * time t, amplitude-modulated by the captured envelope, with a red
+     * vertical marker and time label at t (the right edge; the take fills
+     * the lane in live mode). */
+    private void drawLiveWave(android.graphics.Canvas canvas, float w,
+            float barH, float midY) {
+        float maxAmp = midY * 0.95f;
+        int n = liveArr.length;
+        android.graphics.Path path = new android.graphics.Path();
+        float cycles = 12f; // low visual frequency; envelope carries time
+        int step = Math.max(2, (int) (w / 300));
+        for (int px = 0; px <= (int) w; px += step) {
+            float frac = px / w;
+            int idx = n > 0 ? Math.min(n - 1, (int) (frac * n)) : 0;
+            // Boost the mic envelope so the wave is clearly visible;
+            // clamp at 1. Idle ripple when no peaks yet.
+            float env = n > 0
+                    ? Math.min(1f, liveArr[idx] * 3f)
+                    : 0.15f;
+            float y = midY + (float) Math.sin(frac * cycles * 2 * Math.PI)
+                    * env * maxAmp;
+            if (px == 0) {
+                path.moveTo(px, y);
+            } else {
+                path.lineTo(px, y);
+            }
+        }
+        canvas.drawPath(path, liveWavePaint);
+        // Vertical marker at t.
+        float mx = w - 2f;
+        canvas.drawLine(mx, 0, mx, barH, liveHeadPaint);
+        String label = formatSeconds(durationSec);
+        float density = getResources().getDisplayMetrics().density;
+        float tw = textPaint.measureText(label);
+        canvas.drawText(label, Math.max(0, mx - tw - 6 * density),
+                14 * density, textPaint);
+    }
+
     /**
      * Show the playback range as a horizontal bar. Fractions are 0..1
      * across the whole audio; pass a null start to hide the indicator.
@@ -238,6 +307,30 @@ public class WaveformView extends View {
         invalidate();
     }
 
+    /** Shared project timeline in seconds; 0 restores legacy full-width. */
+    public void setProjectDuration(double seconds) {
+        this.projectDurationSec = Math.max(0, seconds);
+        invalidate();
+    }
+
+    /** Fraction of the project width this lane's content occupies. */
+    private float contentFrac() {
+        // Live take: fill the lane; squeezing it into the project
+        // timeline would shrink it to a sliver on long projects.
+        if (liveMode) {
+            return 1f;
+        }
+        if (projectDurationSec > 0 && durationSec > 0
+                && durationSec < projectDurationSec) {
+            return (float) (durationSec / projectDurationSec);
+        }
+        return 1f;
+    }
+
+    public void setOnTapListener(OnTapListener listener) {
+        this.tapListener = listener;
+    }
+
     public void setOnSelectionListener(OnSelectionListener listener) {
         this.selectionListener = listener;
     }
@@ -260,7 +353,8 @@ public class WaveformView extends View {
         }
     }
 
-    private void placeMarkerTap(float frac) {
+    /** Place a trim-marker tap at a project-time fraction (0..1). */
+    public void placeMarkerTap(float frac) {
         if (selStartFrac == null || selEndFrac != null) {
             // Fresh start (or replace a completed window).
             selStartFrac = frac;
@@ -281,10 +375,10 @@ public class WaveformView extends View {
         }
     }
 
-    /** Audio fraction (0..1) under view x-coordinate. */
+    /** Project-time fraction (0..1) under view x-coordinate. */
     private float xToFraction(float x) {
         float frac = viewStart + (x / getWidth()) / zoom;
-        return Math.max(0f, Math.min(1f, frac));
+        return Math.max(0f, Math.min(contentFrac(), frac));
     }
 
     /** View x-coordinate for an audio fraction. */
@@ -385,7 +479,12 @@ public class WaveformView extends View {
             if (liveMode || getWidth() <= 0) {
                 return true; // no selection markers while recording
             }
-            placeMarkerTap(xToFraction(e.getX()));
+            float frac = xToFraction(e.getX());
+            if (tapListener != null) {
+                tapListener.onTap(frac);
+                return true;
+            }
+            placeMarkerTap(frac);
             return true;
         }
 
@@ -467,28 +566,29 @@ public class WaveformView extends View {
         float barH = h - labelH;
         float midY = barH / 2f;
 
-        float[] drawPeaks = liveMode ? liveArr : peaks;
-        if (drawPeaks.length == 0) {
+        if (liveMode) {
+            drawLiveWave(canvas, w, barH, midY);
+        } else if (peaks.length == 0) {
             // Empty placeholder: faint center line until audio is picked.
             canvas.drawLine(0, midY, w, midY, placeholderPaint);
         } else {
             float maxAmp = midY * 0.95f;
+            // Peaks cover the lane's own audio: draw them scaled into
+            // [0, contentFrac] of the project width so lanes align.
+            float cf = contentFrac();
             float startF = viewStart;
-            int i0 = (int) (startF * drawPeaks.length);
-            int i1 = Math.min(drawPeaks.length,
-                    (int) Math.ceil((viewStart + 1f / zoom) * drawPeaks.length) + 1);
-            float pxPerBucket = zoom * w / drawPeaks.length;
+            int i0 = (int) ((startF / cf) * peaks.length);
+            int i1 = Math.min(peaks.length,
+                    (int) Math.ceil(((viewStart + 1f / zoom) / cf)
+                            * peaks.length) + 1);
+            float pxPerBucket = zoom * w * cf / peaks.length;
             float drawnW = Math.max(1f, pxPerBucket * 0.7f);
             for (int i = Math.max(0, i0); i < i1; i++) {
-                float left = (i / (float) drawPeaks.length - startF) * zoom * w;
-                float amp = drawPeaks[i] * maxAmp;
+                float left = (i / (float) peaks.length * cf - startF)
+                        * zoom * w;
+                float amp = peaks[i] * maxAmp;
                 canvas.drawRect(left, midY - amp, left + drawnW, midY + amp, barPaint);
             }
-        }
-
-        // Live recording: red record-head line at the frontier.
-        if (liveMode && liveArr.length > 0) {
-            canvas.drawLine(w - 2f, 0, w - 2f, barH, liveHeadPaint);
         }
 
         // Selection window shading + marker lines.
@@ -536,16 +636,20 @@ public class WaveformView extends View {
             }
         }
 
-        // Time axis in seconds, over the visible range.
-        if (durationSec > 0) {
-            double visStartSec = viewStart * durationSec;
-            double visEndSec = Math.min(durationSec, (viewStart + 1f / zoom) * durationSec);
+        // Time axis in seconds, over the visible range. On the shared
+        // project timeline the ticks read in project seconds so lanes
+        // align; otherwise they read in the lane's own seconds.
+        double axisSec = (projectDurationSec > 0 && !liveMode)
+                ? projectDurationSec : durationSec;
+        if (axisSec > 0) {
+            double visStartSec = viewStart * axisSec;
+            double visEndSec = Math.min(axisSec, (viewStart + 1f / zoom) * axisSec);
             textPaint.setTextSize(11 * density);
             textPaint.setTextAlign(Paint.Align.CENTER);
             double interval = niceInterval(visEndSec - visStartSec);
             double t0 = Math.ceil(visStartSec / interval) * interval;
             for (double t = t0; t <= visEndSec + 1e-6; t += interval) {
-                float x = (float) ((t / durationSec - viewStart) * zoom * w);
+                float x = (float) ((t / axisSec - viewStart) * zoom * w);
                 canvas.drawLine(x, barH, x, barH + 5 * density, tickPaint);
                 String label = formatSeconds(t);
                 float half = textPaint.measureText(label) / 2f;

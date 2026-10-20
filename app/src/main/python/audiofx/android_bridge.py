@@ -153,6 +153,34 @@ def _apply_op(samples, sample_rate, op, params, index):
             if sub == "tune_up":
                 raise ValueError("tune_up ops cannot nest")
             samples = _apply_op(samples, sample_rate, sub, sub_params, index)
+    elif op == "punch_in":
+        # Replace [start_frame, start_frame + take_len) with the take,
+        # crossfaded at the splice points. If the take runs past the end
+        # the track extends.
+        take_path = params.get("take_path")
+        start_frame = int(params.get("start_frame", 0))
+        if not take_path or not os.path.isfile(take_path):
+            raise ValueError("op #%d punch_in take not found: %r"
+                             % (index, take_path))
+        take, take_rate = read_wav_mono(take_path)
+        take = resample_linear(take, take_rate, sample_rate)
+        take_list = (take.tolist()
+                     if _HAVE_NP and isinstance(take, _np.ndarray)
+                     else list(take))
+        if not take_list:
+            raise ValueError("op #%d punch_in take is empty" % index)
+        orig = (samples.tolist()
+                if _HAVE_NP and isinstance(samples, _np.ndarray)
+                else list(samples))
+        n = len(orig)
+        start = max(0, min(start_frame, n))
+        end = min(start + len(take_list), n)
+        spliced = splice_with_crossfade(orig, take_list[:end - start],
+                                        start, end, sample_rate)
+        if start + len(take_list) > n:
+            spliced.extend(take_list[n - start:])
+        samples = (_np.asarray(spliced, dtype=_np.float64)
+                   if _HAVE_NP else spliced)
     elif op == "livefx":
         # Live-FX takes are baked into the pristine; the livefx op is a
         # display-only label and must never be re-run.
@@ -744,3 +772,233 @@ def waveform_peaks(input_path, n_buckets=240):
         "bit_depth": bit_depth,
         "duration_s": round(len(samples) / sample_rate, 2),
     }
+
+
+def resample_linear(samples, from_rate, to_rate):
+    """Resample a mono buffer to a new sample rate by linear interpolation.
+
+    Each output sample is the weighted average of the two input samples
+    bracketing its source position (pure linear interpolation, no
+    filtering). When the rates are equal the input is returned as float64
+    unchanged. Returns a float64 buffer (NumPy array when NumPy is
+    available, otherwise a Python list).
+    """
+    if from_rate <= 0 or to_rate <= 0:
+        raise ValueError("sample rates must be positive: %r -> %r"
+                         % (from_rate, to_rate))
+    if _HAVE_NP:
+        x = _np.asarray(samples, dtype=_np.float64)
+    else:
+        x = [float(s) for s in samples]
+    n_in = len(x)
+    if from_rate == to_rate:
+        return x
+    n_out = int(round(n_in * to_rate / from_rate))
+    if n_in == 0 or n_out <= 0:
+        return _np.zeros(0, dtype=_np.float64) if _HAVE_NP else []
+    ratio = from_rate / to_rate
+    if _HAVE_NP:
+        pos = _np.arange(n_out, dtype=_np.float64) * ratio
+        base = _np.floor(pos)
+        lo = _np.clip(base.astype(_np.int64), 0, n_in - 1)
+        hi = _np.clip(lo + 1, 0, n_in - 1)
+        frac = pos - base
+        return x[lo] * (1.0 - frac) + x[hi] * frac
+    out = []
+    for i in range(n_out):
+        pos = i * ratio
+        base = math.floor(pos)
+        lo = max(0, min(n_in - 1, base))
+        hi = min(n_in - 1, lo + 1)
+        frac = pos - base
+        out.append(x[lo] * (1.0 - frac) + x[hi] * frac)
+    return out
+
+
+def _parse_mix_args(tracks_json, muted_ids_json, target_sample_rate):
+    """Shared argument parsing for mixdown()/mix_peaks().
+
+    Returns (items, muted_ids_set, target_rate). Raises ValueError on
+    malformed JSON or a non-positive sample rate.
+    """
+    try:
+        items = json.loads(tracks_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("tracks_json is not valid JSON: %s" % exc)
+    if not isinstance(items, list):
+        raise ValueError("tracks_json must be a JSON array of tracks")
+    try:
+        muted_ids = json.loads(muted_ids_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("muted_ids_json is not valid JSON: %s" % exc)
+    if not isinstance(muted_ids, list):
+        raise ValueError("muted_ids_json must be a JSON array of ids")
+    muted = set(m for m in muted_ids if isinstance(m, str))
+    target_rate = int(target_sample_rate)
+    if target_rate <= 0:
+        raise ValueError("target_sample_rate must be positive: %r"
+                         % (target_sample_rate,))
+    return items, muted, target_rate
+
+
+def _load_audible_track_samples(items, muted, target_rate):
+    """Read each audible track's WAV as a float64 buffer at target_rate.
+
+    Muted ids are skipped before any file access; missing, undecodable,
+    or empty tracks contribute nothing. Tracks at other sample rates
+    are resampled with linear interpolation (see resample_linear).
+    """
+    tracks = []
+    for item in items:
+        if isinstance(item, dict):
+            track_id = item.get("id")
+            p = item.get("path")
+        else:
+            track_id, p = None, item
+        if track_id is not None and track_id in muted:
+            continue
+        if not isinstance(p, str) or not os.path.isfile(p):
+            continue
+        try:
+            samples, rate = read_wav_mono(p)
+        except Exception:
+            continue
+        if len(samples) == 0:
+            continue
+        if rate != target_rate:
+            samples = resample_linear(samples, rate, target_rate)
+        tracks.append(samples)
+    return tracks
+
+
+def _sum_and_normalize(tracks, target_rate):
+    """Zero-pad the track buffers to the longest, sum in float64, then
+    true-peak normalize to -1 dBFS (gain = 10**(-1/20) / peak, output
+    hard-clipped to +/-10**(-1/20)). Returns the normalized mix buffer.
+    """
+    target = 10.0 ** (-1.0 / 20.0)
+    n = max(len(t) for t in tracks)
+    if _HAVE_NP:
+        mix = _np.zeros(n, dtype=_np.float64)
+        for t in tracks:
+            mix[: len(t)] += _np.asarray(t, dtype=_np.float64)
+        peak = float(_np.max(_np.abs(mix))) if n else 0.0
+        if peak > 0:
+            return _np.clip(mix * (target / peak), -target, target)
+        return mix
+    mix = [0.0] * n
+    for t in tracks:
+        for i, s in enumerate(t):
+            mix[i] += float(s)
+    peak = max(abs(s) for s in mix) if mix else 0.0
+    if peak > 0:
+        gain = target / peak
+        return [min(max(s * gain, -target), target) for s in mix]
+    return mix
+
+
+def mixdown(tracks_json, output_path, target_sample_rate, muted_ids_json="[]"):
+    """Mix rendered track WAVs down to one mono file.
+
+    ``tracks_json`` is a JSON array where each item is either a
+    {"id": <str>, "path": <str>} object or (back-compat) a bare WAV
+    file path string, which is treated as {"id": None, "path": <string>}
+    and is never muted. ``muted_ids_json`` is a JSON array of track id
+    strings to skip; a muted id skips its track even if its file is
+    fine, unknown ids are ignored, and bare path strings are never
+    muted. Empty tracks are skipped: a path that is missing, cannot be
+    decoded, or holds no frames contributes nothing to the mix. Locked
+    tracks are included in the mix (lock blocks changes, not playback).
+    Tracks at other sample rates are resampled with linear
+    interpolation (see resample_linear). Shorter tracks are zero-padded
+    to the longest, then summed in float64. The mix is true-peak
+    normalized to -1 dBFS: gain = 10**(-1/20) / peak, and the output is
+    hard-clipped to +/-10**(-1/20) (true peak, not a percentile).
+
+    Writes the 16-bit WAV to ``output_path`` and returns {"ok": True,
+    "output_path": ..., "sample_rate": ..., "duration_s": ...,
+    "tracks_mixed": N}. Raises ValueError("no audible tracks to mix")
+    when no track yields audio.
+    """
+    items, muted, target_rate = _parse_mix_args(
+        tracks_json, muted_ids_json, target_sample_rate)
+    tracks = _load_audible_track_samples(items, muted, target_rate)
+    if not tracks:
+        raise ValueError("no audible tracks to mix")
+    out = _sum_and_normalize(tracks, target_rate)
+    write_wav(output_path, out, target_rate)
+    return {
+        "ok": True,
+        "output_path": output_path,
+        "sample_rate": target_rate,
+        "duration_s": round(len(out) / target_rate, 2),
+        "tracks_mixed": len(tracks),
+    }
+
+
+def mix_peaks(tracks_json, target_sample_rate, muted_ids_json="[]",
+              num_peaks=1200):
+    """Peak amplitudes of the peak-normalized mix, computed in memory.
+
+    Exactly the mix that mixdown() would write (same track selection,
+    resampling, sum, and -1 dBFS normalization), but no file is written:
+    this is the lazy-mix path for the waveform display, where the mix
+    file itself is only produced on demand (playback, overdub, share).
+    Returns {"ok": True, "peaks_json": ..., "duration_s": ...,
+    "sample_rate": ..., "tracks_mixed": N}, where peaks_json is a JSON
+    array of floats in 0..1. Raises ValueError("no audible tracks to
+    mix") when no track yields audio.
+    """
+    items, muted, target_rate = _parse_mix_args(
+        tracks_json, muted_ids_json, target_sample_rate)
+    tracks = _load_audible_track_samples(items, muted, target_rate)
+    if not tracks:
+        raise ValueError("no audible tracks to mix")
+    out = _sum_and_normalize(tracks, target_rate)
+    peaks = _waveform_peaks(out, int(num_peaks))
+    return {
+        "ok": True,
+        "peaks_json": json.dumps(peaks),
+        "duration_s": round(len(out) / target_rate, 2),
+        "sample_rate": target_rate,
+        "tracks_mixed": len(tracks),
+    }
+
+
+def resolve_record_target(tracks_json):
+    """Decide which track a new recording goes to. Returns a JSON string.
+
+    Input is a JSON array of {"id": str, "locked": bool, "has_audio":
+    bool, "position": int, "selected": bool}. The rule, in order:
+
+    1. If the selected track exists, is not locked, and has no audio,
+       record there.
+    2. Else record on the first track by position with locked=false and
+       has_audio=false.
+    3. Else create a new track (Java auto-creates "Track N").
+
+    A locked selected track is skipped. Recording never targets a track
+    with has_audio=true. An empty input array resolves to create.
+
+    Output is {"action": "record", "track_id": <id>} or
+    {"action": "create"}.
+    """
+    try:
+        tracks = json.loads(tracks_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("tracks_json is not valid JSON: %s" % exc)
+    if not isinstance(tracks, list):
+        raise ValueError("tracks_json must be a JSON array of tracks")
+    dicts = [t for t in tracks if isinstance(t, dict)]
+
+    def recordable(t):
+        return not t.get("locked", False) and not t.get("has_audio", False)
+
+    selected = next((t for t in dicts if t.get("selected", False)), None)
+    if selected is not None and recordable(selected):
+        return json.dumps({"action": "record",
+                           "track_id": selected.get("id")})
+    for t in sorted(dicts, key=lambda t: t.get("position", 0)):
+        if recordable(t):
+            return json.dumps({"action": "record", "track_id": t.get("id")})
+    return json.dumps({"action": "create"})
