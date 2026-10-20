@@ -15,6 +15,8 @@ import android.content.UriPermission;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Typeface;
+import android.graphics.RectF;
+import android.util.TypedValue;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Bundle;
@@ -509,6 +511,15 @@ public class MainActivity extends Activity {
         switchNs.setChecked(prefs.getBoolean("mic_ns", true));
         switchLiveFx.setChecked(prefs.getBoolean("mic_livefx", false));
         switchAutoNorm.setChecked(prefs.getBoolean("mic_autonorm", true));
+        // First use: offer the guided tour once (menu > Tutorial
+        // replays it anytime).
+        findViewById(android.R.id.content).post(() -> {
+            SharedPreferences p = getSharedPreferences(
+                    "soundlab", MODE_PRIVATE);
+            if (!p.getBoolean("tutorial_done_v1", false)) {
+                showTutorial();
+            }
+        });
         switchAgc.setOnCheckedChangeListener((b, on) ->
                 prefs.edit().putBoolean("mic_agc", on).apply());
         switchNs.setOnCheckedChangeListener((b, on) ->
@@ -642,11 +653,215 @@ public class MainActivity extends Activity {
     }
 
     /** Hamburger menu: Open, Library, Save as MP3, Share, Buy premium. */
+    // ---------------------------------------------------------------
+    // First-use tutorial: a dim overlay with a spotlight hole over
+    // each main control and a caption card (Skip / step / Next).
+    // Shown once automatically; replayable from the main menu.
+    // ---------------------------------------------------------------
+
+    private static class TutorialStep {
+        final int viewId;
+        final String title;
+        final String body;
+
+        TutorialStep(int viewId, String title, String body) {
+            this.viewId = viewId;
+            this.title = title;
+            this.body = body;
+        }
+    }
+
+    private FrameLayout tutorialOverlay;
+    private TutorialOverlayView tutorialHole;
+    private LinearLayout tutorialCard;
+    private TextView tutTitle;
+    private TextView tutBody;
+    private TextView tutStepLabel;
+    private Button tutNext;
+    private List<TutorialStep> tutSteps;
+    private int tutIndex;
+
+    private int dp(float v) {
+        return (int) TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_DIP, v,
+                getResources().getDisplayMetrics());
+    }
+
+    private void buildTutorialSteps() {
+        tutSteps = new ArrayList<>();
+        tutSteps.add(new TutorialStep(0, "Welcome to Audio Mechanic",
+                "A quick tour of the main controls. Tap Next to walk "
+                        + "through them, or Skip to dive straight in."));
+        tutSteps.add(new TutorialStep(R.id.btn_open, "Open",
+                "Load an audio file from your phone. It becomes a "
+                        + "project you can keep editing."));
+        tutSteps.add(new TutorialStep(R.id.btn_record, "Record",
+                "Record straight into a track with the mic. The "
+                        + "waveform grows as you sing or play."));
+        tutSteps.add(new TutorialStep(R.id.lane_list, "Tracks",
+                "Each lane is a track with its own effects, volume "
+                        + "and pitch. Tap a lane to select it; the + "
+                        + "button adds another track."));
+        tutSteps.add(new TutorialStep(R.id.seek_warmth, "Effects",
+                "Warmth, reverb and echo sliders shape the selected "
+                        + "track's sound."));
+        tutSteps.add(new TutorialStep(R.id.btn_diagnose,
+                "Diagnose & Tune Up",
+                "Diagnose checks a recording for problems like "
+                        + "clipping and noise; Tune Up fixes them in "
+                        + "one tap."));
+        tutSteps.add(new TutorialStep(R.id.btn_notation, "Notation",
+                "Finds the tonic (Sa) and writes the swarams. During "
+                        + "playback each lane shows the swara sounding "
+                        + "at that moment."));
+        tutSteps.add(new TutorialStep(R.id.btn_pitch, "Pitch shift",
+                "Shift a track's pitch to a different tonic, so "
+                        + "tracks recorded at different shrutis match."));
+        tutSteps.add(new TutorialStep(R.id.btn_share, "Save & share",
+                "Save your mix as MP3 or share it. Finished projects "
+                        + "live in the Recordings library, and the menu "
+                        + "can export a track's notation as text or a "
+                        + "PDF of all tracks."));
+    }
+
+    private void showTutorial() {
+        if (tutorialOverlay == null) {
+            buildTutorialSteps();
+            FrameLayout root = findViewById(android.R.id.content);
+            FrameLayout container = new FrameLayout(this);
+            container.setClickable(true);
+            tutorialHole = new TutorialOverlayView(this);
+            container.addView(tutorialHole, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT));
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setBackgroundResource(R.drawable.bg_card);
+            card.setPadding(dp(16), dp(14), dp(16), dp(12));
+            tutTitle = new TextView(this);
+            tutTitle.setTextSize(16);
+            tutTitle.setTypeface(Typeface.DEFAULT_BOLD);
+            tutTitle.setTextColor(getColor(R.color.sl_txt));
+            card.addView(tutTitle);
+            tutBody = new TextView(this);
+            tutBody.setTextSize(13.5f);
+            tutBody.setTextColor(getColor(R.color.sl_mut));
+            LinearLayout.LayoutParams bodyParams =
+                    new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT);
+            bodyParams.topMargin = dp(6);
+            card.addView(tutBody, bodyParams);
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            Button skip = new Button(this);
+            skip.setText("Skip");
+            skip.setTextColor(getColor(R.color.sl_dim));
+            skip.setBackground(null);
+            skip.setOnClickListener(v -> endTutorial());
+            row.addView(skip);
+            tutStepLabel = new TextView(this);
+            tutStepLabel.setTextSize(12);
+            tutStepLabel.setTextColor(getColor(R.color.sl_dim));
+            tutStepLabel.setGravity(Gravity.CENTER);
+            row.addView(tutStepLabel, new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+            tutNext = new Button(this);
+            tutNext.setTextColor(getColor(R.color.sl_teal2));
+            tutNext.setTypeface(Typeface.DEFAULT_BOLD);
+            tutNext.setBackground(null);
+            tutNext.setOnClickListener(v -> {
+                if (tutIndex + 1 >= tutSteps.size()) {
+                    endTutorial();
+                } else {
+                    tutIndex++;
+                    showTutorialStep();
+                }
+            });
+            row.addView(tutNext);
+            LinearLayout.LayoutParams rowParams =
+                    new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT);
+            rowParams.topMargin = dp(8);
+            card.addView(row, rowParams);
+            FrameLayout.LayoutParams cardParams =
+                    new FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.MATCH_PARENT,
+                            FrameLayout.LayoutParams.WRAP_CONTENT);
+            cardParams.setMargins(dp(16), dp(16), dp(16), dp(16));
+            cardParams.gravity = Gravity.BOTTOM;
+            container.addView(card, cardParams);
+            tutorialCard = card;
+            root.addView(container, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT));
+            tutorialOverlay = container;
+        }
+        tutorialOverlay.setVisibility(View.VISIBLE);
+        tutIndex = 0;
+        showTutorialStep();
+    }
+
+    private void showTutorialStep() {
+        TutorialStep step = tutSteps.get(tutIndex);
+        tutTitle.setText(step.title);
+        tutBody.setText(step.body);
+        tutStepLabel.setText((tutIndex + 1) + " / " + tutSteps.size());
+        tutNext.setText(tutIndex + 1 >= tutSteps.size()
+                ? "Done" : "Next");
+        tutorialOverlay.post(() -> {
+            View target = step.viewId != 0
+                    ? findViewById(step.viewId) : null;
+            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams)
+                    tutorialCard.getLayoutParams();
+            if (target == null || target.getWidth() == 0) {
+                tutorialHole.setHole(null);
+                lp.gravity = Gravity.CENTER_VERTICAL;
+            } else {
+                int[] tLoc = new int[2];
+                int[] oLoc = new int[2];
+                target.getLocationOnScreen(tLoc);
+                tutorialOverlay.getLocationOnScreen(oLoc);
+                int pad = dp(6);
+                RectF rect = new RectF(
+                        tLoc[0] - oLoc[0] - pad,
+                        tLoc[1] - oLoc[1] - pad,
+                        tLoc[0] - oLoc[0] + target.getWidth() + pad,
+                        tLoc[1] - oLoc[1] + target.getHeight() + pad);
+                if (rect.bottom < 0
+                        || rect.top > tutorialOverlay.getHeight()
+                        || rect.right < 0
+                        || rect.left > tutorialOverlay.getWidth()) {
+                    // Target scrolled off-screen: centered card.
+                    tutorialHole.setHole(null);
+                    lp.gravity = Gravity.CENTER_VERTICAL;
+                } else {
+                    tutorialHole.setHole(rect);
+                    lp.gravity = rect.centerY()
+                            < tutorialOverlay.getHeight() / 2f
+                            ? Gravity.BOTTOM : Gravity.TOP;
+                }
+            }
+            tutorialCard.setLayoutParams(lp);
+        });
+    }
+
+    private void endTutorial() {
+        if (tutorialOverlay != null) {
+            tutorialOverlay.setVisibility(View.GONE);
+        }
+        getSharedPreferences("soundlab", MODE_PRIVATE).edit()
+                .putBoolean("tutorial_done_v1", true).apply();
+    }
+
     private void showMainMenu() {
         boolean canSave = inputPath != null && new File(inputPath).exists();
         List<String> menu = new ArrayList<>();
         menu.add("Open audio file");
         menu.add("Recordings library");
+        menu.add("Tutorial");
         if (canSave) {
             menu.add("Save as MP3");
             menu.add("Share");
@@ -662,6 +877,8 @@ public class MainActivity extends Activity {
                         pickAudio();
                     } else if (sel.equals("Recordings library")) {
                         openLibrary();
+                    } else if (sel.equals("Tutorial")) {
+                        showTutorial();
                     } else if (sel.equals("Share")) {
                         shareAudio();
                     } else if (sel.equals("Buy premium version")) {
