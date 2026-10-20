@@ -118,7 +118,9 @@ def _apply_op(samples, sample_rate, op, params, index):
     elif op == "denoise":
         samples = _repair.denoise(
             samples, sample_rate,
-            strength=float(params.get("strength", 0.5)))
+            strength=float(params.get("strength", 0.5)),
+            min_gap_sec=float(params.get(
+                "min_gap_sec", _repair.DENOISE_MIN_GAP_SEC)))
     elif op == "deplosive":
         samples = _repair.deplosive(samples, sample_rate)
     elif op == "deess":

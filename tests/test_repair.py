@@ -95,19 +95,86 @@ class RepairTest(unittest.TestCase):
         sig = sine(440, 0.5, 0.5)
         self.assertEqual(list(repair.declip(sig)), sig)
 
+    def _noisy_recording(self, seconds=4.0, drone=False):
+        """Sparse transients over a dirty floor. Beats are dense and
+        long-tailed enough that the loud frames are genuinely content
+        (so the gap guard's depth check passes)."""
+        random.seed(7)
+        n = int(seconds * SR)
+        sig = [0.0] * n
+        t = 0.25
+        while t < seconds:
+            s0 = int(t * SR)
+            dec = int(0.15 * SR)
+            for i in range(dec):
+                env = math.exp(-i / (0.03 * SR))
+                sig[s0 + i] += 0.7 * env * random.gauss(0, 1.0)
+            t += 0.5
+        if drone:
+            f0 = 69.3  # C#2, a plausible tanpura tonic
+            for h in range(1, 9):
+                amp = 0.06 / math.sqrt(h)
+                for i in range(n):
+                    tt = i / SR
+                    pluck = 0.8 + 0.2 * math.sin(2 * math.pi * 0.3 * tt)
+                    sig[i] += amp * pluck * math.sin(
+                        2 * math.pi * f0 * h * i / SR)
+        hum = [0.0] * n
+        for h in (1, 2, 3, 4, 5, 6, 7):  # 38 Hz motor comb + harmonics
+            f = 38.0 * h
+            for i in range(n):
+                hum[i] += (0.03 / h) * math.sin(2 * math.pi * f * i / SR)
+        noise = [random.gauss(0, 0.015) for _ in range(n)]
+        return [a + b + c for a, b, c in zip(sig, hum, noise)]
+
     def test_denoise_reduces_hiss(self):
-        random.seed(3)
-        tone = sine(440, 1.0, 0.5)
-        noise = [random.gauss(0, 0.05) for _ in tone]
-        sig = [a + b for a, b in zip(tone, noise)]
+        sig = self._noisy_recording()
         out = repair.denoise(sig, SR, strength=0.6)
-        # Noise-only tail: first 0.1 s is tone+noise; use a noise-only probe.
-        probe = [random.gauss(0, 0.05) for _ in range(int(0.5 * SR))]
-        out_probe = repair.denoise(probe, SR, strength=0.6)
         rms = lambda x: math.sqrt(sum(v * v for v in x) / len(x))
-        self.assertLess(rms(out_probe), rms(probe) * 0.7)
-        # Tone still dominant at 440 Hz.
-        self.assertGreater(band_energy_db(out, 435, 445), -20.0)
+        gap = lambda x: x[int(1.45 * SR) : int(1.7 * SR)]  # between beats
+        self.assertLess(rms(gap(out)), rms(gap(sig)) * 0.8)
+
+    def test_denoise_bypasses_without_noise_gap(self):
+        # A uniformly loud signal has no pure-noise gap: the op must be
+        # a bit-identical bypass rather than profiling the content.
+        sig = sine(440, 3.0, 0.5)
+        out = repair.denoise(sig, SR, strength=0.6)
+        self.assertEqual(list(out), sig)
+
+    def test_denoise_reduces_hum_in_gaps(self):
+        sig = self._noisy_recording()
+        out = repair.denoise(sig, SR, strength=0.6)
+        # The hum tooth at 114 Hz is knocked down.
+        self.assertLess(band_energy_db(out, 108, 120),
+                        band_energy_db(sig, 108, 120) - 3.0)
+        # Beat peaks survive: the loudest transient barely moves.
+        self.assertAlmostEqual(max(abs(v) for v in out),
+                               max(abs(v) for v in sig), delta=0.12)
+
+    def test_denoise_preserves_tanpura_drone(self):
+        """A tanpura-style drone (chromatic harmonic series, pluck-like
+        amplitude cycling) sitting in the recording's gaps must survive
+        denoise, while the hum comb is still reduced."""
+        f0 = 69.3
+        sig = self._noisy_recording(drone=True)
+        out = repair.denoise(sig, SR, strength=0.6)
+        # Drone fundamental and harmonics preserved (whole-signal band
+        # energies, so pluck cycling averages out).
+        for f, lo, hi in ((f0, 64, 75), (2 * f0, 134, 144),
+                          (3 * f0, 203, 213)):
+            before = band_energy_db(sig, lo, hi)
+            after = band_energy_db(out, lo, hi)
+            self.assertLess(abs(after - before), 3.0,
+                            "drone at %.1f Hz changed %.1f dB"
+                            % (f, after - before))
+        # ... and the hiss band still goes down inside a pure gap
+        # (proof the op processed rather than bypassing; the hum tooth
+        # at 114 Hz shares an FFT bin with drone-harmonic leakage at
+        # this resolution, so tooth removal is only asserted in the
+        # drone-free test).
+        gap = lambda x: x[int(1.45 * SR) : int(1.7 * SR)]
+        self.assertLess(band_energy_db(gap(out), 4000, 6000),
+                        band_energy_db(gap(sig), 4000, 6000) - 3.0)
 
     def test_deplosive(self):
         sig = sine(440, 1.0, 0.3)

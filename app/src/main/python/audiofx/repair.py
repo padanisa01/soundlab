@@ -289,11 +289,122 @@ def declip(samples, threshold=0.999, context=32):
 # Denoise (partial: spectral subtraction, conservative)
 # ---------------------------------------------------------------------------
 
-def denoise(samples, sample_rate, strength=0.5, floor=0.15):
-    """Spectral subtraction: learn a per-bin noise profile from the
-    quietest frames, then subtract. Conservative by default; strong
-    settings cause watery artifacts, so the UI should label this
-    "reduce hiss", never "remove noise"."""
+# ---------------------------------------------------------------------------
+# Denoise: profiled spectral gating with a noise-gap guard and drone
+# protection. Runs ONLY when the recording has a verified pure-noise gap
+# to learn from; steady tones are gated as hum, but tones that vary like
+# plucks or that form a chromatic harmonic series (a tanpura drone) are
+# protected as content.
+# ---------------------------------------------------------------------------
+
+#: Minimum seconds of verified pure-noise gap required before denoise
+#: touches anything. Below this the op is a bit-identical bypass.
+DENOISE_MIN_GAP_SEC = 1.5
+#: Candidate noise frames are drawn from this quietest fraction.
+DENOISE_QUIET_FRAC = 0.10
+#: A candidate counts as pure noise only within this factor of the
+#: quietest frame's level (a flat floor, not a slope of music).
+DENOISE_QUIET_RATIO = 3.0
+#: A bin is tonal when its noise level exceeds the smoothed broadband
+#: floor by this many dB.
+DENOISE_TONE_DB = 8.0
+#: The kept noise set's median level must sit at least this far below
+#: the file's 90th-percentile frame level. Without this, a uniformly
+#: loud signal (a held note) would profile ITSELF as the noise.
+DENOISE_GAP_DEPTH_DB = 8.0
+#: Fundamental search range for a tanpura-style drone, Hz.
+DENOISE_DRONE_LO_HZ = 55.0
+DENOISE_DRONE_HI_HZ = 250.0
+#: A fitted drone fundamental must sit this close to a chromatic pitch.
+DENOISE_DRONE_CENTS = 30.0
+#: Minimum fitted harmonics (of 2..6) for the drone series check.
+DENOISE_DRONE_MIN_HARMONICS = 3
+
+
+def _median_filter_1d(v, width):
+    """Sliding median with edge replication. Width is forced odd."""
+    _need_numpy("_median_filter_1d")
+    if width % 2 == 0:
+        width += 1
+    half = width // 2
+    padded = _np.pad(v, (half, half), mode="edge")
+    out = _np.empty_like(v)
+    for i in range(v.size):
+        out[i] = _np.median(padded[i : i + width])
+    return out
+
+
+def _drone_bins(mu, smooth, freqs):
+    """Boolean mask of STFT bins belonging to a harmonic series whose
+    fundamental is a chromatic pitch in the tanpura tonic range: the
+    signature of a drone, which is content, never noise.
+
+    A candidate fundamental is rejected when a strong tonal peak sits
+    at any f0/n below it: a true fundamental has no subharmonics,
+    while every tooth of a hum comb does (at f0/k = the comb base), so
+    comb teeth posing as a drone fundamental are rejected while a real
+    drone next to a hum comb is still protected."""
+    protected = _np.zeros(mu.shape, dtype=bool)
+    # Peaks by local prominence: a local maximum standing at least
+    # ~2.6 dB above the median of its immediate neighbourhood. (A
+    # global floor-relative threshold misses harmonics in dense
+    # low-frequency spectra, where every bin is energetic.)
+    peak_idx = []
+    for j in range(1, mu.size - 1):
+        if not (mu[j] >= mu[j - 1] and mu[j] >= mu[j + 1]):
+            continue
+        lo = max(0, j - 4)
+        nb = _np.concatenate([mu[lo:j], mu[j + 1 : j + 5]])
+        if mu[j] > 1.35 * float(_np.median(nb)):
+            peak_idx.append(j)
+    peaks = [float(freqs[j]) for j in peak_idx]
+
+    def _is_peak(f):
+        return any(abs(p - f) / f <= 0.03 for p in peaks)
+
+    lo = int(_np.searchsorted(freqs, DENOISE_DRONE_LO_HZ))
+    hi = int(_np.searchsorted(freqs, DENOISE_DRONE_HI_HZ))
+    for i in peak_idx:
+        if not (lo <= i < hi):
+            continue
+        f0 = float(freqs[i])
+        semis = 12.0 * _np.log2(f0 / 440.0)
+        if abs(semis - round(semis)) * 100.0 > DENOISE_DRONE_CENTS:
+            continue  # not a tuned pitch (e.g. a motor rate)
+        hits = sum(1 for k in range(2, 7) if _is_peak(k * f0))
+        if hits < DENOISE_DRONE_MIN_HARMONICS:
+            continue
+        sub = False
+        for n in range(2, 9):
+            subf = f0 / n
+            if subf < 30.0:
+                break
+            if _is_peak(subf):
+                sub = True
+                break
+        if sub:
+            continue
+        for k in range(1, 9):
+            j = int(_np.searchsorted(freqs, k * f0))
+            protected[max(0, j - 1) : j + 2] = True
+    return protected
+
+def denoise(samples, sample_rate, strength=0.5, floor=0.15,
+            min_gap_sec=DENOISE_MIN_GAP_SEC):
+    """Spectral gating against a noise profile learned from the file's
+    own pure-noise gaps.
+
+    Guards (all named constants above):
+    - If the recording does not contain at least ``min_gap_sec`` of
+      verified pure-noise gap, this is a bit-identical bypass: without
+      a gap there is nothing trustworthy to learn the noise from.
+    - Tonal content is protected: tones that vary across the gap
+      (pluck cycles) and tones in a chromatic harmonic series (tanpura
+      drone) are never gated. Only the broadband floor and steady
+      tones (hum, motor whine) are reduced.
+
+    Conservative by default; the UI should label this "reduce hiss",
+    never "remove noise"."""
     _need_numpy("denoise")
     x = _as_np(samples)
     if x.size == 0:
@@ -301,22 +412,56 @@ def denoise(samples, sample_rate, strength=0.5, floor=0.15):
     n_fft = 2048
     hop = n_fft // 2
 
+    # --- Noise-gap guard, in the time domain (windowed RMS per STFT
+    # frame span, the same framing _padded_stft_process will use).
+    pad = n_fft
+    xp = _np.pad(x, (pad, pad), mode="reflect")
+    win = _np.hanning(n_fft)
+    n_frames = 1 + max(0, (xp.size - n_fft + hop - 1) // hop)
+    levels = _np.empty(n_frames)
+    for i in range(n_frames):
+        seg = xp[i * hop : i * hop + n_fft]
+        if seg.size < n_fft:
+            seg = _np.pad(seg, (0, n_fft - seg.size))
+        levels[i] = _np.sqrt(_np.mean((seg * win) ** 2))
+    # Digital silence is not noise: nothing to learn from it.
+    audible = levels > 1e-4  # -80 dBFS
+    if int(_np.sum(audible)) < 8:
+        return list(samples)
+    aud = levels[audible]
+    n_cand = max(2, int(round(DENOISE_QUIET_FRAC * aud.size)))
+    cand = _np.argpartition(aud, n_cand - 1)[:n_cand]
+    # Reference: the candidate cluster's center. (A low percentile sits
+    # at the extreme-quiet tail, and the 3x window then excludes the
+    # typical floor frames the profile must represent.)
+    ref = float(_np.median(aud[cand]))
+    keep_mask = aud <= DENOISE_QUIET_RATIO * ref
+    keep = _np.flatnonzero(audible)[keep_mask]
+    depth_db = 20.0 * _np.log10(
+        max(float(_np.median(aud[keep_mask])), 1e-12)
+        / max(float(_np.percentile(aud, 90)), 1e-12))
+    if keep.size * hop / float(sample_rate) < min_gap_sec \
+            or depth_db > -DENOISE_GAP_DEPTH_DB:
+        return list(samples)  # no trustworthy noise gap: bypass
+
     def apply(spectra):
         mag = _np.abs(spectra)
-        n_frames = mag.shape[0]
-        if n_frames < 8:
+        if mag.shape[0] != n_frames:
             return spectra
-        frame_energy = _np.mean(mag ** 2, axis=1)
-        n_noise = max(2, n_frames // 10)
-        noise_idx = _np.argpartition(frame_energy, n_noise)[:n_noise]
-        noise_profile = _np.median(mag[noise_idx], axis=0)
-        sub = strength * noise_profile[_np.newaxis, :]
+        # Mean magnitude profile over the verified noise frames. The
+        # mean (not median) is the right level for both steady tones
+        # (hum teeth: mean = the tone level) and hiss (Rayleigh mean).
+        mu = _np.mean(mag[keep], axis=0)
+        smooth = _median_filter_1d(mu, 21)
+        freqs = _freqs(n_fft, sample_rate)
+        protected = _drone_bins(mu, smooth, freqs)
+        sub = strength * mu[_np.newaxis, :]
         clean_mag = _np.maximum(mag - sub, floor * mag)
         gain = clean_mag / _np.maximum(mag, 1e-12)
+        gain = _np.where(protected[_np.newaxis, :], 1.0, gain)
         return spectra * gain
 
     return _padded_stft_process(x, n_fft, hop, apply)
-
 
 # ---------------------------------------------------------------------------
 # Deplosive: dynamic low-cut on plosive bursts

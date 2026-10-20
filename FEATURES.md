@@ -154,7 +154,10 @@ or the plan changes.
 - Every finding carries a one-tap Fix (a renderable library op, undoable
   like any other) and a "Tip" for next time. Clipping and high noise
   floor are labeled honestly as partial fixes ("reduce", not "remove");
-  room reverb is advice-only, never faked.
+  room reverb is advice-only, never faked. The denoise fix only runs
+  when the file has >= 1.5 s of verified pure-noise gap (flat floor,
+  8 dB below the loud frames); otherwise it is a bit-identical bypass.
+  Harmonic-series content (tanpura drone) is never touched.
 - Tune Up applies all observed fixes as one composite `tune_up` op in
   canonical DSP order (declip, DC, hum, de-plosive, de-esser, silence
   trim, leveling, EQ, loudness, denoise, fades: each fix placed where it
