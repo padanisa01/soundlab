@@ -5988,11 +5988,16 @@ public class MainActivity extends Activity {
             setStatus("Run Notation on the selected track first.");
             return;
         }
-        Track sel = selectedTrack();
-        String trackName = sel != null ? sel.name
-                : currentEntryId == null
-                        ? baseName(inputPath != null ? inputPath : "track")
-                        : "Track";
+        LibraryDb.Track sel = getSelectedTrack();
+        String fallback = "Track";
+        if (currentEntryId == null && inputPath != null) {
+            fallback = new File(inputPath).getName();
+            int dot = fallback.lastIndexOf('.');
+            if (dot > 0) {
+                fallback = fallback.substring(0, dot);
+            }
+        }
+        String trackName = sel != null ? sel.name : fallback;
         String project = tvProjectName != null
                 && tvProjectName.getText() != null
                 ? tvProjectName.getText().toString() : "";
