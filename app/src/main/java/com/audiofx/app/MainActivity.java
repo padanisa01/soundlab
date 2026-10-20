@@ -81,7 +81,6 @@ public class MainActivity extends Activity {
     private static final int REQ_RECORD_AUDIO = 2001;
 
     private TextView tvProjectName;
-    private TextView tvSwara;
     /** Karaoke notation state (feature/tonic), PER TRACK: notation
      * events and tonic chip text keyed by track id (LEGACY_NOTATION_KEY
      * for picked files). The readouts always show the selected
@@ -276,9 +275,9 @@ public class MainActivity extends Activity {
                     float pos = (float) (ms / 1000.0 / audioDurationSec);
                     for (TrackLane lane : lanes) {
                         lane.wave.setPlaybackPosition(pos);
+                        updateLaneSwara(lane, ms / 1000.0);
                     }
                     tvTimeCur.setText(fmtTime(ms / 1000.0));
-                    updateSwaraLabel(ms / 1000.0);
                 } catch (Exception ignored) {
                 }
                 mainHandler.postDelayed(this, 200);
@@ -293,45 +292,49 @@ public class MainActivity extends Activity {
 
     private void stopPositionUpdates() {
         mainHandler.removeCallbacks(positionUpdater);
-        if (tvSwara != null) {
-            tvSwara.setText("");
+        for (TrackLane lane : lanes) {
+            if (lane.swaraView != null) {
+                lane.swaraView.setText("");
+            }
         }
     }
 
-    /** Karaoke readout: the swara event covering time t (seconds on
-     * the mix timeline), blank during rests and outside events. */
-    private void updateSwaraLabel(double t) {
-        JSONArray notationEvents = notationByTrack.get(notationKey());
-        if (tvSwara == null || notationEvents == null) {
+    /** One lane's karaoke readout: the swara of THAT track sounding
+     * at time t (seconds on the project timeline). */
+    private void updateLaneSwara(TrackLane lane, double t) {
+        if (lane.swaraView == null) {
             return;
         }
-        String sym = "";
+        JSONArray events = notationByTrack.get(lane.trackId);
+        if (events == null) {
+            return;
+        }
+        String sym = swaraAt(events, t);
+        if (!sym.equals(lane.swaraView.getText().toString())) {
+            lane.swaraView.setText(sym);
+        }
+    }
+
+    /** The event symbol covering time t, "" during rests/gaps. */
+    private static String swaraAt(JSONArray events, double t) {
         try {
             int lo = 0;
-            int hi = notationEvents.length() - 1;
-            int found = -1;
+            int hi = events.length() - 1;
             while (lo <= hi) {
                 int mid = (lo + hi) / 2;
-                JSONObject ev = notationEvents.getJSONObject(mid);
+                JSONObject ev = events.getJSONObject(mid);
                 if (t < ev.getDouble("start")) {
                     hi = mid - 1;
                 } else if (t > ev.getDouble("start") + ev.getDouble("dur")) {
                     lo = mid + 1;
                 } else {
-                    found = mid;
-                    break;
+                    String s = ev.optString("sym", "");
+                    return "-".equals(s) ? "" : s;
                 }
-            }
-            if (found >= 0) {
-                String s = notationEvents.getJSONObject(found)
-                        .optString("sym", "");
-                sym = "-".equals(s) ? "" : s;
             }
         } catch (Exception ignored) {
         }
-        if (!sym.equals(tvSwara.getText().toString())) {
-            tvSwara.setText(sym);
-        }
+        return "";
     }
 
     /** The notation key for the current context: the selected track
@@ -344,17 +347,15 @@ public class MainActivity extends Activity {
                 : LEGACY_NOTATION_KEY;
     }
 
-    /** Karaoke label follows the selected track; each track's
-     * tonic rides on its own lane header (updateLaneHeader). */
+    /** Karaoke readouts live on the lanes: each lane shows its own
+     * track's notation (updateLaneHeader paints visibility). Kept as
+     * a lane-refresh for callers that stored new notation. */
     private void refreshNotationUi() {
-        if (tvSwara == null) {
-            return;
-        }
-        if (notationByTrack.containsKey(notationKey())) {
-            tvSwara.setVisibility(View.VISIBLE);
-        } else {
-            tvSwara.setVisibility(View.GONE);
-            tvSwara.setText("");
+        for (TrackLane lane : lanes) {
+            LibraryDb.Track t = getTrackById(lane.trackId);
+            if (t != null) {
+                updateLaneHeader(lane, t);
+            }
         }
     }
 
@@ -472,7 +473,6 @@ public class MainActivity extends Activity {
         setContentView(R.layout.activity_main);
 
         tvProjectName = findViewById(R.id.tv_project_name);
-        tvSwara = findViewById(R.id.tv_swara);
         btnMenu = findViewById(R.id.btn_menu);
         btnMenu.setOnClickListener(v -> showMainMenu());
         btnOpen = findViewById(R.id.btn_open);
@@ -1703,10 +1703,8 @@ public class MainActivity extends Activity {
             }
             notationByTrack.put(key, info.getJSONArray("events"));
             int cents = info.optInt("cents", 0);
-            String chip = String.format(Locale.US,
-                    "Sa %.1f Hz \u00b7 %s %s%dc",
-                    info.getDouble("sa_hz"), info.optString("note", "?"),
-                    cents >= 0 ? "+" : "", cents);
+            String chip = "Sa " + info.optString("note", "?") + " "
+                    + (cents >= 0 ? "+" : "") + cents + "c";
             tonicByTrack.put(key, chip);
             refreshLaneHeaderFor(key);
             refreshNotationUi();
@@ -3027,11 +3025,52 @@ public class MainActivity extends Activity {
         header.addView(deleteBtn, delLp);
         lane.deleteBtn = deleteBtn;
 
-        FrameLayout frame = new FrameLayout(this);
-        LinearLayout.LayoutParams frameLp = new LinearLayout.LayoutParams(
+        LinearLayout waveRow = new LinearLayout(this);
+        waveRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams waveRowLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, (int) (110 * density));
-        frameLp.topMargin = (int) (8 * density);
-        root.addView(frame, frameLp);
+        waveRowLp.topMargin = (int) (8 * density);
+        root.addView(waveRow, waveRowLp);
+
+        FrameLayout frame = new FrameLayout(this);
+        waveRow.addView(frame, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+
+        // Per-track volume: a vertical slider on the right of the
+        // waveform (a SeekBar rotated -90 inside a fixed box; max at
+        // the top). 0..150 maps to gain 0..1.5, 100 = unity.
+        FrameLayout volBox = new FrameLayout(this);
+        LinearLayout.LayoutParams volBoxLp = new LinearLayout.LayoutParams(
+                (int) (40 * density), LinearLayout.LayoutParams.MATCH_PARENT);
+        volBoxLp.leftMargin = (int) (4 * density);
+        waveRow.addView(volBox, volBoxLp);
+        SeekBar vol = new SeekBar(this);
+        vol.setMax(150);
+        vol.setProgress((int) Math.round(track.volume * 100));
+        FrameLayout.LayoutParams volLp = new FrameLayout.LayoutParams(
+                (int) (110 * density), (int) (40 * density));
+        volLp.gravity = Gravity.CENTER;
+        vol.setLayoutParams(volLp);
+        vol.setRotation(-90f);
+        vol.setContentDescription("Track volume");
+        vol.setOnSeekBarChangeListener(
+                new SeekBar.OnSeekBarChangeListener() {
+                    @Override
+                    public void onProgressChanged(SeekBar sb, int progress,
+                            boolean fromUser) {
+                    }
+
+                    @Override
+                    public void onStartTrackingTouch(SeekBar sb) {
+                    }
+
+                    @Override
+                    public void onStopTrackingTouch(SeekBar sb) {
+                        applyTrackVolume(track.id, sb.getProgress() / 100.0);
+                    }
+                });
+        volBox.addView(vol);
+        lane.volumeBar = vol;
 
         final WaveformView wv = new WaveformView(this);
         wv.setBackgroundResource(R.drawable.bg_wave);
@@ -3051,6 +3090,25 @@ public class MainActivity extends Activity {
         wv.setOnSelectionListener((s, e) -> onLaneSelectionChanged(track.id, s, e));
         frame.addView(wv);
         lane.wave = wv;
+
+        TextView swara = new TextView(this);
+        swara.setTextSize(20f);
+        swara.setTypeface(null, android.graphics.Typeface.BOLD);
+        swara.setTextColor(getColor(R.color.sl_txt));
+        swara.setBackgroundResource(R.drawable.bg_chip);
+        int spx = (int) (10 * density);
+        int spy = (int) (4 * density);
+        swara.setPadding(spx, spy, spx, spy);
+        swara.setVisibility(View.GONE);
+        FrameLayout.LayoutParams swaraLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT);
+        swaraLp.gravity = Gravity.BOTTOM | Gravity.END;
+        int sm = (int) (8 * density);
+        swaraLp.setMargins(0, 0, sm, sm);
+        swara.setLayoutParams(swaraLp);
+        frame.addView(swara);
+        lane.swaraView = swara;
 
         // Per-lane tune-up step overlay, initially hidden.
         LinearLayout overlay = new LinearLayout(this);
@@ -3097,6 +3155,14 @@ public class MainActivity extends Activity {
             lane.tonicView.setVisibility(View.VISIBLE);
         } else {
             lane.tonicView.setVisibility(View.GONE);
+        }
+        if (lane.swaraView != null) {
+            lane.swaraView.setVisibility(
+                    notationByTrack.containsKey(t.id)
+                            ? View.VISIBLE : View.GONE);
+        }
+        if (lane.volumeBar != null) {
+            lane.volumeBar.setProgress((int) Math.round(t.volume * 100));
         }
         lane.lockBtn.setText(t.locked ? "\uD83D\uDD12" : "\uD83D\uDD13");
         lane.lockBtn.setTextColor(getColor(
@@ -3154,6 +3220,27 @@ public class MainActivity extends Activity {
      * stale (rebuilt on demand for play/overdub/share). No peak
      * recompute — each lane shows its own audio independently.
      */
+    /** Per-track volume slider release: persist the gain, reload,
+     * and invalidate the mix (same contract as mute). */
+    private void applyTrackVolume(String trackId, double gain) {
+        if (currentEntryId == null) {
+            return;
+        }
+        if (isRecordingSession()) {
+            setStatus("Stop recording first.");
+            return;
+        }
+        try {
+            libraryDb.setTrackVolume(trackId, gain);
+            mTracks = libraryDb.listTracks(currentEntryId);
+            mixDirty = true;
+            releasePlayer(); // the playing mix no longer matches
+            setStatus("Track volume " + Math.round(gain * 100) + "%");
+        } catch (Exception e) {
+            setStatus("Volume failed: " + e.getMessage());
+        }
+    }
+
     private void toggleTrackMute(String trackId, boolean muted) {
         if (currentEntryId == null) {
             return;
@@ -3502,10 +3589,12 @@ public class MainActivity extends Activity {
     static final class MixTrack {
         final String id;
         final String path;
+        final double gain;
 
-        MixTrack(String id, String path) {
+        MixTrack(String id, String path, double gain) {
             this.id = id;
             this.path = path;
+            this.gain = gain;
         }
     }
 
@@ -3520,6 +3609,8 @@ public class MainActivity extends Activity {
         LinearLayout root;
         TextView nameView;
         TextView tonicView;
+        TextView swaraView;
+        SeekBar volumeBar;
         Button lockBtn;
         Button muteBtn;
         Button deleteBtn;
@@ -3542,7 +3633,7 @@ public class MainActivity extends Activity {
                 File render = libraryDb.trackRenderFile(t.id);
                 if (render.exists() && render.length() > 44) {
                     mixTracks.add(new MixTrack(t.id,
-                            render.getAbsolutePath()));
+                            render.getAbsolutePath(), t.volume));
                 }
             } catch (Exception ignored) {
             }
@@ -3560,6 +3651,7 @@ public class MainActivity extends Activity {
             JSONObject o = new JSONObject();
             o.put("id", mt.id);
             o.put("path", mt.path);
+            o.put("gain", mt.gain);
             tracksJson.put(o);
         }
         JSONArray mutedJson = new JSONArray();

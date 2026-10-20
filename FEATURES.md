@@ -196,12 +196,12 @@ or the plan changes.
   selected track fresh (the lane waveform shows the effects-style
   progress animation while it runs) and detects that track's tonic
   (Sa) and predominant-melody transcription. The tonic shows on
-  the track's own lane header, beside its title, with the Hz value
-  (e.g. "Sa 294.7 Hz · D4 +6c" — D4 natural 6 cents sharp, not D#);
-  during
-  playback a large karaoke readout above the waveform lanes shows
-  the swara sounding at the playhead (blank during rests),
-  refreshed by the 200 ms position updater. Results are kept per
+  the track's own lane header, beside its title (e.g. "Sa D4 +6c" —
+  D4 natural 6 cents sharp, not D#). During playback, EVERY
+  notated track shows its own karaoke readout in the bottom-right
+  corner of its waveform panel — the swara of that track sounding
+  at the playhead (blank during rests), refreshed per lane by the
+  200 ms position updater. Results are kept per
   track and follow track selection. A track's notation PERSISTS —
   across edits, new recordings, and project re-opens — until
   Notation is run again on that track (which replaces it). Picked
@@ -249,6 +249,15 @@ or the plan changes.
 - History is keyed by entry ID: renames never orphan it. Duplicate
   forks an independent copy with a "Forked from" marker. Edits
   auto-persist; there is no save-project step.
+
+### Per-track volume
+
+- Every lane carries a vertical volume slider on the right side of
+  its waveform panel (0-150%, 100% = unity gain). The gain is
+  stored per track (DB v4 `tracks.volume`), applied by the Python
+  mixdown (and mix_peaks) before the sum, and persists across
+  sessions. Releasing the slider persists the value, invalidates
+  the mix and stops playback, the same contract as mute.
 
 ### Multi-track recording
 - One library entry is a project of N tracks (`tracks` table, DB v3):

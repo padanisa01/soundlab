@@ -45,7 +45,7 @@ public class LibraryDb extends SQLiteOpenHelper {
     public static final String DSP_VERSION = "1";
 
     private static final String DB_NAME = "soundlab_library.db";
-    private static final int DB_VERSION = 3;
+    private static final int DB_VERSION = 4;
 
     private final Context mAppContext;
 
@@ -81,6 +81,7 @@ public class LibraryDb extends SQLiteOpenHelper {
                 + "  wav_path TEXT NOT NULL,\n"
                 + "  locked INTEGER NOT NULL DEFAULT 0,\n"
                 + "  muted INTEGER NOT NULL DEFAULT 0,\n"
+                + "  volume REAL NOT NULL DEFAULT 1.0,\n"
                 + "  position INTEGER NOT NULL,\n"
                 + "  created_at INTEGER NOT NULL,\n"
                 + "  updated_at INTEGER NOT NULL\n"
@@ -172,6 +173,19 @@ public class LibraryDb extends SQLiteOpenHelper {
             try {
                 db.execSQL("ALTER TABLE tracks ADD COLUMN"
                         + " muted INTEGER NOT NULL DEFAULT 0");
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
+            }
+        }
+        if (oldVersion < 4) {
+            // DB v4: per-track volume (mix gain). Same ADD COLUMN
+            // pattern as v3: safe under FK enforcement, existing
+            // rows get the unity-gain default.
+            db.beginTransaction();
+            try {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN"
+                        + " volume REAL NOT NULL DEFAULT 1.0");
                 db.setTransactionSuccessful();
             } finally {
                 db.endTransaction();
@@ -577,7 +591,7 @@ public class LibraryDb extends SQLiteOpenHelper {
         } finally {
             db.endTransaction();
         }
-        return new Track(newId, entryId, name, wavPath, false, false, position,
+        return new Track(newId, entryId, name, wavPath, false, false, 1.0, position,
                 now, now);
     }
 
@@ -636,6 +650,15 @@ public class LibraryDb extends SQLiteOpenHelper {
         SQLiteDatabase db = getWritableDatabase();
         ContentValues cv = new ContentValues();
         cv.put("locked", locked ? 1 : 0);
+        cv.put("updated_at", System.currentTimeMillis());
+        db.update("tracks", cv, "id=?", new String[]{trackId});
+    }
+
+    /** Sets the track's mix volume (gain; and bumps updated_at). */
+    public synchronized void setTrackVolume(String trackId, double volume) {
+        SQLiteDatabase db = getWritableDatabase();
+        ContentValues cv = new ContentValues();
+        cv.put("volume", volume);
         cv.put("updated_at", System.currentTimeMillis());
         db.update("tracks", cv, "id=?", new String[]{trackId});
     }
@@ -730,6 +753,7 @@ public class LibraryDb extends SQLiteOpenHelper {
                 c.getString(c.getColumnIndexOrThrow("wav_path")),
                 c.getInt(c.getColumnIndexOrThrow("locked")) != 0,
                 c.getInt(c.getColumnIndexOrThrow("muted")) != 0,
+                c.getDouble(c.getColumnIndexOrThrow("volume")),
                 c.getInt(c.getColumnIndexOrThrow("position")),
                 c.getLong(c.getColumnIndexOrThrow("created_at")),
                 c.getLong(c.getColumnIndexOrThrow("updated_at")));
@@ -986,19 +1010,22 @@ public class LibraryDb extends SQLiteOpenHelper {
         public final String wavPath;
         public final boolean locked;
         public final boolean muted;
+        /** Mix gain (per-track volume): 1.0 = unity. */
+        public double volume;
         public final int position;
         public final long createdAt;
         public final long updatedAt;
 
         public Track(String id, String entryId, String name, String wavPath,
-                boolean locked, boolean muted, int position, long createdAt,
-                long updatedAt) {
+                boolean locked, boolean muted, double volume, int position,
+                long createdAt, long updatedAt) {
             this.id = id;
             this.entryId = entryId;
             this.name = name;
             this.wavPath = wavPath;
             this.locked = locked;
             this.muted = muted;
+            this.volume = volume;
             this.position = position;
             this.createdAt = createdAt;
             this.updatedAt = updatedAt;

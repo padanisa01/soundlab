@@ -853,18 +853,31 @@ def _parse_mix_args(tracks_json, muted_ids_json, target_sample_rate):
     return items, muted, target_rate
 
 
+def _scale_samples(samples, gain):
+    """Multiply a sample buffer (list or numpy array) by a gain."""
+    if _HAVE_NP and isinstance(samples, _np.ndarray):
+        return samples * gain
+    return [s * gain for s in samples]
+
+
 def _load_audible_track_samples(items, muted, target_rate):
     """Read each audible track's WAV as a float64 buffer at target_rate.
 
     Muted ids are skipped before any file access; missing, undecodable,
     or empty tracks contribute nothing. Tracks at other sample rates
     are resampled with linear interpolation (see resample_linear).
+    A dict item's optional "gain" (per-track volume, default 1.0)
+    scales that track's contribution to the mix.
     """
     tracks = []
     for item in items:
+        gain = 1.0
         if isinstance(item, dict):
             track_id = item.get("id")
             p = item.get("path")
+            g = item.get("gain")
+            if isinstance(g, (int, float)) and not isinstance(g, bool):
+                gain = max(0.0, float(g))
         else:
             track_id, p = None, item
         if track_id is not None and track_id in muted:
@@ -879,6 +892,8 @@ def _load_audible_track_samples(items, muted, target_rate):
             continue
         if rate != target_rate:
             samples = resample_linear(samples, rate, target_rate)
+        if gain != 1.0:
+            samples = _scale_samples(samples, gain)
         tracks.append(samples)
     return tracks
 
@@ -922,7 +937,9 @@ def mixdown(tracks_json, output_path, target_sample_rate, muted_ids_json="[]"):
     decoded, or holds no frames contributes nothing to the mix. Locked
     tracks are included in the mix (lock blocks changes, not playback).
     Tracks at other sample rates are resampled with linear
-    interpolation (see resample_linear). Shorter tracks are zero-padded
+    interpolation (see resample_linear). A dict item may carry a
+    "gain" (per-track volume, default 1.0) scaling that track before
+    the sum. Shorter tracks are zero-padded
     to the longest, then summed in float64. The mix is true-peak
     normalized to -1 dBFS: gain = 10**(-1/20) / peak, and the output is
     hard-clipped to +/-10**(-1/20) (true peak, not a percentile).

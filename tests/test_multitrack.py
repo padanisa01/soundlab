@@ -443,3 +443,47 @@ class PunchInOpTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMixdownGain(unittest.TestCase):
+    """Per-track "gain" in the mix items scales that track's share."""
+
+    rate = 8000
+
+    def _sine_wav(self, path, freq, amp=0.5):
+        n = self.rate  # exactly 1 s: integer cycles at 200/400 Hz
+        samples = [amp * math.sin(2 * math.pi * freq * i / self.rate)
+                   for i in range(n)]
+        write_wav(path, samples, self.rate)
+        return path
+
+    def _band_ratio(self, path, f_lo=200, f_hi=400):
+        """|X(f_hi)| / |X(f_lo)| of the mix via direct DFT sums."""
+        samples, _ = read_wav_mono(path)
+        n = len(samples)
+
+        def band(f):
+            re = sum(s * math.cos(2 * math.pi * f * i / self.rate)
+                     for i, s in enumerate(samples))
+            im = sum(s * math.sin(2 * math.pi * f * i / self.rate)
+                     for i, s in enumerate(samples))
+            return math.hypot(re, im)
+
+        return band(f_hi) / band(f_lo)
+
+    def test_gain_scales_track_share(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            pa = self._sine_wav(os.path.join(d, "a.wav"), 200)
+            pb = self._sine_wav(os.path.join(d, "b.wav"), 400)
+            out = os.path.join(d, "mix.wav")
+            items = [{"id": "a", "path": pa, "gain": 1.0},
+                     {"id": "b", "path": pb, "gain": 0.5}]
+            mixdown(json.dumps(items), out, self.rate)
+            self.assertAlmostEqual(self._band_ratio(out), 0.5, delta=0.03)
+            items[1]["gain"] = 0.0
+            mixdown(json.dumps(items), out, self.rate)
+            self.assertLess(self._band_ratio(out), 0.02)
+            items[1]["gain"] = 1.0
+            mixdown(json.dumps(items), out, self.rate)
+            self.assertAlmostEqual(self._band_ratio(out), 1.0, delta=0.03)
