@@ -60,13 +60,32 @@ def test_notate_song_events():
           % (len(info["events"]), sorted(names)))
 
 
-if __name__ == "__main__":
-    test_detect_tonic_finds_drone()
-    test_detect_tonic_silence()
-    test_notate_song_events()
-    test_missing_fundamental_sa_wins_over_pa()
-    test_true_sa_with_strong_pa_not_flipped()
-    print("ALL TONIC TESTS PASS")
+def test_lower_pa_winner_flips_up_to_sa():
+    """Fourth-up trap (measured on pitch-shifted content): the
+    lower Pa (F#3) has a real fundamental + strong 2nd partial and
+    wins the raw vote, while the true Sa (B3) is missing its
+    fundamental. The detector must land on B3."""
+    sa = 246.94  # B3
+    parts = [(sa * k, a) for k, a in
+             ((2, 0.65), (3, 0.45), (4, 0.30), (5, 0.20))]
+    pa_lo = sa * 0.75  # F#3, the lower Pa
+    parts += [(pa_lo * k, a) for k, a in
+              ((1, 0.50), (2, 0.35), (3, 0.15))]
+    n = int(SR * 3)
+    t = np.arange(n) / SR
+    x = np.zeros(n)
+    for f, a in parts:
+        x += a * np.sin(2 * np.pi * f * t)
+    res = tonic.detect_tonic(x, SR)
+    assert res is not None
+    # The class must be B (the F# winner must not survive). The
+    # octave is genuinely underdetermined here: B2's partial stack
+    # contains B3's, and B3 has no fundamental -- accept either.
+    assert res["note"].startswith("B"), res
+    assert any(abs(res["sa_hz"] - o) < o * 0.015
+               for o in (sa, sa / 2.0)), res
+    print("lower-pa flip ok:", res)
+
 
 
 def _render_parts(parts, sr=SR, dur=3.0):
@@ -105,3 +124,13 @@ def test_true_sa_with_strong_pa_not_flipped():
     res = tonic.detect_tonic(_render_parts(parts), SR)
     assert res is not None
     assert abs(res["sa_hz"] - sa) < sa * 0.015, res
+
+
+if __name__ == "__main__":
+    test_detect_tonic_finds_drone()
+    test_detect_tonic_silence()
+    test_notate_song_events()
+    test_missing_fundamental_sa_wins_over_pa()
+    test_true_sa_with_strong_pa_not_flipped()
+    test_lower_pa_winner_flips_up_to_sa()
+    print("ALL TONIC TESTS PASS")

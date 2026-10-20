@@ -67,6 +67,10 @@ TONIC_SUBHARM_RATIO = 0.75
 #: TONIC_FIFTH_DOWN_INDEP of the winner's independent partials.
 TONIC_FIFTH_DOWN_RATIO = 0.75
 TONIC_FIFTH_DOWN_INDEP = 0.70
+#: Fourth-up (mirror trap): the winner may be the lower Pa of the
+#: true Sa (Sa a fourth above it). Same two bars.
+TONIC_FOURTH_UP_RATIO = 0.75
+TONIC_FOURTH_UP_INDEP = 0.70
 #: Melody tracker: window/hop and f0 search range.
 MELODY_WIN_SEC = 0.046
 MELODY_HOP_SEC = 0.010
@@ -214,6 +218,23 @@ def detect_tonic(samples, sample_rate):
             wi = _indep_score(freqs, mag, w, 2)
             if wi > 0 and ti >= TONIC_FIFTH_DOWN_INDEP * wi:
                 best_f, best_s = t, ts
+    # Fourth-up preference: the winner may be the LOWER Pa of the
+    # true Sa (Sa a fourth above it) -- the mirror trap, measured on
+    # pitch-shifted Devi: the winner F#3 is B3's lower Pa, propped
+    # up by the shifted D fundamental on its 2nd partial, while B3
+    # itself is a missing-fundamental tonic. Same two bars; the
+    # winner's partials shared with the upper candidate are its
+    # multiples of 4. Ground truths stay put (Durga 0.63/0.59,
+    # Rec185 0.42/0.36, Devi-after-fifth-down 0.67/0.61 all fail).
+    w2 = _refine_f0(freqs, mag, best_f)
+    t4 = _refine_f0(freqs, mag, w2 * 4.0 / 3.0)
+    if t4 <= TONIC_F0_HI:
+        ts4 = _series_score(freqs, mag, t4)
+        if ts4 >= TONIC_FOURTH_UP_RATIO * _series_score(freqs, mag, w2):
+            ti4 = _indep_score(freqs, mag, t4, 3)
+            wi4 = _indep_score(freqs, mag, w2, 4)
+            if wi4 > 0 and ti4 >= TONIC_FOURTH_UP_INDEP * wi4:
+                best_f, best_s = t4, ts4
     sa = _refine_f0(freqs, mag, best_f)
     note, cents = note_of(sa)
     return {"sa_hz": round(float(sa), 2), "note": note, "cents": cents,

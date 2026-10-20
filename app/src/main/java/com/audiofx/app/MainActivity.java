@@ -1223,6 +1223,7 @@ public class MainActivity extends Activity {
                 || "deplosive".equals(opType) || "deess".equals(opType)
                 || "level".equals(opType) || "loudness".equals(opType)
                 || "eq_balance".equals(opType) || "tune_up".equals(opType)
+                || "pitch_shift".equals(opType)
                 || "punch_in".equals(opType);
     }
 
