@@ -83,9 +83,13 @@ public class MainActivity extends Activity {
     private TextView tvProjectName;
     private TextView tvTonic;
     private TextView tvSwara;
-    /** Karaoke notation state (feature/tonic): events of the last
-     * notation run, on the mix timeline; null until Notation runs. */
-    private JSONArray notationEvents;
+    /** Karaoke notation state (feature/tonic), PER TRACK: notation
+     * events and tonic chip text keyed by track id (LEGACY_NOTATION_KEY
+     * for picked files). The readouts always show the selected
+     * track's notation. */
+    private static final String LEGACY_NOTATION_KEY = "__legacy__";
+    private final Map<String, JSONArray> notationByTrack = new HashMap<>();
+    private final Map<String, String> tonicByTrack = new HashMap<>();
     private ImageButton btnMenu;
     private AdView adView;
     private PremiumBilling premiumBilling;
@@ -93,7 +97,7 @@ public class MainActivity extends Activity {
     private Button btnSave2;
     private Button btnShare;
     private Button btnDiagnose;
-    private Button btnNotation;
+    private ImageButton btnNotation;
     private TextView toastView;
     private final Runnable hideToast = () -> {
         toastView.animate().alpha(0f).setDuration(250)
@@ -298,6 +302,7 @@ public class MainActivity extends Activity {
     /** Karaoke readout: the swara event covering time t (seconds on
      * the mix timeline), blank during rests and outside events. */
     private void updateSwaraLabel(double t) {
+        JSONArray notationEvents = notationByTrack.get(notationKey());
         if (tvSwara == null || notationEvents == null) {
             return;
         }
@@ -330,17 +335,44 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Drop the notation readouts (project or mix changed). */
-    private void clearNotation() {
-        notationEvents = null;
-        if (tvTonic != null) {
+    /** The notation key for the current context: the selected track
+     * inside a project, the legacy key for picked files. */
+    private String notationKey() {
+        return currentEntryId != null && selectedTrackId != null
+                ? selectedTrackId : LEGACY_NOTATION_KEY;
+    }
+
+    /** Tonic chip + karaoke label follow the selected track. */
+    private void refreshNotationUi() {
+        if (tvTonic == null || tvSwara == null) {
+            return;
+        }
+        String key = notationKey();
+        String tonic = tonicByTrack.get(key);
+        if (tonic != null && notationByTrack.containsKey(key)) {
+            tvTonic.setText(tonic);
+            tvTonic.setVisibility(View.VISIBLE);
+            tvSwara.setVisibility(View.VISIBLE);
+        } else {
             tvTonic.setVisibility(View.GONE);
             tvTonic.setText("");
-        }
-        if (tvSwara != null) {
             tvSwara.setVisibility(View.GONE);
             tvSwara.setText("");
         }
+    }
+
+    /** Drop ALL notation state (project changed). */
+    private void clearNotation() {
+        notationByTrack.clear();
+        tonicByTrack.clear();
+        refreshNotationUi();
+    }
+
+    /** Drop one track's notation (its content changed). */
+    private void clearNotationForTrack(String trackId) {
+        notationByTrack.remove(trackId);
+        tonicByTrack.remove(trackId);
+        refreshNotationUi();
     }
 
     // In-memory session state for Undo.
@@ -1593,69 +1625,97 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    /** Tonic + swara notation: detects the piece's Sa and transcribes the
-     * predominant melody as note events. Notation runs on the mixdown for
-     * multitrack projects (the piece), or the current render / pristine
-     * input for legacy picked files. */
+    /** Tonic + swara notation for the SELECTED track: render it
+     * fresh (like Diagnose), then run tonic_file on the render with
+     * the lane waveform's progress animation. Legacy picked files
+     * notate their current render / pristine input instead. */
     private void onNotationClicked() {
-        String path = null;
-        if (currentEntryId != null) {
-            try {
-                path = ensureMixFile();
-            } catch (Exception e) {
-                setStatus("Notation failed: " + e.getMessage());
-                return;
-            }
-        } else {
-            path = (currentOutputPath != null
-                    && new File(currentOutputPath).exists()) ? currentOutputPath
-                            : inputPath;
+        final String entryId = currentEntryId;
+        if (entryId != null) {
+            notateSelectedTrack(entryId);
+            return;
         }
+        String path = (currentOutputPath != null
+                && new File(currentOutputPath).exists()) ? currentOutputPath
+                        : inputPath;
         if (path == null || !new File(path).exists()) {
             setStatus("Open or record audio first.");
             return;
         }
-        final String notationPath = path;
+        runNotation(path, LEGACY_NOTATION_KEY, null, null);
+    }
+
+    private void notateSelectedTrack(final String entryId) {
+        final LibraryDb.Track track = getSelectedTrack();
+        if (track == null) {
+            setStatus("Open or record audio first.");
+            return;
+        }
+        if (!trackHasAudio(track)) {
+            setStatus("The selected track has no audio to notate.");
+            return;
+        }
+        final String trackId = track.id;
+        final String path =
+                libraryDb.trackRenderFile(trackId).getAbsolutePath();
+        runNotation(path, trackId, entryId, laneWave(trackId));
+    }
+
+    private void runNotation(final String path, final String key,
+            final String entryId, final WaveformView wave) {
         setBusy(true);
-        setStatus("Notating — detecting Sa and tracing the melody...");
+        setStatus("Notating \u2014 detecting Sa and tracing the melody...");
+        if (wave != null) {
+            wave.startProgressAnimation();
+        }
         new Thread(() -> {
             try {
+                if (entryId != null) {
+                    renderTrackBlocking(entryId, key);
+                }
                 if (!Python.isStarted()) {
                     Python.start(new AndroidPlatform(this));
                 }
                 final String infoJson = Python.getInstance()
                         .getModule("audiofx.android_bridge")
-                        .callAttr("tonic_file", notationPath).toString();
+                        .callAttr("tonic_file", path).toString();
                 runOnUiThread(() -> {
                     setBusy(false);
-                    applyNotation(infoJson);
+                    if (wave != null) {
+                        wave.finishProgressAnimation();
+                    }
+                    applyNotation(infoJson, key);
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     setBusy(false);
+                    if (wave != null) {
+                        wave.clearProgress();
+                    }
                     setStatus("Notation failed: " + e.getMessage());
                 });
             }
         }).start();
     }
 
-    /** Store a notation result: tonic chip beside the project name,
-     * karaoke swara label above the lanes. */
-    private void applyNotation(String infoJson) {
+    /** Store a notation result for its track and refresh the
+     * readouts (tonic chip by the title, karaoke label). */
+    private void applyNotation(String infoJson, String key) {
         try {
             JSONObject info = new JSONObject(infoJson);
             if (!info.has("sa_hz") || !info.has("events")) {
                 setStatus("No tonic found in this audio.");
                 return;
             }
-            notationEvents = info.getJSONArray("events");
+            notationByTrack.put(key, info.getJSONArray("events"));
             int cents = info.optInt("cents", 0);
-            tvTonic.setText("Sa " + info.optString("note", "?") + " "
-                    + (cents >= 0 ? "+" : "") + cents + "c");
-            tvTonic.setVisibility(View.VISIBLE);
-            tvSwara.setVisibility(View.VISIBLE);
-            tvSwara.setText("");
-            setStatus("Notation ready — play to follow the swarams.");
+            String chip = String.format(Locale.US,
+                    "Sa %.1f Hz \u00b7 %s %s%dc",
+                    info.getDouble("sa_hz"), info.optString("note", "?"),
+                    cents >= 0 ? "+" : "", cents);
+            tonicByTrack.put(key, chip);
+            refreshNotationUi();
+            setStatus("Notation ready \u2014 play to follow the swarams.");
         } catch (Exception e) {
             setStatus("Notation failed: bad report.");
         }
@@ -2735,6 +2795,7 @@ public class MainActivity extends Activity {
         diagLastPath = null;
         diagTrackId = null;
         diagSummaryCache.clear();
+        refreshNotationUi();
         refreshLanes();
         // History and the undo badge follow the selection.
         updateUndoBadge();
@@ -3783,7 +3844,7 @@ public class MainActivity extends Activity {
             return;
         }
         // The track's audio changed: any diagnosis of it is stale.
-        clearNotation();
+        clearNotationForTrack(trackId);
         cachedDiagJson = null;
         cachedDiagPath = null;
         diagLastPath = null;

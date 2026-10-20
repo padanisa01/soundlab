@@ -159,19 +159,6 @@
                     android:textColor="@color/sl_txt"
                     android:textSize="12.5sp" />
 
-                <Button
-                    android:id="@+id/btn_notation"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:layout_marginStart="8dp"
-                    android:background="@drawable/bg_ghost"
-                    android:drawablePadding="6dp"
-                    android:gravity="center"
-                    android:padding="10dp"
-                    android:text="Notation"
-                    android:textColor="@color/sl_txt"
-                    android:textSize="12.5sp" />
             </LinearLayout>
 
             <!-- Slim TRACKS bar: label + add-track button -->
@@ -256,9 +243,43 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
+                        android:ellipsize="end"
+                        android:maxLines="1"
                         android:text="Full track"
                         android:textColor="@color/sl_mut"
                         android:textSize="13sp" />
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="6dp"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:id="@+id/tv_time_cur"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="0:00"
+                            android:textColor="@color/sl_txt"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text=" / "
+                            android:textColor="@color/sl_mut"
+                            android:textSize="12sp" />
+
+                        <TextView
+                            android:id="@+id/tv_time_tot"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="0:00"
+                            android:textColor="@color/sl_mut"
+                            android:textSize="12sp" />
+                    </LinearLayout>
 
                     <Button
                         android:id="@+id/btn_trim"
@@ -367,32 +388,26 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginStart="14dp"
-                        android:gravity="center_vertical"
-                        android:orientation="horizontal">
+                        android:gravity="center_horizontal"
+                        android:orientation="vertical">
+
+                        <ImageButton
+                            android:id="@+id/btn_notation"
+                            android:layout_width="44dp"
+                            android:layout_height="44dp"
+                            android:background="@drawable/bg_chip"
+                            android:contentDescription="Swara notation"
+                            android:padding="11dp"
+                            android:scaleType="fitCenter"
+                            android:src="@drawable/ic_notation" />
 
                         <TextView
-                            android:id="@+id/tv_time_cur"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="0:00"
-                            android:textColor="@color/sl_txt"
-                            android:textSize="16sp"
-                            android:textStyle="bold" />
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text=" / "
-                            android:textColor="@color/sl_mut"
-                            android:textSize="13sp" />
-
-                        <TextView
-                            android:id="@+id/tv_time_tot"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="0:00"
-                            android:textColor="@color/sl_mut"
-                            android:textSize="13sp" />
+                            android:layout_marginTop="2dp"
+                            android:text="Notation"
+                            android:textColor="@color/sl_dim"
+                            android:textSize="10sp" />
                     </LinearLayout>
 
                 </LinearLayout>

@@ -190,15 +190,20 @@ or the plan changes.
   entry points in `android_bridge.py`.
 
 ### Tonic and notation
-- **Notation** button (next to Diagnose, same enable gating): detects
-  the piece's tonic (Sa) and transcribes the predominant melody.
-  The tonic shows as a chip beside the project title (e.g. "Sa G#
-  +30c"); during playback a large karaoke readout above the waveform
-  lanes shows the swara sounding at the playhead (blank during
-  rests), refreshed by the 200 ms position updater. Multitrack
-  projects are notated from the mixdown, picked files from the
-  current render or pristine input. Any track edit or project
-  change clears the readouts (the mix they describe has moved).
+- **Notation** is per track: the Notation icon button sits in the
+  transport row (where the time readout used to be; the 0:00 / 0:00
+  indicator now lives on the selection-chip line). It renders the
+  selected track fresh (the lane waveform shows the effects-style
+  progress animation while it runs) and detects that track's tonic
+  (Sa) and predominant-melody transcription. The tonic shows as a
+  chip beside the project title with the Hz value (e.g. "Sa
+  294.7 Hz · D4 +6c" — D4 natural 6 cents sharp, not D#); during
+  playback a large karaoke readout above the waveform lanes shows
+  the swara sounding at the playhead (blank during rests),
+  refreshed by the 200 ms position updater. Results are kept per
+  track and follow track selection; editing a track clears only
+  that track's notation, switching projects clears all. Picked
+  files (no project) notate the current render or pristine input.
 - Tonic: long-term average spectrum (the drone is in every frame),
   harmonic-series scoring of prominent peaks in 50–300 Hz with a
   subharmonic preference (Pa is Sa's 3rd harmonic but Sa is not a
