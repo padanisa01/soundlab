@@ -14,7 +14,10 @@ import android.content.SharedPreferences;
 import android.content.UriPermission;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.graphics.Color;
+import android.graphics.Paint;
 import android.graphics.Typeface;
+import android.graphics.pdf.PdfDocument;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Bundle;
@@ -655,6 +658,10 @@ public class MainActivity extends Activity {
         if (tonicInfoByTrack.containsKey(notationKey())) {
             menu.add("Export notation");
         }
+        if (currentEntryId != null
+                || tonicInfoByTrack.containsKey(notationKey())) {
+            menu.add("Export notation (PDF, all tracks)");
+        }
         if (!isPremium()) {
             menu.add("Buy premium version");
         }
@@ -670,6 +677,9 @@ public class MainActivity extends Activity {
                         shareAudio();
                     } else if (sel.equals("Export notation")) {
                         exportNotation();
+                    } else if (sel.equals(
+                            "Export notation (PDF, all tracks)")) {
+                        exportNotationPdf();
                     } else if (sel.equals("Buy premium version")) {
                         buyPremium();
                     } else {
@@ -5972,6 +5982,277 @@ public class MainActivity extends Activity {
         shareEncodeError = null;
         showEncodeWaitScreen("Preparing share file...", !isPremium());
         new Thread(() -> encodeShareFile(srcPath)).start();
+    }
+
+    /** One track's PDF section: title, meta line, body lines. */
+    private static class PdfSection {
+        final String title;
+        final String meta;
+        final List<String> body;
+
+        PdfSection(String title, String meta, List<String> body) {
+            this.title = title;
+            this.meta = meta;
+            this.body = body;
+        }
+    }
+
+    /**
+     * Export ONE PDF with every track's notation, one section after
+     * another under clear per-track titles. Tracks without stored
+     * notation are notated on the fly (and the result is stored, so
+     * their tonic chips and karaoke appear too). Shared via the
+     * system sheet as application/pdf.
+     */
+    private void exportNotationPdf() {
+        final String entryId = currentEntryId;
+        String project = tvProjectName != null
+                && tvProjectName.getText() != null
+                ? tvProjectName.getText().toString() : "";
+        final String projectTitle = project.isEmpty()
+                ? "Notation" : project;
+        setBusy(true);
+        setStatus("Preparing notation PDF...");
+        new Thread(() -> {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                List<PdfSection> sections = new ArrayList<>();
+                List<String[]> generated = new ArrayList<>();
+                if (entryId != null) {
+                    int n = 0;
+                    for (LibraryDb.Track t
+                            : new ArrayList<>(mTracks)) {
+                        if (!trackHasAudio(t)) {
+                            continue;
+                        }
+                        n++;
+                        JSONObject stored = tonicInfoByTrack.get(t.id);
+                        String infoJson;
+                        if (stored != null) {
+                            infoJson = stored.toString();
+                        } else {
+                            renderTrackBlocking(entryId, t.id);
+                            String path = libraryDb.trackRenderFile(t.id)
+                                    .getAbsolutePath();
+                            infoJson = Python.getInstance()
+                                    .getModule("audiofx.android_bridge")
+                                    .callAttr("tonic_file", path).toString();
+                            generated.add(new String[]{t.id, infoJson});
+                        }
+                        sections.add(pdfSection(
+                                "Track " + n + ": " + t.name, infoJson));
+                    }
+                } else {
+                    String key = notationKey();
+                    JSONObject stored = tonicInfoByTrack.get(key);
+                    String infoJson;
+                    if (stored != null) {
+                        infoJson = stored.toString();
+                    } else {
+                        String path = (currentOutputPath != null
+                                && new File(currentOutputPath).exists())
+                                ? currentOutputPath : inputPath;
+                        if (path == null
+                                || !new File(path).exists()) {
+                            throw new IllegalStateException(
+                                    "nothing to notate");
+                        }
+                        infoJson = Python.getInstance()
+                                .getModule("audiofx.android_bridge")
+                                .callAttr("tonic_file", path).toString();
+                        generated.add(new String[]{key, infoJson});
+                    }
+                    String name = "Track";
+                    if (inputPath != null) {
+                        name = new File(inputPath).getName();
+                        int dot = name.lastIndexOf('.');
+                        if (dot > 0) {
+                            name = name.substring(0, dot);
+                        }
+                    }
+                    sections.add(pdfSection(name, infoJson));
+                }
+                if (sections.isEmpty()) {
+                    throw new IllegalStateException(
+                            "no tracks with audio to notate");
+                }
+                final File pdf = writeNotationPdf(projectTitle, sections);
+                runOnUiThread(() -> {
+                    for (String[] g : generated) {
+                        applyNotation(g[1], g[0]);
+                    }
+                    setBusy(false);
+                    try {
+                        Uri uri = FileProvider.getUriForFile(
+                                MainActivity.this,
+                                getPackageName() + ".fileprovider", pdf);
+                        Intent send = new Intent(Intent.ACTION_SEND);
+                        send.setType("application/pdf");
+                        send.putExtra(Intent.EXTRA_STREAM, uri);
+                        send.addFlags(
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        setStatus("Sharing " + pdf.getName() + ".");
+                        startActivity(Intent.createChooser(send,
+                                "Share notation PDF"));
+                    } catch (Exception e) {
+                        setStatus("Notation PDF failed: "
+                                + e.getMessage());
+                    }
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    setStatus("Notation PDF failed: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    /** Build one PDF section from a notation result JSON. */
+    private PdfSection pdfSection(String title, String infoJson)
+            throws Exception {
+        JSONObject info = new JSONObject(infoJson);
+        if (!info.has("sa_hz") || !info.has("events")) {
+            List<String> body = new ArrayList<>();
+            body.add("(no tonic detected in this track)");
+            return new PdfSection(title, "", body);
+        }
+        String secJson = Python.getInstance()
+                .getModule("audiofx.android_bridge")
+                .callAttr("notation_section", infoJson).toString();
+        JSONObject sec = new JSONObject(secJson);
+        JSONArray lines = sec.getJSONArray("body");
+        List<String> body = new ArrayList<>();
+        for (int i = 0; i < lines.length(); i++) {
+            body.add(lines.getString(i));
+        }
+        return new PdfSection(title, sec.optString("meta", ""), body);
+    }
+
+    /** Word-wrap a string to a paint's measure within maxWidth. */
+    private static List<String> wrapText(String text, Paint paint,
+            float maxWidth) {
+        List<String> out = new ArrayList<>();
+        String line = "";
+        for (String word : text.split(" ")) {
+            String trial = line.isEmpty() ? word : line + " " + word;
+            if (paint.measureText(trial) <= maxWidth || line.isEmpty()) {
+                line = trial;
+            } else {
+                out.add(line);
+                line = word;
+            }
+        }
+        if (!line.isEmpty()) {
+            out.add(line);
+        }
+        return out;
+    }
+
+    /**
+     * Lay out the notation document on A4 pages: project title, the
+     * convention note, then each track's titled section in order.
+     */
+    private File writeNotationPdf(String projectTitle,
+            List<PdfSection> sections) throws Exception {
+        final int pageW = 595, pageH = 842;
+        final float margin = 40, contentW = pageW - 2 * margin;
+        Paint titlePaint = new Paint();
+        titlePaint.setAntiAlias(true);
+        titlePaint.setTextSize(16);
+        titlePaint.setFakeBoldText(true);
+        titlePaint.setColor(Color.rgb(27, 27, 27));
+        Paint notePaint = new Paint();
+        notePaint.setAntiAlias(true);
+        notePaint.setTextSize(9);
+        notePaint.setColor(Color.rgb(90, 90, 90));
+        Paint trackPaint = new Paint();
+        trackPaint.setAntiAlias(true);
+        trackPaint.setTextSize(13);
+        trackPaint.setFakeBoldText(true);
+        trackPaint.setColor(Color.rgb(27, 27, 27));
+        Paint metaPaint = new Paint();
+        metaPaint.setAntiAlias(true);
+        metaPaint.setTextSize(9.5f);
+        metaPaint.setColor(Color.rgb(90, 90, 90));
+        Paint bodyPaint = new Paint();
+        bodyPaint.setAntiAlias(true);
+        bodyPaint.setTextSize(10);
+        bodyPaint.setTypeface(Typeface.MONOSPACE);
+        bodyPaint.setColor(Color.rgb(27, 27, 27));
+
+        PdfDocument doc = new PdfDocument();
+        PdfDocument.Page page = doc.startPage(
+                new PdfDocument.PageInfo.Builder(pageW, pageH, 1)
+                        .create());
+        android.graphics.Canvas canvas = page.getCanvas();
+        float y = margin;
+        canvas.drawText(projectTitle, margin, y + 12, titlePaint);
+        y += 24;
+        for (String ln : wrapText("Notation in the shivkumar.org "
+                + "convention: ',' extends a note by one unit, ';' is "
+                + "a rest unit, '|' separates tala groups, '||' ends "
+                + "an avartanam (8 units); a dot above or below a "
+                + "letter marks the upper or lower octave. Each "
+                + "track's unit is its median note length.",
+                notePaint, contentW)) {
+            canvas.drawText(ln, margin, y + 8, notePaint);
+            y += 12;
+        }
+        int pageNo = 1;
+        for (PdfSection sec : sections) {
+            List<String> metaLines = sec.meta.isEmpty()
+                    ? new ArrayList<>()
+                    : wrapText(sec.meta, metaPaint, contentW);
+            float need = 16 + 18 + metaLines.size() * 12f
+                    + Math.min(2, sec.body.size()) * 13.5f;
+            if (y + need > pageH - margin) {
+                doc.finishPage(page);
+                pageNo++;
+                page = doc.startPage(new PdfDocument.PageInfo
+                        .Builder(pageW, pageH, pageNo).create());
+                canvas = page.getCanvas();
+                y = margin;
+            } else {
+                y += 16;
+            }
+            canvas.drawText(sec.title, margin, y + 11, trackPaint);
+            y += 18;
+            for (String ln : metaLines) {
+                canvas.drawText(ln, margin, y + 8, metaPaint);
+                y += 12;
+            }
+            y += 2;
+            for (String ln : sec.body) {
+                if (y + 13.5f > pageH - margin) {
+                    doc.finishPage(page);
+                    pageNo++;
+                    page = doc.startPage(new PdfDocument.PageInfo
+                            .Builder(pageW, pageH, pageNo).create());
+                    canvas = page.getCanvas();
+                    y = margin;
+                }
+                canvas.drawText(ln, margin, y + 9, bodyPaint);
+                y += 13.5f;
+            }
+        }
+        doc.finishPage(page);
+        File dir = new File(getCacheDir(), "share");
+        if (!dir.exists() && !dir.mkdirs()) {
+            throw new IllegalStateException("share dir unavailable");
+        }
+        File out = new File(dir, projectTitle.replaceAll(
+                "[^A-Za-z0-9 _-]", "_") + " notation.pdf");
+        FileOutputStream fos = new FileOutputStream(out);
+        try {
+            doc.writeTo(fos);
+        } finally {
+            fos.close();
+            doc.close();
+        }
+        return out;
     }
 
     /**

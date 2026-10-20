@@ -213,7 +213,16 @@ or the plan changes.
   median note length), "," sustains, ";" rests, 8 units per
   avartanam grouped 4 | 2 | 2 closing with "||", octave dots
   above/below letters, sub-unit runs written together ("RG").
-  No lyrics line (the app has no lyrics).
+  No lyrics line (the app has no lyrics). The menu also offers
+  "Export notation (PDF, all tracks)": one A4 PDF document with a
+  titled section per track (project title + convention note at the
+  top, then "Track N: name", its Sa/swaras/unit meta line, and its
+  avartanam lines, paginated). Tracks without stored notation are
+  notated on the fly during the export and the result is stored
+  (their tonic chips/karaoke appear too); a track where no tonic
+  is detected gets a titled section saying so. Rendered with
+  android.graphics.pdf.PdfDocument from the same section data
+  (tonic.export_section); shared as application/pdf.
 - Tonic: long-term average spectrum (the drone is in every frame),
   harmonic-series scoring of prominent peaks in 50–300 Hz with a
   subharmonic preference (Pa is Sa's 3rd harmonic but Sa is not a
