@@ -190,13 +190,15 @@ or the plan changes.
   entry points in `android_bridge.py`.
 
 ### Tonic and notation
-- **Notation** button (next to Diagnose, same enable gating): detects the
-  piece's tonic (Sa) and transcribes the predominant melody as swara
-  note events in a scrollable dialog — Sa in Hz with its concert note
-  and cents deviation, the distinct swarams present (gamaka-oscillated
-  ones starred), then the note-event text in 4 s bars with durations
-  and rests. Multitrack projects are notated from the mixdown, picked
-  files from the current render or pristine input.
+- **Notation** button (next to Diagnose, same enable gating): detects
+  the piece's tonic (Sa) and transcribes the predominant melody.
+  The tonic shows as a chip beside the project title (e.g. "Sa G#
+  +30c"); during playback a large karaoke readout above the waveform
+  lanes shows the swara sounding at the playhead (blank during
+  rests), refreshed by the 200 ms position updater. Multitrack
+  projects are notated from the mixdown, picked files from the
+  current render or pristine input. Any track edit or project
+  change clears the readouts (the mix they describe has moved).
 - Tonic: long-term average spectrum (the drone is in every frame),
   harmonic-series scoring of prominent peaks in 50–300 Hz with a
   subharmonic preference (Pa is Sa's 3rd harmonic but Sa is not a

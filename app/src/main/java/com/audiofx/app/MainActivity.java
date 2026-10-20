@@ -81,6 +81,11 @@ public class MainActivity extends Activity {
     private static final int REQ_RECORD_AUDIO = 2001;
 
     private TextView tvProjectName;
+    private TextView tvTonic;
+    private TextView tvSwara;
+    /** Karaoke notation state (feature/tonic): events of the last
+     * notation run, on the mix timeline; null until Notation runs. */
+    private JSONArray notationEvents;
     private ImageButton btnMenu;
     private AdView adView;
     private PremiumBilling premiumBilling;
@@ -270,6 +275,7 @@ public class MainActivity extends Activity {
                         lane.wave.setPlaybackPosition(pos);
                     }
                     tvTimeCur.setText(fmtTime(ms / 1000.0));
+                    updateSwaraLabel(ms / 1000.0);
                 } catch (Exception ignored) {
                 }
                 mainHandler.postDelayed(this, 200);
@@ -284,6 +290,57 @@ public class MainActivity extends Activity {
 
     private void stopPositionUpdates() {
         mainHandler.removeCallbacks(positionUpdater);
+        if (tvSwara != null) {
+            tvSwara.setText("");
+        }
+    }
+
+    /** Karaoke readout: the swara event covering time t (seconds on
+     * the mix timeline), blank during rests and outside events. */
+    private void updateSwaraLabel(double t) {
+        if (tvSwara == null || notationEvents == null) {
+            return;
+        }
+        String sym = "";
+        try {
+            int lo = 0;
+            int hi = notationEvents.length() - 1;
+            int found = -1;
+            while (lo <= hi) {
+                int mid = (lo + hi) / 2;
+                JSONObject ev = notationEvents.getJSONObject(mid);
+                if (t < ev.getDouble("start")) {
+                    hi = mid - 1;
+                } else if (t > ev.getDouble("start") + ev.getDouble("dur")) {
+                    lo = mid + 1;
+                } else {
+                    found = mid;
+                    break;
+                }
+            }
+            if (found >= 0) {
+                String s = notationEvents.getJSONObject(found)
+                        .optString("sym", "");
+                sym = "-".equals(s) ? "" : s;
+            }
+        } catch (Exception ignored) {
+        }
+        if (!sym.equals(tvSwara.getText().toString())) {
+            tvSwara.setText(sym);
+        }
+    }
+
+    /** Drop the notation readouts (project or mix changed). */
+    private void clearNotation() {
+        notationEvents = null;
+        if (tvTonic != null) {
+            tvTonic.setVisibility(View.GONE);
+            tvTonic.setText("");
+        }
+        if (tvSwara != null) {
+            tvSwara.setVisibility(View.GONE);
+            tvSwara.setText("");
+        }
     }
 
     // In-memory session state for Undo.
@@ -387,6 +444,8 @@ public class MainActivity extends Activity {
         setContentView(R.layout.activity_main);
 
         tvProjectName = findViewById(R.id.tv_project_name);
+        tvTonic = findViewById(R.id.tv_tonic);
+        tvSwara = findViewById(R.id.tv_swara);
         btnMenu = findViewById(R.id.btn_menu);
         btnMenu.setOnClickListener(v -> showMainMenu());
         btnOpen = findViewById(R.id.btn_open);
@@ -1072,6 +1131,7 @@ public class MainActivity extends Activity {
         releasePlayer();
         btnStop.setEnabled(false);
         currentOutputPath = null;
+        clearNotation();
         cachedDiagJson = null;
         cachedDiagPath = null;
         diagLastPath = null;
@@ -1568,7 +1628,7 @@ public class MainActivity extends Activity {
                         .callAttr("tonic_file", notationPath).toString();
                 runOnUiThread(() -> {
                     setBusy(false);
-                    showNotationDialog(infoJson);
+                    applyNotation(infoJson);
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
@@ -1579,56 +1639,26 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    /** Scrollable plain-text rendering of the notation result. */
-    private void showNotationDialog(String infoJson) {
-        String text;
+    /** Store a notation result: tonic chip beside the project name,
+     * karaoke swara label above the lanes. */
+    private void applyNotation(String infoJson) {
         try {
             JSONObject info = new JSONObject(infoJson);
-            if (!info.has("sa_hz")) {
+            if (!info.has("sa_hz") || !info.has("events")) {
                 setStatus("No tonic found in this audio.");
                 return;
             }
-            StringBuilder sb = new StringBuilder();
-            sb.append("Sa = ").append(info.getDouble("sa_hz")).append(" Hz (")
-                    .append(info.optString("note", "?")).append(" ")
-                    .append(info.optInt("cents", 0) >= 0 ? "+" : "")
-                    .append(info.optInt("cents", 0)).append(" cents)\n");
-            JSONArray swaras = info.optJSONArray("swaras");
-            if (swaras != null) {
-                sb.append("Swarams: ");
-                for (int i = 0; i < swaras.length(); i++) {
-                    JSONObject s = swaras.getJSONObject(i);
-                    if (i > 0) {
-                        sb.append(" ");
-                    }
-                    sb.append(s.optString("name", "?"));
-                    if (!s.optBoolean("fixed", true)) {
-                        sb.append("*");
-                    }
-                }
-                sb.append("  (* = gamaka-oscillated)\n");
-            }
-            sb.append("\n").append(info.optString("text", ""));
-            text = sb.toString();
+            notationEvents = info.getJSONArray("events");
+            int cents = info.optInt("cents", 0);
+            tvTonic.setText("Sa " + info.optString("note", "?") + " "
+                    + (cents >= 0 ? "+" : "") + cents + "c");
+            tvTonic.setVisibility(View.VISIBLE);
+            tvSwara.setVisibility(View.VISIBLE);
+            tvSwara.setText("");
+            setStatus("Notation ready — play to follow the swarams.");
         } catch (Exception e) {
             setStatus("Notation failed: bad report.");
-            return;
         }
-        final float dp = getResources().getDisplayMetrics().density;
-        TextView tv = new TextView(this);
-        tv.setText(text);
-        tv.setTextSize(13);
-        tv.setTypeface(android.graphics.Typeface.MONOSPACE);
-        tv.setTextColor(getColor(R.color.sl_txt));
-        int pad = (int) (16 * dp);
-        tv.setPadding(pad, pad, pad, pad);
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(tv);
-        new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
-                .setTitle("Notation")
-                .setView(scroll)
-                .setNegativeButton("Close", null)
-                .show();
     }
 
     /** The mechanic's report card (Option A): score hero, grouped findings,
@@ -3753,6 +3783,7 @@ public class MainActivity extends Activity {
             return;
         }
         // The track's audio changed: any diagnosis of it is stale.
+        clearNotation();
         cachedDiagJson = null;
         cachedDiagPath = null;
         diagLastPath = null;

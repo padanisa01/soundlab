@@ -79,6 +79,15 @@
                     android:textColor="@color/sl_txt"
                     android:textSize="15sp"
                     android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tv_tonic"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:textColor="@color/sl_mut"
+                    android:textSize="13sp"
+                    android:visibility="gone" />
             </LinearLayout>
 
             <!-- Track actions: open / save / share -->
@@ -198,6 +207,19 @@
                     android:textColor="@color/sl_txt"
                     android:textSize="16sp" />
             </LinearLayout>
+
+            <!-- Karaoke swara readout: the swara sounding at the
+                 playhead, refreshed by the position updater. -->
+            <TextView
+                android:id="@+id/tv_swara"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:padding="4dp"
+                android:textColor="@color/sl_txt"
+                android:textSize="30sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
 
             <!-- Per-track waveform lanes, built programmatically -->
             <LinearLayout
