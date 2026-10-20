@@ -1570,7 +1570,10 @@ public class MainActivity extends Activity {
             }
             diagTrackId = trackId;
             diagLastPath = diagPath;
-            runDiagnosis(diagPath, laneWave(trackId));
+            // runDiagnosis touches views; it must run on the UI thread
+            // (it starts its own worker for the Python call).
+            final WaveformView wave = laneWave(trackId);
+            runOnUiThread(() -> runDiagnosis(diagPath, wave));
         }).start();
     }
 
