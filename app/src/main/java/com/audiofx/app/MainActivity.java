@@ -338,8 +338,11 @@ public class MainActivity extends Activity {
     /** The notation key for the current context: the selected track
      * inside a project, the legacy key for picked files. */
     private String notationKey() {
-        return currentEntryId != null && selectedTrackId != null
-                ? selectedTrackId : LEGACY_NOTATION_KEY;
+        if (currentEntryId != null && selectedTrackId != null) {
+            return selectedTrackId;
+        }
+        return inputPath != null ? "file:" + inputPath
+                : LEGACY_NOTATION_KEY;
     }
 
     /** Tonic chip + karaoke label follow the selected track. */
@@ -359,20 +362,6 @@ public class MainActivity extends Activity {
             tvSwara.setVisibility(View.GONE);
             tvSwara.setText("");
         }
-    }
-
-    /** Drop ALL notation state (project changed). */
-    private void clearNotation() {
-        notationByTrack.clear();
-        tonicByTrack.clear();
-        refreshNotationUi();
-    }
-
-    /** Drop one track's notation (its content changed). */
-    private void clearNotationForTrack(String trackId) {
-        notationByTrack.remove(trackId);
-        tonicByTrack.remove(trackId);
-        refreshNotationUi();
     }
 
     // In-memory session state for Undo.
@@ -1163,7 +1152,6 @@ public class MainActivity extends Activity {
         releasePlayer();
         btnStop.setEnabled(false);
         currentOutputPath = null;
-        clearNotation();
         cachedDiagJson = null;
         cachedDiagPath = null;
         diagLastPath = null;
@@ -1642,7 +1630,7 @@ public class MainActivity extends Activity {
             setStatus("Open or record audio first.");
             return;
         }
-        runNotation(path, LEGACY_NOTATION_KEY, null, null);
+        runNotation(path, notationKey(), null, null);
     }
 
     private void notateSelectedTrack(final String entryId) {
@@ -3844,7 +3832,6 @@ public class MainActivity extends Activity {
             return;
         }
         // The track's audio changed: any diagnosis of it is stale.
-        clearNotationForTrack(trackId);
         cachedDiagJson = null;
         cachedDiagPath = null;
         diagLastPath = null;

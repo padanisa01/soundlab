@@ -201,8 +201,9 @@ or the plan changes.
   playback a large karaoke readout above the waveform lanes shows
   the swara sounding at the playhead (blank during rests),
   refreshed by the 200 ms position updater. Results are kept per
-  track and follow track selection; editing a track clears only
-  that track's notation, switching projects clears all. Picked
+  track and follow track selection. A track's notation PERSISTS —
+  across edits, new recordings, and project re-opens — until
+  Notation is run again on that track (which replaces it). Picked
   files (no project) notate the current render or pristine input.
 - Tonic: long-term average spectrum (the drone is in every frame),
   harmonic-series scoring of prominent peaks in 50–300 Hz with a
