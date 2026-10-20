@@ -274,7 +274,7 @@ def _check_noise_floor(s, sr, ctx):
         return _finding(
             "noise_floor", "warn", "High noise floor",
             "Background hiss sits at %.0f dBFS." % floor_db,
-            _fix("denoise", {"strength": 0.5}, "Reduce hiss"),
+            _fix("denoise", {"strength": 2.0}, "Reduce hiss"),
             "Closer to the mic, quieter room, soft furnishings -- and "
             "enable noise suppression before you hit record.")
     return _finding("noise_floor", "info", "Noise floor",
@@ -562,7 +562,7 @@ TUNE_UP_PROFILES = {
         "params": {
             "loudness": {"target_lufs": -16.0},
             "deess": {"reduction_db": 8.0},
-            "denoise": {"strength": 0.5},
+            "denoise": {"strength": 2.0},
         },
     },
     "singing": {
@@ -576,7 +576,7 @@ TUNE_UP_PROFILES = {
         "params": {
             "loudness": {"target_lufs": -14.0},
             "deess": {"reduction_db": 4.0},
-            "denoise": {"strength": 0.35},
+            "denoise": {"strength": 2.0},
         },
     },
     "music": {
@@ -587,7 +587,7 @@ TUNE_UP_PROFILES = {
                   "loudness", "eq_balance", "fade_ends"),
         "params": {
             "loudness": {"target_lufs": -14.0},
-            "denoise": {"strength": 0.5},
+            "denoise": {"strength": 2.0},
         },
     },
 }

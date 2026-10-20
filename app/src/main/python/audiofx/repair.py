@@ -304,7 +304,7 @@ DENOISE_MIN_GAP_SEC = 1.5
 DENOISE_QUIET_FRAC = 0.10
 #: A candidate counts as pure noise only within this factor of the
 #: quietest frame's level (a flat floor, not a slope of music).
-DENOISE_QUIET_RATIO = 3.0
+DENOISE_QUIET_RATIO = 4.0
 #: A bin is tonal when its noise level exceeds the smoothed broadband
 #: floor by this many dB.
 DENOISE_TONE_DB = 8.0
@@ -312,6 +312,14 @@ DENOISE_TONE_DB = 8.0
 #: the file's 90th-percentile frame level. Without this, a uniformly
 #: loud signal (a held note) would profile ITSELF as the noise.
 DENOISE_GAP_DEPTH_DB = 8.0
+#: Extra gain applied to frames verified as pure noise (0-1). The kept
+#: noise frames contain no content by construction, so they can be
+#: attenuated much harder than the spectral-subtraction strength
+#: allows; the blend factor ramps to unity for content frames.
+DENOISE_GAP_GAIN = 0.10
+#: Frame-blend width: frames up to this multiple of the noise ceiling
+#: ramp linearly from the gap gain to full (unattenuated).
+DENOISE_GAP_BLEND = 2.0
 #: Fundamental search range for a tanpura-style drone, Hz.
 DENOISE_DRONE_LO_HZ = 55.0
 DENOISE_DRONE_HI_HZ = 250.0
@@ -459,6 +467,22 @@ def denoise(samples, sample_rate, strength=0.5, floor=0.15,
         clean_mag = _np.maximum(mag - sub, floor * mag)
         gain = clean_mag / _np.maximum(mag, 1e-12)
         gain = _np.where(protected[_np.newaxis, :], 1.0, gain)
+        # Frame gating: verified pure-noise frames hold no content, so
+        # attenuate them hard on top of the subtraction; the factor
+        # ramps with frame level. The gains are max-dilated (a content
+        # frame's gain inherits outward) because ISTFT reconstructs
+        # each sample mostly from its strongest-window neighbour:
+        # a quiet-classified neighbour must not rebuild content at
+        # reduced gain. Protected drone bins are exempt.
+        ceiling = DENOISE_QUIET_RATIO * ref
+        t = _np.clip((levels - ceiling)
+                     / max(ceiling * (DENOISE_GAP_BLEND - 1.0), 1e-12),
+                     0.0, 1.0)
+        fg = DENOISE_GAP_GAIN + (1.0 - DENOISE_GAP_GAIN) * t
+        fg = _np.pad(fg, (1, 3), mode="edge")
+        fg = _np.maximum.reduce([fg[i : i + n_frames] for i in range(5)])
+        gain = gain * _np.where(protected[_np.newaxis, :], 1.0,
+                                 fg[:, _np.newaxis])
         return spectra * gain
 
     return _padded_stft_process(x, n_fft, hop, apply)
