@@ -1811,18 +1811,23 @@ public class MainActivity extends Activity {
         lblLp.topMargin = (int) (14 * dp);
         root.addView(targetLbl, lblLp);
 
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
+        // One full-width field per row: a shared horizontal row
+        // squeezed the cents box to a sliver on narrow screens.
+        TextView noteLbl = new TextView(this);
+        noteLbl.setText("Note");
+        noteLbl.setTextColor(getColor(R.color.sl_mut));
+        noteLbl.setTextSize(12.5f);
+        LinearLayout.LayoutParams noteLblLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
-        rowLp.topMargin = (int) (8 * dp);
-        root.addView(row, rowLp);
+        noteLblLp.topMargin = (int) (12 * dp);
+        root.addView(noteLbl, noteLblLp);
 
         final Spinner noteSp = new Spinner(this);
         ArrayAdapter<String> noteAd = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_dropdown_item, PITCH_NOTES);
+                android.R.layout.simple_spinner_item, PITCH_NOTES);
+        noteAd.setDropDownViewResource(
+                android.R.layout.simple_spinner_dropdown_item);
         noteSp.setAdapter(noteAd);
         int noteIdx = 0;
         for (int i = 0; i < PITCH_NOTES.length; i++) {
@@ -1831,29 +1836,55 @@ public class MainActivity extends Activity {
             }
         }
         noteSp.setSelection(noteIdx);
-        row.addView(noteSp, new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        noteSp.setMinimumHeight((int) (52 * dp));
+        root.addView(noteSp, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        TextView octLbl = new TextView(this);
+        octLbl.setText("Octave");
+        octLbl.setTextColor(getColor(R.color.sl_mut));
+        octLbl.setTextSize(12.5f);
+        LinearLayout.LayoutParams octLblLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        octLblLp.topMargin = (int) (10 * dp);
+        root.addView(octLbl, octLblLp);
 
         final Spinner octSp = new Spinner(this);
         String[] octs = {"1", "2", "3", "4", "5", "6"};
-        octSp.setAdapter(new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_dropdown_item, octs));
+        ArrayAdapter<String> octAd = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, octs);
+        octAd.setDropDownViewResource(
+                android.R.layout.simple_spinner_dropdown_item);
+        octSp.setAdapter(octAd);
         octSp.setSelection(Math.max(0, Math.min(octs.length - 1, curOct - 1)));
-        LinearLayout.LayoutParams octLp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        octLp.leftMargin = (int) (8 * dp);
-        row.addView(octSp, octLp);
+        octSp.setMinimumHeight((int) (52 * dp));
+        root.addView(octSp, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        TextView centsLbl = new TextView(this);
+        centsLbl.setText("Cents (-99 to 99)");
+        centsLbl.setTextColor(getColor(R.color.sl_mut));
+        centsLbl.setTextSize(12.5f);
+        LinearLayout.LayoutParams centsLblLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        centsLblLp.topMargin = (int) (10 * dp);
+        root.addView(centsLbl, centsLblLp);
 
         final EditText centsEt = new EditText(this);
         centsEt.setInputType(InputType.TYPE_CLASS_NUMBER
                 | InputType.TYPE_NUMBER_FLAG_SIGNED);
         centsEt.setText(String.valueOf(info.optInt("cents", 0)));
-        centsEt.setHint("cents");
+        centsEt.setTextSize(17f);
+        centsEt.setSingleLine(true);
+        centsEt.setMinHeight((int) (52 * dp));
         centsEt.selectAll();
-        LinearLayout.LayoutParams centsLp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        centsLp.leftMargin = (int) (8 * dp);
-        row.addView(centsEt, centsLp);
+        root.addView(centsEt, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
 
         final AlertDialog dialog = new AlertDialog.Builder(
                 this, R.style.Theme_SoundLab_Dialog)
