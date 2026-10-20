@@ -11,6 +11,7 @@ import wave
 
 from . import diagnose as _diagnose
 from . import repair as _repair
+from . import tonic as _tonic
 from .effects import Echo, Reverb, Warmth
 
 try:
@@ -587,6 +588,17 @@ def diagnose_file(input_wav_path):
     samples, sample_rate = read_wav_mono(input_wav_path)
     findings = _diagnose.analyze(samples, sample_rate)
     return json.dumps(findings)
+
+
+def tonic_file(input_wav_path):
+    """Tonic + swara notation for a WAV file. Returns JSON (see
+    tonic.notate_song). Runs on a background thread from Java; a
+    multi-minute file takes on the order of a minute."""
+    if not os.path.isfile(input_wav_path):
+        raise ValueError("input file not found: %s" % input_wav_path)
+    samples, sample_rate = read_wav_mono(input_wav_path)
+    info = _tonic.notate_song(samples, sample_rate)
+    return json.dumps(info if info is not None else {})
 
 
 def list_tune_up_profiles():

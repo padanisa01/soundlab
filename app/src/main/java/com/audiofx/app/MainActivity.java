@@ -88,6 +88,7 @@ public class MainActivity extends Activity {
     private Button btnSave2;
     private Button btnShare;
     private Button btnDiagnose;
+    private Button btnNotation;
     private TextView toastView;
     private final Runnable hideToast = () -> {
         toastView.animate().alpha(0f).setDuration(250)
@@ -392,10 +393,12 @@ public class MainActivity extends Activity {
         btnSave2 = findViewById(R.id.btn_save2);
         btnShare = findViewById(R.id.btn_share);
         btnDiagnose = findViewById(R.id.btn_diagnose);
+        btnNotation = findViewById(R.id.btn_notation);
         btnOpen.setOnClickListener(v -> pickAudio());
         btnSave2.setOnClickListener(v -> onSaveClicked());
         btnShare.setOnClickListener(v -> shareAudio());
         btnDiagnose.setOnClickListener(v -> onDiagnoseClicked());
+        btnNotation.setOnClickListener(v -> onNotationClicked());
         updateTrackActions();
         btnNormalize = findViewById(R.id.btn_normalize);
         btnNormalize.setOnClickListener(v -> normalizeAudio());
@@ -597,6 +600,8 @@ public class MainActivity extends Activity {
         btnShare.setAlpha(hasTrack ? 1f : 0.4f);
         btnDiagnose.setEnabled(hasTrack);
         btnDiagnose.setAlpha(hasTrack ? 1f : 0.4f);
+        btnNotation.setEnabled(hasTrack);
+        btnNotation.setAlpha(hasTrack ? 1f : 0.4f);
     }
 
     /** Project status bar: entry/file name, or an untitled placeholder. */
@@ -1526,6 +1531,104 @@ public class MainActivity extends Activity {
                 });
             }
         }).start();
+    }
+
+    /** Tonic + swara notation: detects the piece's Sa and transcribes the
+     * predominant melody as note events. Notation runs on the mixdown for
+     * multitrack projects (the piece), or the current render / pristine
+     * input for legacy picked files. */
+    private void onNotationClicked() {
+        String path = null;
+        if (currentEntryId != null) {
+            try {
+                path = ensureMixFile();
+            } catch (Exception e) {
+                setStatus("Notation failed: " + e.getMessage());
+                return;
+            }
+        } else {
+            path = (currentOutputPath != null
+                    && new File(currentOutputPath).exists()) ? currentOutputPath
+                            : inputPath;
+        }
+        if (path == null || !new File(path).exists()) {
+            setStatus("Open or record audio first.");
+            return;
+        }
+        final String notationPath = path;
+        setBusy(true);
+        setStatus("Notating — detecting Sa and tracing the melody...");
+        new Thread(() -> {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                final String infoJson = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("tonic_file", notationPath).toString();
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    showNotationDialog(infoJson);
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    setStatus("Notation failed: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    /** Scrollable plain-text rendering of the notation result. */
+    private void showNotationDialog(String infoJson) {
+        String text;
+        try {
+            JSONObject info = new JSONObject(infoJson);
+            if (!info.has("sa_hz")) {
+                setStatus("No tonic found in this audio.");
+                return;
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append("Sa = ").append(info.getDouble("sa_hz")).append(" Hz (")
+                    .append(info.optString("note", "?")).append(" ")
+                    .append(info.optInt("cents", 0) >= 0 ? "+" : "")
+                    .append(info.optInt("cents", 0)).append(" cents)\n");
+            JSONArray swaras = info.optJSONArray("swaras");
+            if (swaras != null) {
+                sb.append("Swarams: ");
+                for (int i = 0; i < swaras.length(); i++) {
+                    JSONObject s = swaras.getJSONObject(i);
+                    if (i > 0) {
+                        sb.append(" ");
+                    }
+                    sb.append(s.optString("name", "?"));
+                    if (!s.optBoolean("fixed", true)) {
+                        sb.append("*");
+                    }
+                }
+                sb.append("  (* = gamaka-oscillated)\n");
+            }
+            sb.append("\n").append(info.optString("text", ""));
+            text = sb.toString();
+        } catch (Exception e) {
+            setStatus("Notation failed: bad report.");
+            return;
+        }
+        final float dp = getResources().getDisplayMetrics().density;
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextSize(13);
+        tv.setTypeface(android.graphics.Typeface.MONOSPACE);
+        tv.setTextColor(getColor(R.color.sl_txt));
+        int pad = (int) (16 * dp);
+        tv.setPadding(pad, pad, pad, pad);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(tv);
+        new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+                .setTitle("Notation")
+                .setView(scroll)
+                .setNegativeButton("Close", null)
+                .show();
     }
 
     /** The mechanic's report card (Option A): score hero, grouped findings,

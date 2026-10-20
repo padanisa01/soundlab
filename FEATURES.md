@@ -189,6 +189,28 @@ or the plan changes.
   dispatcher; `diagnose_file` / `tune_up_build` / `tune_up_converge`
   entry points in `android_bridge.py`.
 
+### Tonic and notation
+- **Notation** button (next to Diagnose, same enable gating): detects the
+  piece's tonic (Sa) and transcribes the predominant melody as swara
+  note events in a scrollable dialog — Sa in Hz with its concert note
+  and cents deviation, the distinct swarams present (gamaka-oscillated
+  ones starred), then the note-event text in 4 s bars with durations
+  and rests. Multitrack projects are notated from the mixdown, picked
+  files from the current render or pristine input.
+- Tonic: long-term average spectrum (the drone is in every frame),
+  harmonic-series scoring of prominent peaks in 50–300 Hz with a
+  subharmonic preference (Pa is Sa's 3rd harmonic but Sa is not a
+  harmonic of Pa) and a fine cents refinement; `None` (reported as
+  "No tonic found") when no candidate qualifies.
+- Melody: salience-function tracker (spectral peaks, harmonic
+  summation on a 10-cent grid, fundamental-presence veto against
+  subharmonic errors, peak-snapped f0), median-smoothed, quantized to
+  the nearest swara relative to Sa and segmented into note events.
+  Each histogram peak also gets a width: narrow = fixed note,
+  wide = kampita/gamaka oscillation.
+- Python: `audiofx/tonic.py` (`detect_tonic`, `notate_song`),
+  `tonic_file` in `android_bridge.py`.
+
 ### Library of recordings
 - Every recording becomes a durable project in `filesDir/library/`,
   holding one or more tracks: each track has an immutable pristine WAV
