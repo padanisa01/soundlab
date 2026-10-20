@@ -3021,11 +3021,6 @@ public class MainActivity extends Activity {
         if (isRecordingSession()) {
             return; // silent: the record target stays put
         }
-        if (mTracks.size() <= 1) {
-            Toast.makeText(this, "Cannot delete the last track",
-                    Toast.LENGTH_SHORT).show();
-            return;
-        }
         if (track.locked) {
             Toast.makeText(this, "Track locked — unlock to delete",
                     Toast.LENGTH_SHORT).show();
@@ -3062,12 +3057,22 @@ public class MainActivity extends Activity {
                 if (trackId.equals(selectedTrackId)) {
                     selectedTrackId = null;
                 }
-                ensureTracksForEntry(entryId);
+                // Reload without ensureTracks: deleting the last track
+                // must leave zero tracks, not auto-recreate one.
+                try {
+                    mTracks = libraryDb.listTracks(entryId);
+                } catch (Exception ignored) {
+                    mTracks = new ArrayList<>();
+                }
+                if (selectedTrackId == null && !mTracks.isEmpty()) {
+                    selectedTrackId = mTracks.get(0).id;
+                }
                 refreshLanes();
                 updateProjectDuration();
                 mixDirty = true;
                 setBusy(false);
-                setStatus("Track deleted.");
+                setStatus(mTracks.isEmpty() ? "Track deleted."
+                        : "Track deleted.");
             });
         }).start();
     }
