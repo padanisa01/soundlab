@@ -257,9 +257,11 @@ or the plan changes.
   field, prefilled with the current tonic. Convert applies a
   `pitch_shift` op (+/-12 semitones, kept in the track's op chain,
   so it is undoable and flows into renders and the mix) with the
-  lane waveform progress animation. The DSP is a duration-
-  preserving phase vocoder (audiofx/pitch.py): time-stretch by the
-  shift ratio, then resample back to the original length.
+  lane waveform progress animation. The DSP (audiofx/pitch.py)
+  preserves duration AND tempo: a WSOLA time-stretch by the shift
+  ratio (waveform-similarity overlap-add, so attacks/onsets stay
+  sharp and on time), then a resample back to the original length.
+  (A phase-vocoder version smeared transients and was replaced.)
 
 ### Per-track volume
 

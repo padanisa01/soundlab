@@ -1,4 +1,9 @@
-"""Tests for duration-preserving pitch shift (audiofx.pitch)."""
+"""Tests for duration-preserving pitch shift (audiofx.pitch).
+
+Includes the transient-preservation regression: a phase-vocoder
+version smeared attacks (click concentration 0.65); WSOLA must
+keep onsets sharp and on time.
+"""
 import os
 import sys
 import unittest
@@ -47,6 +52,36 @@ class TestPitchShift(unittest.TestCase):
     def test_range_guard(self):
         with self.assertRaises(ValueError):
             pitch.pitch_shift(_sine(220.0), SR, 13.0)
+
+
+class TestTransientPreservation(unittest.TestCase):
+    """Clicks must stay sharp and at the same times after a shift."""
+
+    def _clicks(self, sr=44100):
+        n = sr * 4
+        t = np.arange(n) / sr
+        x = 0.05 * np.sin(2 * np.pi * 220 * t)
+        for ct in (0.5, 1.5, 2.5, 3.5):
+            s = int(ct * sr)
+            env = np.hanning(int(0.03 * sr))
+            seg = 0.8 * np.sin(2 * np.pi * 200
+                               * np.arange(len(env)) / sr) * env
+            x[s:s + len(env)] += seg
+        return x, sr
+
+    def test_clicks_stay_sharp_and_on_time(self):
+        x, sr = self._clicks()
+        y = np.asarray(pitch.pitch_shift(x, sr, 4.0))
+        self.assertEqual(len(y), len(x))
+        for ct in (0.5, 1.5, 2.5, 3.5):
+            c = int(ct * sr)
+            near = float((y[c - 882:c + 882] ** 2).sum())
+            wide = float((y[c - 5292:c + 5292] ** 2).sum())
+            self.assertGreater(near / wide, 0.80)
+            # The envelope peak within +-60 ms sits at the click.
+            seg = np.abs(y[c - 2646:c + 2646])
+            peak_at = (int(np.argmax(seg)) - 2646) / sr
+            self.assertLess(abs(peak_at), 0.03)
 
 
 if __name__ == "__main__":
