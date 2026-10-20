@@ -52,6 +52,7 @@ public class LibraryActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_library);
+        Analytics.libraryViewed(this);
         libraryDb = new LibraryDb(this);
         subtitleView = findViewById(R.id.library_subtitle);
         warningView = findViewById(R.id.library_warning);

@@ -187,6 +187,8 @@ public class MainActivity extends Activity {
      * was open); stopRecording finalizes its metadata instead of
      * creating it. */
     private boolean pendingPreCreatedEntry;
+    /** Wall-clock ms when the current recording started (for analytics). */
+    private long recordStartMs;
     /** True when the active recording is the live-FX monitor. */
     private boolean recordingLive;
     /** Plays the existing mix back while a take is recorded (overdub). */
@@ -524,6 +526,7 @@ public class MainActivity extends Activity {
         restoreSaveFolderUri(prefs);
         updateProjectName();
         refreshHistoryPanel();
+        Analytics.appOpen(this);
 
         // Remote Config: ads + paid-feature gates. Defaults are
         // fail-closed (ads on, paid hidden); the fetch may flip them.
@@ -1387,6 +1390,16 @@ public class MainActivity extends Activity {
             return;
         }
         final String trackId = track.id;
+        // Analytics: log the applied effect (with reverb preset for fx).
+        String reverbPreset = null;
+        if ("fx".equals(opType) && paramsJson != null) {
+            try {
+                reverbPreset = new JSONObject(paramsJson)
+                        .optString("reverb_preset", null);
+            } catch (Exception ignored) {
+            }
+        }
+        Analytics.effectApplied(this, opType, reverbPreset);
         // Capture the lane's view now: a mid-op selection change must not
         // misroute progress onto another lane.
         final WaveformView opWave = laneWave(trackId);
@@ -1463,6 +1476,7 @@ public class MainActivity extends Activity {
      * the selected track's freshly rendered file; picked files diagnose
      * the current output as before. */
     private void onDiagnoseClicked() {
+        Analytics.diagnoseClicked(this);
         final String entryId = currentEntryId;
         if (entryId != null) {
             diagnoseSelectedTrack(entryId);
@@ -2526,6 +2540,7 @@ public class MainActivity extends Activity {
                         "^Tune Up \\([^)]*\\): ", "");
                 runOnUiThread(() -> {
                     hideTuneUpOverlay();
+                    Analytics.tuneUpCompleted(this, currentTuneUpProfile());
                     if (preRendered != null) {
                         applyTuneUpOp(params.toString(), summary,
                                 "Tuning up...",
@@ -3070,6 +3085,7 @@ public class MainActivity extends Activity {
                     createNumberedTrack(currentEntryId);
             selectedTrackId = created.id;
             refreshLanes();
+            Analytics.trackAdded(this);
             setStatus("Track added.");
         } catch (Exception e) {
             setStatus("Could not add track: " + e.getMessage());
@@ -3226,6 +3242,7 @@ public class MainActivity extends Activity {
                 updateProjectDuration();
                 mixDirty = true;
                 setBusy(false);
+                Analytics.trackDeleted(this);
                 setStatus(mTracks.isEmpty() ? "Track deleted."
                         : "Track deleted.");
             });
@@ -3975,6 +3992,8 @@ public class MainActivity extends Activity {
                 + new SimpleDateFormat("yyyy-MM-dd HH-mm", Locale.US).format(new Date())
                 + ".wav";
         enterRecordingUi(false);
+        Analytics.recordStart(this);
+        recordStartMs = System.currentTimeMillis();
         StringBuilder fx = new StringBuilder();
         if (recorder.agcActive()) {
             fx.append(" + AGC");
@@ -4019,6 +4038,8 @@ public class MainActivity extends Activity {
                 + new SimpleDateFormat("yyyy-MM-dd HH-mm", Locale.US).format(new Date())
                 + ".wav";
         enterRecordingUi(true);
+        Analytics.recordStart(this);
+        recordStartMs = System.currentTimeMillis();
         String fxDesc = "Warmth " + seekWarmth.getProgress() + "%, Reverb "
                 + reverbDisplayName(reverbPreset) + ", Echo " + seekEcho.getProgress() + "%";
         StringBuilder fx = new StringBuilder();
@@ -4216,6 +4237,7 @@ public class MainActivity extends Activity {
         final boolean newProject = currentEntryId == null;
         final String entryId;
         final String trackId;
+        boolean wasPunch = false;
         try {
             if (newProject) {
                 // No project open: create one first (the existing
@@ -4241,7 +4263,8 @@ public class MainActivity extends Activity {
                     throw new Exception("no empty track available");
                 }
                 trackId = target.id;
-                if (pendingPunchStartSec != null) {
+                wasPunch = pendingPunchStartSec != null;
+                if (wasPunch) {
                     // Punch-in: the take becomes a durable file referenced
                     // by the op; the op splices it into the track at the
                     // marker. Undoable like any other op.
@@ -4324,6 +4347,9 @@ public class MainActivity extends Activity {
         }
         refreshLanes();
         onTrackContentChanged(trackId);
+        double recordDurSec = (System.currentTimeMillis() - recordStartMs)
+                / 1000.0;
+        Analytics.recordStop(this, recordDurSec, wasPunch);
         setStatus(switchAutoNorm.isChecked()
                 ? "Take saved and normalized."
                 : "Take saved.");
@@ -5694,6 +5720,7 @@ public class MainActivity extends Activity {
             send.putExtra(Intent.EXTRA_STREAM, uri);
             send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             setStatus("Sharing " + shareMp3Result.getName() + ".");
+            Analytics.shareCompleted(this);
             startActivity(Intent.createChooser(send, "Share audio"));
         } catch (Exception e) {
             setStatus("Share failed: " + e.getMessage());

@@ -122,6 +122,7 @@ public class PremiumBilling implements PurchasesUpdatedListener {
             if (p.getProducts().contains(PRODUCT_ID)
                     && p.getPurchaseState() == Purchase.PurchaseState.PURCHASED) {
                 grantPremium(p);
+                Analytics.premiumPurchased(activity);
             }
         }
     }
