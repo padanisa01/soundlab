@@ -2806,6 +2806,25 @@ public class MainActivity extends Activity {
         header.addView(muteBtn, muteLp);
         lane.muteBtn = muteBtn;
 
+        Button deleteBtn = new Button(this);
+        deleteBtn.setTextSize(14f);
+        deleteBtn.setText("\uD83D\uDDD1"); // wastebasket
+        deleteBtn.setBackgroundResource(R.drawable.bg_zoom_btn);
+        deleteBtn.setMinHeight(0);
+        deleteBtn.setMinimumHeight(0);
+        deleteBtn.setPadding(0, 0, 0, 0);
+        LinearLayout.LayoutParams delLp = new LinearLayout.LayoutParams(
+                (int) (28 * density), (int) (28 * density));
+        delLp.leftMargin = (int) (6 * density);
+        deleteBtn.setOnClickListener(v -> {
+            LibraryDb.Track t = getTrackById(track.id);
+            if (t != null) {
+                confirmDeleteTrack(t);
+            }
+        });
+        header.addView(deleteBtn, delLp);
+        lane.deleteBtn = deleteBtn;
+
         FrameLayout frame = new FrameLayout(this);
         LinearLayout.LayoutParams frameLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, (int) (110 * density));
@@ -2995,6 +3014,62 @@ public class MainActivity extends Activity {
                         setStatus("Rename failed: " + e.getMessage());
                     }
                 });
+    }
+
+    /** Confirm then delete a track: DB row, ops, audio files, and lane. */
+    private void confirmDeleteTrack(final LibraryDb.Track track) {
+        if (isRecordingSession()) {
+            return; // silent: the record target stays put
+        }
+        if (mTracks.size() <= 1) {
+            Toast.makeText(this, "Cannot delete the last track",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (track.locked) {
+            Toast.makeText(this, "Track locked — unlock to delete",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+                .setTitle("Delete track?")
+                .setMessage("Delete \"" + track.name + "\" and its audio?"
+                        + " This cannot be undone.")
+                .setPositiveButton("Delete", (d, w) -> deleteTrack(track.id))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void deleteTrack(String trackId) {
+        final String entryId = currentEntryId;
+        if (entryId == null) {
+            return;
+        }
+        setBusy(true);
+        setStatus("Deleting track...");
+        new Thread(() -> {
+            try {
+                libraryDb.deleteTrack(trackId);
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    setStatus("Delete failed: " + e.getMessage());
+                });
+                return;
+            }
+            runOnUiThread(() -> {
+                // If the deleted track was selected, pick another.
+                if (trackId.equals(selectedTrackId)) {
+                    selectedTrackId = null;
+                }
+                ensureTracksForEntry(entryId);
+                refreshLanes();
+                updateProjectDuration();
+                mixDirty = true;
+                setBusy(false);
+                setStatus("Track deleted.");
+            });
+        }).start();
     }
 
     /**
@@ -3232,6 +3307,7 @@ public class MainActivity extends Activity {
         TextView nameView;
         Button lockBtn;
         Button muteBtn;
+        Button deleteBtn;
         WaveformView wave;
         LinearLayout overlay;
         LinearLayout steps;

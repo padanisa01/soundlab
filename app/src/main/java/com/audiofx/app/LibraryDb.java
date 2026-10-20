@@ -656,6 +656,24 @@ public class LibraryDb extends SQLiteOpenHelper {
     public synchronized void deleteTrack(String trackId) {
         deleteIfExists(trackTakeFile(trackId));
         deleteIfExists(trackRenderFile(trackId));
+        // Punch-in takes referenced by this track's ops.
+        try {
+            Track t = getTrack(trackId);
+            if (t != null) {
+                for (Op op : listOps(t.entryId, trackId)) {
+                    if ("punch_in".equals(op.opType)
+                            && op.paramsJson != null) {
+                        String takePath =
+                                new org.json.JSONObject(op.paramsJson)
+                                        .optString("take_path", null);
+                        if (takePath != null) {
+                            deleteIfExists(new File(takePath));
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
