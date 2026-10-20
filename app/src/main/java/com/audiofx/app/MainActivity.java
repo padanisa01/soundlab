@@ -89,6 +89,7 @@ public class MainActivity extends Activity {
     private ImageButton btnMenu;
     private AdView adView;
     private PremiumBilling premiumBilling;
+    private final RemoteConfigManager remoteConfig = new RemoteConfigManager();
     private Button btnOpen;
     private Button btnSave2;
     private Button btnShare;
@@ -524,16 +525,21 @@ public class MainActivity extends Activity {
         updateProjectName();
         refreshHistoryPanel();
 
+        // Remote Config: ads + paid-feature gates. Defaults are
+        // fail-closed (ads on, paid hidden); the fetch may flip them.
+        remoteConfig.init(() -> runOnUiThread(() -> {
+            // Re-apply gates after the fetch (e.g. launch mode disables
+            // ads and unlocks paid tuneups).
+            applyAdVisibility();
+            refreshDiagProfileSegments();
+        }));
+
         // AdMob banner (test ad unit ID until the real one is configured).
         // Premium users never see ads.
         MobileAds.initialize(this, status -> {
         });
         adView = findViewById(R.id.ad_view);
-        if (isPremium()) {
-            adView.setVisibility(View.GONE);
-        } else {
-            adView.loadAd(new AdRequest.Builder().build());
-        }
+        applyAdVisibility();
         premiumBilling = new PremiumBilling(this, premium -> {
             if (premium && adView != null) {
                 adView.setVisibility(View.GONE);
@@ -1786,9 +1792,8 @@ public class MainActivity extends Activity {
                     LinearLayout.LayoutParams.WRAP_CONTENT));
             diagTuneUpBtn.setOnClickListener(v -> {
                 final String profile = currentTuneUpProfile();
-                if (isProfileLocked(profile)) {
-                    showProfileUpsell(profile);
-                    return;
+                if (!isProfileVisible(profile)) {
+                    return; // hidden profiles can't run
                 }
                 if (diagDialog != null) {
                     diagDialog.dismiss();
@@ -1973,7 +1978,27 @@ public class MainActivity extends Activity {
 
     private String currentTuneUpProfile() {
         return getSharedPreferences("soundlab", MODE_PRIVATE)
-                .getString("tuneup_profile", "podcast");
+                .getString("tuneup_profile", "singing");
+    }
+
+    /** True when a tune-up profile should be shown: free, or unlocked via
+     * Remote Config, or premium. Paid profiles are invisible otherwise. */
+    private boolean isProfileVisible(String pid) {
+        if (isPremium()) {
+            return true;
+        }
+        JSONObject meta = tuneUpProfiles().optJSONObject(pid);
+        if (meta == null || !meta.optBoolean("premium", false)) {
+            return true; // free profile
+        }
+        // Paid profile: visible only if Remote Config unlocks it.
+        if ("podcast".equals(pid)) {
+            return remoteConfig.isPodcastUnlocked();
+        }
+        if ("music".equals(pid)) {
+            return remoteConfig.isMusicUnlocked();
+        }
+        return false;
     }
 
     private JSONObject tuneUpProfiles() {
@@ -1986,16 +2011,10 @@ public class MainActivity extends Activity {
         return new JSONObject();
     }
 
-    /** True when the recipe is premium-gated and not owned. */
-    private boolean isProfileLocked(String pid) {
-        JSONObject meta = tuneUpProfiles().optJSONObject(pid);
-        return meta != null && meta.optBoolean("premium", false) && !isPremium();
-    }
-
     /** Profile segment tap: locked Pro recipes open the upsell instead. */
     private void onProfileSelected(String pid) {
-        if (isProfileLocked(pid)) {
-            showProfileUpsell(pid);
+        // Hidden profiles can't be tapped (GONE); visible ones are allowed.
+        if (!isProfileVisible(pid)) {
             return;
         }
         getSharedPreferences("soundlab", MODE_PRIVATE).edit()
@@ -2247,19 +2266,29 @@ public class MainActivity extends Activity {
         }
         String current = currentTuneUpProfile();
         JSONObject profiles = tuneUpProfiles();
-        boolean premium = isPremium();
         for (Button seg : diagProfileBtns) {
             String pid = (String) seg.getTag();
             JSONObject meta = profiles.optJSONObject(pid);
             String label = meta != null ? meta.optString("label", pid) : pid;
-            boolean locked = meta != null && meta.optBoolean("premium", false)
-                    && !premium;
-            seg.setText(label + (locked ? " \uD83D\uDD12" : ""));
+            // Paid profiles are invisible unless unlocked (Remote Config)
+            // or premium; no lock icon, no upsell clutter.
+            boolean visible = isProfileVisible(pid);
+            seg.setVisibility(visible ? View.VISIBLE : View.GONE);
+            if (!visible) {
+                continue;
+            }
+            seg.setText(label);
             boolean selected = pid.equals(current);
             seg.setTextColor(getColor(
                     selected ? R.color.sl_teal2 : R.color.sl_mut));
             seg.setTypeface(null, selected ? android.graphics.Typeface.BOLD
                     : android.graphics.Typeface.NORMAL);
+        }
+        // If the current profile is now hidden, fall back to singing.
+        if (!isProfileVisible(current)) {
+            getSharedPreferences("soundlab", MODE_PRIVATE).edit()
+                    .putString("tuneup_profile", "singing").apply();
+            current = "singing";
         }
         JSONObject cur = profiles.optJSONObject(current);
         if (diagProfileDesc != null) {
@@ -2274,19 +2303,6 @@ public class MainActivity extends Activity {
     }
 
     /** Upsell for the premium tune-up recipes. */
-    private void showProfileUpsell(final String pid) {
-        JSONObject meta = tuneUpProfiles().optJSONObject(pid);
-        String label = meta != null ? meta.optString("label", pid) : pid;
-        new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
-                .setTitle(label + " is a Pro recipe")
-                .setMessage("The " + label
-                        + " tune-up recipe comes with Premium, our one-time "
-                        + "purchase. It also removes all ads.")
-                .setPositiveButton("Buy premium", (d, w) -> buyPremium())
-                .setNegativeButton("Not now", null)
-                .show();
-    }
-
     /** One row of the tune-up step tracker: label + per-step bar. */
     private static class TuneUpRow {
         TextView label;
@@ -5340,7 +5356,7 @@ public class MainActivity extends Activity {
                 && new File(currentOutputPath).exists()) ? currentOutputPath : inputPath;
         final boolean raw = srcPath.equals(inputPath);
         showEncodeWaitScreen(raw ? "Encoding MP3 (no effects)..."
-                : "Encoding MP3...", !isPremium());
+                : "Encoding MP3...", showAds());
         new Thread(() -> {
             try {
                 if (!Python.isStarted()) {
@@ -5564,7 +5580,7 @@ public class MainActivity extends Activity {
         shareEncodeDone = false;
         shareMp3Result = null;
         shareEncodeError = null;
-        showEncodeWaitScreen("Preparing share file...", !isPremium());
+        showEncodeWaitScreen("Preparing share file...", showAds());
         new Thread(() -> encodeShareFile(srcPath)).start();
     }
 
@@ -5605,7 +5621,7 @@ public class MainActivity extends Activity {
                     shareMp3Result = null;
                     shareEncodeError = null;
                     showEncodeWaitScreen("Preparing share file...",
-                            !isPremium());
+                            showAds());
                     new Thread(() -> encodeShareFile(mixPath)).start();
                 });
             } catch (Exception e) {
@@ -5687,6 +5703,25 @@ public class MainActivity extends Activity {
     /** True once the premium one-time purchase is owned. */
     boolean isPremium() {
         return PremiumBilling.isPremium(this);
+    }
+
+    /** True when ads should show: Remote Config on and not premium. */
+    private boolean showAds() {
+        return remoteConfig.adsEnabled() && !isPremium();
+    }
+
+    /** Banner ad visibility: premium never sees ads; otherwise gated by
+     * Remote Config (ads_enabled). */
+    private void applyAdVisibility() {
+        if (adView == null) {
+            return;
+        }
+        if (!showAds()) {
+            adView.setVisibility(View.GONE);
+        } else {
+            adView.setVisibility(View.VISIBLE);
+            adView.loadAd(new AdRequest.Builder().build());
+        }
     }
 
     private String copyToSaveFolder(File src, String baseName, boolean overwrite)
