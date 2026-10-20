@@ -80,14 +80,6 @@
                     android:textSize="15sp"
                     android:textStyle="bold" />
 
-                <TextView
-                    android:id="@+id/tv_tonic"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:textColor="@color/sl_mut"
-                    android:textSize="13sp"
-                    android:visibility="gone" />
             </LinearLayout>
 
             <!-- Track actions: open / save / share -->

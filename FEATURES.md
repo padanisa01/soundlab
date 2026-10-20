@@ -195,9 +195,10 @@ or the plan changes.
   indicator now lives on the selection-chip line). It renders the
   selected track fresh (the lane waveform shows the effects-style
   progress animation while it runs) and detects that track's tonic
-  (Sa) and predominant-melody transcription. The tonic shows as a
-  chip beside the project title with the Hz value (e.g. "Sa
-  294.7 Hz · D4 +6c" — D4 natural 6 cents sharp, not D#); during
+  (Sa) and predominant-melody transcription. The tonic shows on
+  the track's own lane header, beside its title, with the Hz value
+  (e.g. "Sa 294.7 Hz · D4 +6c" — D4 natural 6 cents sharp, not D#);
+  during
   playback a large karaoke readout above the waveform lanes shows
   the swara sounding at the playhead (blank during rests),
   refreshed by the 200 ms position updater. Results are kept per

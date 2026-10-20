@@ -81,7 +81,6 @@ public class MainActivity extends Activity {
     private static final int REQ_RECORD_AUDIO = 2001;
 
     private TextView tvProjectName;
-    private TextView tvTonic;
     private TextView tvSwara;
     /** Karaoke notation state (feature/tonic), PER TRACK: notation
      * events and tonic chip text keyed by track id (LEGACY_NOTATION_KEY
@@ -345,22 +344,30 @@ public class MainActivity extends Activity {
                 : LEGACY_NOTATION_KEY;
     }
 
-    /** Tonic chip + karaoke label follow the selected track. */
+    /** Karaoke label follows the selected track; each track's
+     * tonic rides on its own lane header (updateLaneHeader). */
     private void refreshNotationUi() {
-        if (tvTonic == null || tvSwara == null) {
+        if (tvSwara == null) {
             return;
         }
-        String key = notationKey();
-        String tonic = tonicByTrack.get(key);
-        if (tonic != null && notationByTrack.containsKey(key)) {
-            tvTonic.setText(tonic);
-            tvTonic.setVisibility(View.VISIBLE);
+        if (notationByTrack.containsKey(notationKey())) {
             tvSwara.setVisibility(View.VISIBLE);
         } else {
-            tvTonic.setVisibility(View.GONE);
-            tvTonic.setText("");
             tvSwara.setVisibility(View.GONE);
             tvSwara.setText("");
+        }
+    }
+
+    /** Re-render one lane's header (its tonic label may have changed). */
+    private void refreshLaneHeaderFor(String trackId) {
+        for (TrackLane lane : lanes) {
+            if (lane.trackId.equals(trackId)) {
+                LibraryDb.Track t = getTrackById(trackId);
+                if (t != null) {
+                    updateLaneHeader(lane, t);
+                }
+                return;
+            }
         }
     }
 
@@ -465,7 +472,6 @@ public class MainActivity extends Activity {
         setContentView(R.layout.activity_main);
 
         tvProjectName = findViewById(R.id.tv_project_name);
-        tvTonic = findViewById(R.id.tv_tonic);
         tvSwara = findViewById(R.id.tv_swara);
         btnMenu = findViewById(R.id.btn_menu);
         btnMenu.setOnClickListener(v -> showMainMenu());
@@ -1702,6 +1708,7 @@ public class MainActivity extends Activity {
                     info.getDouble("sa_hz"), info.optString("note", "?"),
                     cents >= 0 ? "+" : "", cents);
             tonicByTrack.put(key, chip);
+            refreshLaneHeaderFor(key);
             refreshNotationUi();
             setStatus("Notation ready \u2014 play to follow the swarams.");
         } catch (Exception e) {
@@ -2956,6 +2963,16 @@ public class MainActivity extends Activity {
         });
         lane.nameView = name;
 
+        TextView tonic = new TextView(this);
+        tonic.setTextSize(12.5f);
+        tonic.setTextColor(getColor(R.color.sl_mut));
+        tonic.setSingleLine(true);
+        tonic.setVisibility(View.GONE);
+        header.addView(tonic, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        lane.tonicView = tonic;
+
         Button lockBtn = new Button(this);
         lockBtn.setTextSize(14f);
         lockBtn.setBackgroundResource(R.drawable.bg_zoom_btn);
@@ -3074,6 +3091,13 @@ public class MainActivity extends Activity {
     /** Name, lock/mute icons, and the muted dim for one lane. */
     private void updateLaneHeader(TrackLane lane, LibraryDb.Track t) {
         lane.nameView.setText(t.name);
+        String tonicText = tonicByTrack.get(t.id);
+        if (tonicText != null) {
+            lane.tonicView.setText(tonicText);
+            lane.tonicView.setVisibility(View.VISIBLE);
+        } else {
+            lane.tonicView.setVisibility(View.GONE);
+        }
         lane.lockBtn.setText(t.locked ? "\uD83D\uDD12" : "\uD83D\uDD13");
         lane.lockBtn.setTextColor(getColor(
                 t.locked ? R.color.sl_teal2 : R.color.sl_mut));
@@ -3495,6 +3519,7 @@ public class MainActivity extends Activity {
         String trackId;
         LinearLayout root;
         TextView nameView;
+        TextView tonicView;
         Button lockBtn;
         Button muteBtn;
         Button deleteBtn;
