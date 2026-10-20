@@ -4335,6 +4335,11 @@ public class MainActivity extends Activity {
                                     dest.getAbsolutePath());
                         } catch (Exception ignored) {
                         }
+                        // Mirror the entry row in memory: adoptLibraryEntry
+                        // (which sets inputPath) is skipped for the
+                        // pre-created flow, and without inputPath the
+                        // Diagnose/Save/Share buttons stay disabled.
+                        inputPath = dest.getAbsolutePath();
                         pendingPreCreatedEntry = false;
                     }
                 }
@@ -4372,6 +4377,7 @@ public class MainActivity extends Activity {
         }
         refreshLanes();
         onTrackContentChanged(trackId);
+        updateTrackActions();
         double recordDurSec = (System.currentTimeMillis() - recordStartMs)
                 / 1000.0;
         Analytics.recordStop(this, recordDurSec, wasPunch);
