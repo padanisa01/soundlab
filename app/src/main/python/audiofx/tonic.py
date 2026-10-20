@@ -61,6 +61,12 @@ TONIC_N_HARM = 10
 TONIC_PROM = 1.35
 #: f0/2 (or f0/3) wins if it scores >= this fraction of the winner.
 TONIC_SUBHARM_RATIO = 0.75
+#: Fifth-down (Pa trap): the winner may be the Pa of the true Sa.
+#: The 2/3 candidate must clear BOTH bars: full series >= this
+#: fraction of the winner's, and independent-partials >=
+#: TONIC_FIFTH_DOWN_INDEP of the winner's independent partials.
+TONIC_FIFTH_DOWN_RATIO = 0.75
+TONIC_FIFTH_DOWN_INDEP = 0.70
 #: Melody tracker: window/hop and f0 search range.
 MELODY_WIN_SEC = 0.046
 MELODY_HOP_SEC = 0.010
@@ -127,6 +133,19 @@ def _candidates(freqs, mag):
     return out
 
 
+def _indep_score(freqs, mag, f0, skip_mult):
+    """Series score over harmonics NOT divisible by skip_mult: the
+    partials of f0 not shared with the series a skip_mult-th above
+    it (3 = the Pa above). A phantom tonic borrows most of its
+    score from shared partials and scores low here."""
+    total = 0.0
+    for k in range(1, TONIC_N_HARM + 1):
+        if k % skip_mult == 0 or k * f0 >= freqs[-1]:
+            continue
+        total += _at(freqs, mag, k * f0) / (k ** 0.5)
+    return total
+
+
 def _refine_f0(freqs, mag, f0):
     """FFT bins quantize f0 to ~25 cents at 200 Hz; rescan the
     series score on a fine cents grid around the winner."""
@@ -179,6 +198,22 @@ def detect_tonic(samples, sample_rate):
                     break
             if changed:
                 break
+    # Fifth-down preference: the winner may be the Pa (3/2) of the
+    # true Sa -- the trap when Sa's fundamental is weak/absent but
+    # its upper partials are strong (Devi Neeyae Thunai: Sa G3 has
+    # almost no 196 Hz energy; its Pa, D4, won). Require the full
+    # series AND the independent partials to nearly match, so a true
+    # Sa with a strong Pa (Durga, G#) is not flipped to its own
+    # fifth-down phantom.
+    w = _refine_f0(freqs, mag, best_f)
+    t = _refine_f0(freqs, mag, w * 2.0 / 3.0)
+    if t >= TONIC_F0_LO:
+        ts = _series_score(freqs, mag, t)
+        if ts >= TONIC_FIFTH_DOWN_RATIO * _series_score(freqs, mag, w):
+            ti = _indep_score(freqs, mag, t, 3)
+            wi = _indep_score(freqs, mag, w, 2)
+            if wi > 0 and ti >= TONIC_FIFTH_DOWN_INDEP * wi:
+                best_f, best_s = t, ts
     sa = _refine_f0(freqs, mag, best_f)
     note, cents = note_of(sa)
     return {"sa_hz": round(float(sa), 2), "note": note, "cents": cents,
