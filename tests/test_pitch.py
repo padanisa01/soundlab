@@ -1,6 +1,7 @@
 """Tests for duration-preserving pitch shift (audiofx.pitch)."""
 import os
 import sys
+import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
                                 "app", "src", "main", "python"))
@@ -22,46 +23,31 @@ def _peak_freq(x):
     return float(freqs[int(np.argmax(spec))])
 
 
-def test_octave_up():
-    y = pitch.pitch_shift(_sine(220.0), SR, 12.0)
-    assert len(y) == int(1.5 * SR)
-    assert abs(_peak_freq(y) - 440.0) < 6.0, _peak_freq(y)
-    print("octave up ok:", _peak_freq(y))
+class TestPitchShift(unittest.TestCase):
 
+    def test_octave_up(self):
+        y = pitch.pitch_shift(_sine(220.0), SR, 12.0)
+        self.assertEqual(len(y), int(1.5 * SR))
+        self.assertAlmostEqual(_peak_freq(y), 440.0, delta=6.0)
 
-def test_octave_down():
-    y = pitch.pitch_shift(_sine(220.0), SR, -12.0)
-    assert abs(_peak_freq(y) - 110.0) < 4.0, _peak_freq(y)
-    print("octave down ok:", _peak_freq(y))
+    def test_octave_down(self):
+        y = pitch.pitch_shift(_sine(220.0), SR, -12.0)
+        self.assertAlmostEqual(_peak_freq(y), 110.0, delta=4.0)
 
+    def test_fifth_up(self):
+        y = pitch.pitch_shift(_sine(220.0), SR, 7.0)
+        want = 220.0 * 2 ** (7.0 / 12.0)
+        self.assertAlmostEqual(_peak_freq(y), want, delta=6.0)
 
-def test_fifth_up():
-    y = pitch.pitch_shift(_sine(220.0), SR, 7.0)
-    want = 220.0 * 2 ** (7.0 / 12.0)
-    assert abs(_peak_freq(y) - want) < 6.0, (_peak_freq(y), want)
-    print("fifth up ok:", _peak_freq(y), "want", want)
+    def test_zero_shift_identical(self):
+        x = _sine(330.0)
+        y = pitch.pitch_shift(x, SR, 0.0)
+        self.assertTrue(np.array_equal(np.asarray(y), np.asarray(x)))
 
-
-def test_zero_shift_identical():
-    x = _sine(330.0)
-    y = pitch.pitch_shift(x, SR, 0.0)
-    assert np.array_equal(np.asarray(y), np.asarray(x))
-    print("zero shift ok")
-
-
-def test_range_guard():
-    try:
-        pitch.pitch_shift(_sine(220.0), SR, 13.0)
-    except ValueError:
-        print("range guard ok")
-        return
-    raise AssertionError("expected ValueError beyond +/-12 semitones")
+    def test_range_guard(self):
+        with self.assertRaises(ValueError):
+            pitch.pitch_shift(_sine(220.0), SR, 13.0)
 
 
 if __name__ == "__main__":
-    test_octave_up()
-    test_octave_down()
-    test_fifth_up()
-    test_zero_shift_identical()
-    test_range_guard()
-    print("ALL PITCH TESTS PASS")
+    unittest.main(verbosity=2)
