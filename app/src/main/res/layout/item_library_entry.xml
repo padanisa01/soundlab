@@ -54,6 +54,18 @@
         android:textColor="@color/sl_mut"
         android:textSize="12sp" />
 
+    <!-- Row 2b: the project's track names, in track order. -->
+    <TextView
+        android:id="@+id/row_tracks"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="3dp"
+        android:ellipsize="end"
+        android:maxLines="2"
+        android:textColor="@color/sl_txt"
+        android:textSize="12.5sp"
+        android:visibility="gone" />
+
     <!-- Row 3: effect chips (added programmatically, up to 3 + "+N"). -->
     <LinearLayout
         android:id="@+id/row_chips"

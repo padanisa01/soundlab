@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.os.Bundle;
+import android.text.TextUtils;
 import android.text.InputType;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -85,7 +86,8 @@ public class LibraryActivity extends Activity {
             for (LibraryDb.LibraryEntry e : entries) {
                 List<LibraryDb.Op> ops = listOpsAcrossTracks(e.id);
                 boolean hasExports = !libraryDb.listExports(e.id).isEmpty();
-                rows.add(new RowData(e, ops, hasExports));
+                rows.add(new RowData(e, ops, hasExports,
+                        listTrackNames(e.id)));
             }
             final long totalBytes = libraryDb.librarySizeBytes();
             runOnUiThread(() -> {
@@ -102,6 +104,20 @@ public class LibraryActivity extends Activity {
      * effects yet" until its Track 1 is adopted there (ensureTracks runs
      * on open in MainActivity and re-points the old ops at it).
      */
+    /** Track display names for a row, in track order; muted tracks
+     * are suffixed "(muted)". Empty for legacy entries whose Track 1
+     * has not been adopted yet (same caveat as the effect chips). */
+    private List<String> listTrackNames(String entryId) {
+        List<String> names = new ArrayList<>();
+        try {
+            for (LibraryDb.Track t : libraryDb.listTracks(entryId)) {
+                names.add(t.muted ? t.name + " (muted)" : t.name);
+            }
+        } catch (Exception ignored) {
+        }
+        return names;
+    }
+
     private List<LibraryDb.Op> listOpsAcrossTracks(String entryId) {
         List<LibraryDb.Op> ops = new ArrayList<>();
         try {
@@ -235,12 +251,14 @@ public class LibraryActivity extends Activity {
         final LibraryDb.LibraryEntry entry;
         final List<LibraryDb.Op> ops;
         final boolean hasExports;
+        final List<String> trackNames;
 
         RowData(LibraryDb.LibraryEntry entry, List<LibraryDb.Op> ops,
-                boolean hasExports) {
+                boolean hasExports, List<String> trackNames) {
             this.entry = entry;
             this.ops = ops;
             this.hasExports = hasExports;
+            this.trackNames = trackNames;
         }
     }
 
@@ -274,6 +292,7 @@ public class LibraryActivity extends Activity {
     private class EntryHolder extends RecyclerView.ViewHolder {
         private final TextView nameView;
         private final TextView subView;
+        private final TextView tracksView;
         private final View dotView;
         private final ImageButton overflowBtn;
         private final LinearLayout chipRow;
@@ -282,6 +301,7 @@ public class LibraryActivity extends Activity {
             super(itemView);
             nameView = itemView.findViewById(R.id.row_name);
             subView = itemView.findViewById(R.id.row_sub);
+            tracksView = itemView.findViewById(R.id.row_tracks);
             dotView = itemView.findViewById(R.id.row_export_dot);
             overflowBtn = itemView.findViewById(R.id.row_overflow);
             chipRow = itemView.findViewById(R.id.row_chips);
@@ -295,6 +315,12 @@ public class LibraryActivity extends Activity {
             long sizeBytes = new File(e.pristinePath).length();
             subView.setText(date + " · " + formatDuration(e.durationS)
                     + " · " + formatBytes(sizeBytes));
+            if (row.trackNames.isEmpty()) {
+                tracksView.setVisibility(View.GONE);
+            } else {
+                tracksView.setText(TextUtils.join(" · ", row.trackNames));
+                tracksView.setVisibility(View.VISIBLE);
+            }
             dotView.setVisibility(row.hasExports ? View.VISIBLE : View.GONE);
             bindChips(chipRow, row.ops);
             itemView.setOnClickListener(v -> openEntry(e.id));

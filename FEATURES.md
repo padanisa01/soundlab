@@ -230,8 +230,10 @@ or the plan changes.
   after the file), with the same op chain, undo history and exports.
 - **Library screen** (`LibraryActivity`, via the header icon or the
   "Open library" button): newest first; rows show name, recorded
-  date/time, duration, size, up to 3 effect chips, and a teal dot when
-  an MP3 was exported. Tap loads the entry into the waveform screen;
+  date/time, duration, size, the project's track names in track
+  order (muted tracks suffixed "(muted)"; hidden for legacy entries
+  whose Track 1 has not been adopted yet), up to 3 effect chips, and
+  a teal dot when an MP3 was exported. Tap loads the entry into the waveform screen;
   long-press/overflow offers Rename, Duplicate, Delete (confirm).
   Header shows total size with a warning past 2 GB.
 - **Cumulative ops, no generational loss**: Apply / Normalize / Trim /
