@@ -206,6 +206,14 @@ or the plan changes.
   across edits, new recordings, and project re-opens — until
   Notation is run again on that track (which replaces it). Picked
   files (no project) notate the current render or pristine input.
+- **Notation export**: the main menu's "Export notation" (offered
+  once a track has notation) shares a text file in the
+  shivkumar.org convention, rendered by `tonic.format_shivkumar`
+  from the stored result: events quantized to a unit grid (unit =
+  median note length), "," sustains, ";" rests, 8 units per
+  avartanam grouped 4 | 2 | 2 closing with "||", octave dots
+  above/below letters, sub-unit runs written together ("RG").
+  No lyrics line (the app has no lyrics).
 - Tonic: long-term average spectrum (the drone is in every frame),
   harmonic-series scoring of prominent peaks in 50–300 Hz with a
   subharmonic preference (Pa is Sa's 3rd harmonic but Sa is not a

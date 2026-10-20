@@ -59,6 +59,7 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.text.SimpleDateFormat;
@@ -651,6 +652,9 @@ public class MainActivity extends Activity {
             menu.add("Save as MP3");
             menu.add("Share");
         }
+        if (tonicInfoByTrack.containsKey(notationKey())) {
+            menu.add("Export notation");
+        }
         if (!isPremium()) {
             menu.add("Buy premium version");
         }
@@ -664,6 +668,8 @@ public class MainActivity extends Activity {
                         openLibrary();
                     } else if (sel.equals("Share")) {
                         shareAudio();
+                    } else if (sel.equals("Export notation")) {
+                        exportNotation();
                     } else if (sel.equals("Buy premium version")) {
                         buyPremium();
                     } else {
@@ -5966,6 +5972,73 @@ public class MainActivity extends Activity {
         shareEncodeError = null;
         showEncodeWaitScreen("Preparing share file...", !isPremium());
         new Thread(() -> encodeShareFile(srcPath)).start();
+    }
+
+    /**
+     * Export the selected track's stored notation as a text file in
+     * the shivkumar.org convention (unit grid, "," sustains, ";"
+     * rests, 4|2|2 avartanam bars, dot-above/below octaves), shared
+     * via the system sheet. The text is rendered in Python by
+     * tonic.format_shivkumar from the stored notation result.
+     */
+    private void exportNotation() {
+        final String key = notationKey();
+        final JSONObject info = tonicInfoByTrack.get(key);
+        if (info == null) {
+            setStatus("Run Notation on the selected track first.");
+            return;
+        }
+        Track sel = selectedTrack();
+        String trackName = sel != null ? sel.name
+                : currentEntryId == null
+                        ? baseName(inputPath != null ? inputPath : "track")
+                        : "Track";
+        String project = tvProjectName != null
+                && tvProjectName.getText() != null
+                ? tvProjectName.getText().toString() : "";
+        final String title = project.isEmpty() || project.equals(trackName)
+                ? trackName : project + " - " + trackName;
+        final String fileBase = title.replaceAll("[^A-Za-z0-9 _-]", "_");
+        setStatus("Preparing notation export...");
+        new Thread(() -> {
+            try {
+                String text = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("notation_export", info.toString(), title)
+                        .toString();
+                File dir = new File(getCacheDir(), "share");
+                if (!dir.exists() && !dir.mkdirs()) {
+                    throw new IllegalStateException("share dir unavailable");
+                }
+                final File out = new File(dir, fileBase + " notation.txt");
+                FileOutputStream fos = new FileOutputStream(out);
+                try {
+                    fos.write(text.getBytes(StandardCharsets.UTF_8));
+                } finally {
+                    fos.close();
+                }
+                runOnUiThread(() -> {
+                    try {
+                        Uri uri = FileProvider.getUriForFile(
+                                MainActivity.this,
+                                getPackageName() + ".fileprovider", out);
+                        Intent send = new Intent(Intent.ACTION_SEND);
+                        send.setType("text/plain");
+                        send.putExtra(Intent.EXTRA_STREAM, uri);
+                        send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        setStatus("Sharing " + out.getName() + ".");
+                        startActivity(Intent.createChooser(send,
+                                "Share notation"));
+                    } catch (Exception e) {
+                        setStatus("Notation export failed: "
+                                + e.getMessage());
+                    }
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> setStatus(
+                        "Notation export failed: " + e.getMessage()));
+            }
+        }).start();
     }
 
     /**

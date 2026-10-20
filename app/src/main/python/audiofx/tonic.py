@@ -440,6 +440,117 @@ def notation_text(info):
     return "\n".join(lines)
 
 
+#: Export layout following the shivkumar.org notation convention:
+#: one avartanam per line, EXPORT_UNITS_PER_LINE time units grouped
+#: 4 | 2 | 2 (Adi-tala angas) with "||" closing the line; "," extends
+#: a note by one unit; ";" is a rest unit; a dot above a letter marks
+#: the upper octave and a dot below the lower (combining characters);
+#: sub-unit runs are written together in one slot ("Sr", like the
+#: site's "srgr"). The grid unit is the median note duration.
+EXPORT_UNITS_PER_LINE = 8
+EXPORT_GROUPS = (4, 2, 2)
+_DOT_ABOVE = "̇"
+_DOT_BELOW = "̣"
+
+
+def _export_letter(sym):
+    """Body letter for an event symbol, octave as combining dots."""
+    base = sym.rstrip("',")
+    ups = 0
+    for ch in reversed(sym):
+        if ch == "'":
+            ups += 1
+        else:
+            break
+    downs = 0
+    for ch in reversed(sym):
+        if ch == ",":
+            downs += 1
+        else:
+            break
+    return base + _DOT_ABOVE * ups + _DOT_BELOW * downs
+
+
+def format_shivkumar(info, title):
+    """Render a notate_song() result as a shivkumar.org-style text.
+
+    Returns the full export document (header + notation lines).
+    Pure formatting: no numpy needed beyond the info dict.
+    """
+    events = info.get("events") or []
+    notes = [e for e in events if e["sym"] != "-"]
+    head = [title,
+            "Sa (tonic): %s %+dc" % (info["note"], info["cents"])]
+    names = []
+    for sw in sorted(info.get("swaras") or [],
+                     key=lambda s: s["index"]):
+        nm = sw["name"]
+        letter = {"Sa": "S", "Pa": "P"}.get(nm, nm)
+        if letter not in names:
+            names.append(letter)
+    if names:
+        head.append("Swaras present: " + " ".join(names))
+    head.append("Convention: ',' extends a note by one unit, ';' is "
+                "a rest unit, '|' separates tala groups, '||' ends an "
+                "avartanam; a dot above/below a letter marks the "
+                "upper/lower octave.")
+    if not notes:
+        return "\n".join(head + ["", "(no notation events)"])
+    durs = sorted(e["dur"] for e in notes)
+    unit = durs[len(durs) // 2]
+    unit = min(1.0, max(0.08, unit))
+    head.append("One unit = %.2f s (median note length); %d units "
+                "per avartanam." % (unit, EXPORT_UNITS_PER_LINE))
+
+    # Quantize events onto the unit grid. Events tile the timeline,
+    # so each writes at its absolute unit position: a note's letter
+    # lands in its start slot (appended to any sub-unit run already
+    # there), sustains fill the following slots with ",", rests and
+    # uncovered gaps become ";".
+    slots = []
+
+    def put(u, tok):
+        while len(slots) <= u:
+            slots.append(None)
+        if slots[u] is None:
+            slots[u] = tok
+
+    for ev in events:
+        start_u = int(round(ev["start"] / unit))
+        end_u = int(round((ev["start"] + ev["dur"]) / unit))
+        if ev["sym"] == "-":
+            for u in range(start_u, max(end_u, start_u + 1)):
+                put(u, ";")
+        else:
+            while len(slots) <= start_u:
+                slots.append(None)
+            cur = slots[start_u]
+            letter = _export_letter(ev["sym"])
+            if cur is None or cur == ";":
+                slots[start_u] = letter
+            elif cur != ",":
+                slots[start_u] = cur + letter
+            for u in range(start_u + 1, end_u):
+                put(u, ",")
+    slots = [";" if s is None else s for s in slots]
+
+    lines = []
+    bounds = []
+    acc = 0
+    for g in EXPORT_GROUPS:
+        acc += g
+        bounds.append(acc)
+    for i in range(0, len(slots), EXPORT_UNITS_PER_LINE):
+        chunk = slots[i:i + EXPORT_UNITS_PER_LINE]
+        parts = []
+        for j, tok in enumerate(chunk):
+            parts.append(tok)
+            if j + 1 in bounds and j + 1 < len(chunk):
+                parts.append("|")
+        lines.append(" ".join(parts) + " ||")
+    return "\n".join(head + [""] + lines)
+
+
 def notate_song(samples, sample_rate):
     """Tonic + predominant-melody notation for a performance.
 

@@ -1036,3 +1036,17 @@ def resolve_record_target(tracks_json):
         if recordable(t):
             return json.dumps({"action": "record", "track_id": t.get("id")})
     return json.dumps({"action": "create"})
+
+
+def notation_export(info_json, title):
+    """Render a stored notation result as shivkumar.org-style text.
+
+    info_json: a notate_song() result JSON (as produced by
+    tonic_file). Returns the export document text.
+    """
+    import json as _json
+
+    from . import tonic as _tonic
+
+    info = _json.loads(info_json)
+    return _tonic.format_shivkumar(info, title)
