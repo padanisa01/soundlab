@@ -1050,3 +1050,19 @@ def notation_export(info_json, title):
 
     info = _json.loads(info_json)
     return _tonic.format_shivkumar(info, title)
+
+
+def notation_section(info_json):
+    """One track's notation-export section as JSON.
+
+    Returns {"meta": str, "body": [line, ...]} for laying out the
+    multi-track PDF: the caller supplies per-track titles, this
+    supplies the tonic/swaras meta line and the avartanam lines in
+    the shivkumar.org convention (see tonic.format_shivkumar).
+    """
+    import json as _json
+
+    from . import tonic as _tonic
+
+    info = _json.loads(info_json)
+    return _json.dumps(_tonic.export_section(info))

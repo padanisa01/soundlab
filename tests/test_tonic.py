@@ -176,6 +176,24 @@ def test_export_shivkumar_full_lines_and_runs():
     assert body[2] == "RG , ||", body[2]
 
 
+def test_export_section():
+    """The PDF section API: meta line + body lines."""
+    import json
+    sys.path.insert(0, "app/src/main/python")
+    from audiofx import android_bridge as ab_local
+    info = {
+        "note": "G3", "cents": 4,
+        "swaras": [{"index": 0, "name": "Sa"}, {"index": 7, "name": "Pa"}],
+        "events": [{"start": 0.0, "dur": 0.3, "sym": "S"},
+                   {"start": 0.3, "dur": 0.3, "sym": "P"}],
+    }
+    sec = json.loads(ab_local.notation_section(json.dumps(info)))
+    assert sec["meta"].startswith("Sa (tonic): G3 +4c"), sec["meta"]
+    assert "Swaras present: S P" in sec["meta"], sec["meta"]
+    assert "One unit = 0.30 s" in sec["meta"], sec["meta"]
+    assert sec["body"] == ["S P ||"], sec["body"]
+
+
 if __name__ == "__main__":
     test_detect_tonic_finds_drone()
     test_detect_tonic_silence()
@@ -185,4 +203,5 @@ if __name__ == "__main__":
     test_lower_pa_winner_flips_up_to_sa()
     test_export_shivkumar_layout()
     test_export_shivkumar_full_lines_and_runs()
+    test_export_section()
     print("ALL TONIC TESTS PASS")

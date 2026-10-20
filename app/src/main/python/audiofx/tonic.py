@@ -477,30 +477,46 @@ def format_shivkumar(info, title):
     Returns the full export document (header + notation lines).
     Pure formatting: no numpy needed beyond the info dict.
     """
-    events = info.get("events") or []
-    notes = [e for e in events if e["sym"] != "-"]
     head = [title,
             "Sa (tonic): %s %+dc" % (info["note"], info["cents"])]
-    names = []
-    for sw in sorted(info.get("swaras") or [],
-                     key=lambda s: s["index"]):
-        nm = sw["name"]
-        letter = {"Sa": "S", "Pa": "P"}.get(nm, nm)
-        if letter not in names:
-            names.append(letter)
+    names = _export_letters(info)
     if names:
         head.append("Swaras present: " + " ".join(names))
     head.append("Convention: ',' extends a note by one unit, ';' is "
                 "a rest unit, '|' separates tala groups, '||' ends an "
                 "avartanam; a dot above/below a letter marks the "
                 "upper/lower octave.")
-    if not notes:
+    body, unit = _export_body_lines(info)
+    if not body:
         return "\n".join(head + ["", "(no notation events)"])
+    head.append("One unit = %.2f s (median note length); %d units "
+                "per avartanam." % (unit, EXPORT_UNITS_PER_LINE))
+    return "\n".join(head + [""] + body)
+
+
+def _export_letters(info):
+    """Deduped body letters for the swaras present, ascending."""
+    names = []
+    for sw in sorted(info.get("swaras") or [],
+                     key=lambda s: s["index"]):
+        letter = {"Sa": "S", "Pa": "P"}.get(sw["name"], sw["name"])
+        if letter not in names:
+            names.append(letter)
+    return names
+
+
+def _export_body_lines(info):
+    """(avartanam lines, unit seconds) for the info's events.
+
+    Returns ([], 0.0) when there are no note events.
+    """
+    events = info.get("events") or []
+    notes = [e for e in events if e["sym"] != "-"]
+    if not notes:
+        return [], 0.0
     durs = sorted(e["dur"] for e in notes)
     unit = durs[len(durs) // 2]
     unit = min(1.0, max(0.08, unit))
-    head.append("One unit = %.2f s (median note length); %d units "
-                "per avartanam." % (unit, EXPORT_UNITS_PER_LINE))
 
     # Quantize events onto the unit grid. Events tile the timeline,
     # so each writes at its absolute unit position: a note's letter
@@ -548,7 +564,25 @@ def format_shivkumar(info, title):
             if j + 1 in bounds and j + 1 < len(chunk):
                 parts.append("|")
         lines.append(" ".join(parts) + " ||")
-    return "\n".join(head + [""] + lines)
+    return lines, unit
+
+
+def export_section(info):
+    """One track's PDF section: a meta line + body lines.
+
+    Returns {"meta": str, "body": [str, ...]}. The meta line carries
+    the tonic, the swaras present and the grid unit.
+    """
+    body, unit = _export_body_lines(info)
+    meta = "Sa (tonic): %s %+dc" % (info["note"], info["cents"])
+    names = _export_letters(info)
+    if names:
+        meta += "  ·  Swaras present: " + " ".join(names)
+    if body:
+        meta += "  ·  One unit = %.2f s" % unit
+    else:
+        body = ["(no notation events)"]
+    return {"meta": meta, "body": body}
 
 
 def notate_song(samples, sample_rate):
