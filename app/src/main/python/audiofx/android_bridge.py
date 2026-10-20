@@ -10,6 +10,7 @@ import os
 import wave
 
 from . import diagnose as _diagnose
+from . import pitch as _pitch
 from . import repair as _repair
 from . import tonic as _tonic
 from .effects import Echo, Reverb, Warmth
@@ -87,6 +88,10 @@ def _apply_op(samples, sample_rate, op, params, index):
             end_sec=params.get("end_sec"))
         samples = (_np.asarray(processed, dtype=_np.float64)
                    if _HAVE_NP else processed)
+    elif op == "pitch_shift":
+        samples = _pitch.pitch_shift(
+            samples, sample_rate,
+            float(params.get("semitones", 0.0)))
     elif op == "normalize":
         samples, _ = _apply_normalize(
             samples, sample_rate,
@@ -509,7 +514,7 @@ def render_chain(pristine_path, ops_json, output_path, progress=None,
     the 16-bit WAV once.
 
     ``ops_json`` is a JSON array of {"op": <type>, "params": {...}} where
-    <type> is one of "fx", "normalize", "trim", "join", the repair ops
+    <type> is one of "fx", "normalize", "pitch_shift", "trim", "join", the repair ops
     ("dc_remove", "fade_ends", "silence_trim", "hum_notch", "declip",
     "denoise", "deplosive", "deess", "level", "loudness", "eq_balance"),
     or the composite "tune_up" (whose params.fixes is an array of repair

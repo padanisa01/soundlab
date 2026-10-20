@@ -250,6 +250,17 @@ or the plan changes.
   forks an independent copy with a "Forked from" marker. Edits
   auto-persist; there is no save-project step.
 
+- **Pitch shift** (per track): the Pitch button in the transport
+  row opens a dialog showing the selected track's current tonic
+  (detecting it first if Notation has not run on that track), a
+  target note dropdown (C-B), an octave dropdown, and a cents
+  field, prefilled with the current tonic. Convert applies a
+  `pitch_shift` op (+/-12 semitones, kept in the track's op chain,
+  so it is undoable and flows into renders and the mix) with the
+  lane waveform progress animation. The DSP is a duration-
+  preserving phase vocoder (audiofx/pitch.py): time-stretch by the
+  shift ratio, then resample back to the original length.
+
 ### Per-track volume
 
 - Every lane carries a vertical volume slider on the right side of
