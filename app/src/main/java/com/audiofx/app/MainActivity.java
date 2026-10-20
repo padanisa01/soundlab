@@ -391,6 +391,28 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // Crash reporter: write uncaught exceptions to a file in Downloads
+        // so they can be shared without debug tools.
+        final Thread.UncaughtExceptionHandler defaultHandler =
+                Thread.getDefaultUncaughtExceptionHandler();
+        final android.content.Context appCtx = getApplicationContext();
+        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
+            try {
+                java.io.File dir = android.os.Environment.getExternalStoragePublicDirectory(
+                        android.os.Environment.DIRECTORY_DOWNLOADS);
+                java.io.File f = new java.io.File(dir,
+                        "audiomechanic_crash.txt");
+                java.io.PrintWriter pw = new java.io.PrintWriter(
+                        new java.io.FileWriter(f, false));
+                pw.println("Crash at " + new java.util.Date());
+                throwable.printStackTrace(pw);
+                pw.close();
+            } catch (Exception ignored) {
+            }
+            if (defaultHandler != null) {
+                defaultHandler.uncaughtException(thread, throwable);
+            }
+        });
         setContentView(R.layout.activity_main);
 
         // App Check for the summary proxy (ticket AM-1): defensive, since
