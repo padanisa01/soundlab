@@ -79,6 +79,7 @@
                     android:textColor="@color/sl_txt"
                     android:textSize="15sp"
                     android:textStyle="bold" />
+
             </LinearLayout>
 
             <!-- Track actions: open / save / share -->
@@ -149,6 +150,7 @@
                     android:text="Diagnose"
                     android:textColor="@color/sl_txt"
                     android:textSize="12.5sp" />
+
             </LinearLayout>
 
             <!-- Slim TRACKS bar: label + add-track button -->
@@ -220,9 +222,43 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
+                        android:ellipsize="end"
+                        android:maxLines="1"
                         android:text="Full track"
                         android:textColor="@color/sl_mut"
                         android:textSize="13sp" />
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="6dp"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:id="@+id/tv_time_cur"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="0:00"
+                            android:textColor="@color/sl_txt"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text=" / "
+                            android:textColor="@color/sl_mut"
+                            android:textSize="12sp" />
+
+                        <TextView
+                            android:id="@+id/tv_time_tot"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="0:00"
+                            android:textColor="@color/sl_mut"
+                            android:textSize="12sp" />
+                    </LinearLayout>
 
                     <Button
                         android:id="@+id/btn_trim"
@@ -278,8 +314,8 @@
 
                     <ImageButton
                         android:id="@+id/btn_play_pause"
-                        android:layout_width="62dp"
-                        android:layout_height="62dp"
+                        android:layout_width="58dp"
+                        android:layout_height="58dp"
                         android:layout_marginStart="14dp"
                         android:background="@drawable/bg_play_btn"
                         android:contentDescription="Play or pause"
@@ -293,7 +329,7 @@
                         android:id="@+id/btn_stop"
                         android:layout_width="44dp"
                         android:layout_height="44dp"
-                        android:layout_marginStart="14dp"
+                        android:layout_marginStart="10dp"
                         android:background="@drawable/bg_chip"
                         android:contentDescription="Stop"
                         android:enabled="false"
@@ -304,14 +340,14 @@
                     <LinearLayout
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginStart="14dp"
+                        android:layout_marginStart="8dp"
                         android:gravity="center_horizontal"
                         android:orientation="vertical">
 
                         <ImageButton
                             android:id="@+id/btn_normalize"
-                            android:layout_width="44dp"
-                            android:layout_height="44dp"
+                            android:layout_width="40dp"
+                            android:layout_height="40dp"
                             android:background="@drawable/bg_chip"
                             android:contentDescription="Normalize volume"
                             android:padding="11dp"
@@ -330,33 +366,53 @@
                     <LinearLayout
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginStart="14dp"
-                        android:gravity="center_vertical"
-                        android:orientation="horizontal">
+                        android:layout_marginStart="8dp"
+                        android:gravity="center_horizontal"
+                        android:orientation="vertical">
+
+                        <ImageButton
+                            android:id="@+id/btn_notation"
+                            android:layout_width="40dp"
+                            android:layout_height="40dp"
+                            android:background="@drawable/bg_chip"
+                            android:contentDescription="Swara notation"
+                            android:padding="10dp"
+                            android:scaleType="fitCenter"
+                            android:src="@drawable/ic_notation" />
 
                         <TextView
-                            android:id="@+id/tv_time_cur"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="0:00"
-                            android:textColor="@color/sl_txt"
-                            android:textSize="16sp"
-                            android:textStyle="bold" />
+                            android:layout_marginTop="2dp"
+                            android:text="Notation"
+                            android:textColor="@color/sl_dim"
+                            android:textSize="10sp" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:gravity="center_horizontal"
+                        android:orientation="vertical">
+
+                        <ImageButton
+                            android:id="@+id/btn_pitch"
+                            android:layout_width="40dp"
+                            android:layout_height="40dp"
+                            android:background="@drawable/bg_chip"
+                            android:contentDescription="Pitch shift"
+                            android:padding="10dp"
+                            android:scaleType="fitCenter"
+                            android:src="@drawable/ic_pitch" />
 
                         <TextView
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text=" / "
-                            android:textColor="@color/sl_mut"
-                            android:textSize="13sp" />
-
-                        <TextView
-                            android:id="@+id/tv_time_tot"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="0:00"
-                            android:textColor="@color/sl_mut"
-                            android:textSize="13sp" />
+                            android:layout_marginTop="2dp"
+                            android:text="Pitch"
+                            android:textColor="@color/sl_dim"
+                            android:textSize="10sp" />
                     </LinearLayout>
 
                 </LinearLayout>

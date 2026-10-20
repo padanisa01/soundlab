@@ -189,6 +189,37 @@ or the plan changes.
   dispatcher; `diagnose_file` / `tune_up_build` / `tune_up_converge`
   entry points in `android_bridge.py`.
 
+### Tonic and notation
+- **Notation** is per track: the Notation icon button sits in the
+  transport row (where the time readout used to be; the 0:00 / 0:00
+  indicator now lives on the selection-chip line). It renders the
+  selected track fresh (the lane waveform shows the effects-style
+  progress animation while it runs) and detects that track's tonic
+  (Sa) and predominant-melody transcription. The tonic shows on
+  the track's own lane header, beside its title (e.g. "Sa D4 +6c" —
+  D4 natural 6 cents sharp, not D#). During playback, EVERY
+  notated track shows its own karaoke readout in the bottom-right
+  corner of its waveform panel — the swara of that track sounding
+  at the playhead (blank during rests), refreshed per lane by the
+  200 ms position updater. Results are kept per
+  track and follow track selection. A track's notation PERSISTS —
+  across edits, new recordings, and project re-opens — until
+  Notation is run again on that track (which replaces it). Picked
+  files (no project) notate the current render or pristine input.
+- Tonic: long-term average spectrum (the drone is in every frame),
+  harmonic-series scoring of prominent peaks in 50–300 Hz with a
+  subharmonic preference (Pa is Sa's 3rd harmonic but Sa is not a
+  harmonic of Pa) and a fine cents refinement; `None` (reported as
+  "No tonic found") when no candidate qualifies.
+- Melody: salience-function tracker (spectral peaks, harmonic
+  summation on a 10-cent grid, fundamental-presence veto against
+  subharmonic errors, peak-snapped f0), median-smoothed, quantized to
+  the nearest swara relative to Sa and segmented into note events.
+  Each histogram peak also gets a width: narrow = fixed note,
+  wide = kampita/gamaka oscillation.
+- Python: `audiofx/tonic.py` (`detect_tonic`, `notate_song`),
+  `tonic_file` in `android_bridge.py`.
+
 ### Library of recordings
 - Every recording becomes a durable project in `filesDir/library/`,
   holding one or more tracks: each track has an immutable pristine WAV
@@ -218,6 +249,28 @@ or the plan changes.
 - History is keyed by entry ID: renames never orphan it. Duplicate
   forks an independent copy with a "Forked from" marker. Edits
   auto-persist; there is no save-project step.
+
+- **Pitch shift** (per track): the Pitch button in the transport
+  row opens a dialog showing the selected track's current tonic
+  (detecting it first if Notation has not run on that track), a
+  target note dropdown (C-B), an octave dropdown, and a cents
+  field, prefilled with the current tonic. Convert applies a
+  `pitch_shift` op (+/-12 semitones, kept in the track's op chain,
+  so it is undoable and flows into renders and the mix) with the
+  lane waveform progress animation. The DSP (audiofx/pitch.py)
+  preserves duration AND tempo: a WSOLA time-stretch by the shift
+  ratio (waveform-similarity overlap-add, so attacks/onsets stay
+  sharp and on time), then a resample back to the original length.
+  (A phase-vocoder version smeared transients and was replaced.)
+
+### Per-track volume
+
+- Every lane carries a vertical volume slider on the right side of
+  its waveform panel (0-150%, 100% = unity gain). The gain is
+  stored per track (DB v4 `tracks.volume`), applied by the Python
+  mixdown (and mix_peaks) before the sum, and persists across
+  sessions. Releasing the slider persists the value, invalidates
+  the mix and stops playback, the same contract as mute.
 
 ### Multi-track recording
 - One library entry is a project of N tracks (`tracks` table, DB v3):

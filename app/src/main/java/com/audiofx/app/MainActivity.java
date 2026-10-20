@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.InputType;
 import android.view.Gravity;
 import android.Manifest;
 import android.animation.ObjectAnimator;
@@ -25,6 +26,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.animation.AlphaAnimation;
 import android.view.animation.Animation;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -34,6 +36,7 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
+import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -81,6 +84,13 @@ public class MainActivity extends Activity {
     private static final int REQ_RECORD_AUDIO = 2001;
 
     private TextView tvProjectName;
+    /** Karaoke notation state (feature/tonic), PER TRACK: notation
+     * events and tonic chip text keyed by track id (LEGACY_NOTATION_KEY
+     * for picked files). The readouts always show the selected
+     * track's notation. */
+    private static final String LEGACY_NOTATION_KEY = "__legacy__";
+    private final Map<String, JSONArray> notationByTrack = new HashMap<>();
+    private final Map<String, JSONObject> tonicInfoByTrack = new HashMap<>();
     private ImageButton btnMenu;
     private AdView adView;
     private PremiumBilling premiumBilling;
@@ -88,6 +98,8 @@ public class MainActivity extends Activity {
     private Button btnSave2;
     private Button btnShare;
     private Button btnDiagnose;
+    private ImageButton btnNotation;
+    private ImageButton btnPitch;
     private TextView toastView;
     private final Runnable hideToast = () -> {
         toastView.animate().alpha(0f).setDuration(250)
@@ -267,6 +279,7 @@ public class MainActivity extends Activity {
                     float pos = (float) (ms / 1000.0 / audioDurationSec);
                     for (TrackLane lane : lanes) {
                         lane.wave.setPlaybackPosition(pos);
+                        updateLaneSwara(lane, ms / 1000.0);
                     }
                     tvTimeCur.setText(fmtTime(ms / 1000.0));
                 } catch (Exception ignored) {
@@ -283,6 +296,84 @@ public class MainActivity extends Activity {
 
     private void stopPositionUpdates() {
         mainHandler.removeCallbacks(positionUpdater);
+        for (TrackLane lane : lanes) {
+            if (lane.swaraView != null) {
+                lane.swaraView.setText("");
+            }
+        }
+    }
+
+    /** One lane's karaoke readout: the swara of THAT track sounding
+     * at time t (seconds on the project timeline). */
+    private void updateLaneSwara(TrackLane lane, double t) {
+        if (lane.swaraView == null) {
+            return;
+        }
+        JSONArray events = notationByTrack.get(lane.trackId);
+        if (events == null) {
+            return;
+        }
+        String sym = swaraAt(events, t);
+        if (!sym.equals(lane.swaraView.getText().toString())) {
+            lane.swaraView.setText(sym);
+        }
+    }
+
+    /** The event symbol covering time t, "" during rests/gaps. */
+    private static String swaraAt(JSONArray events, double t) {
+        try {
+            int lo = 0;
+            int hi = events.length() - 1;
+            while (lo <= hi) {
+                int mid = (lo + hi) / 2;
+                JSONObject ev = events.getJSONObject(mid);
+                if (t < ev.getDouble("start")) {
+                    hi = mid - 1;
+                } else if (t > ev.getDouble("start") + ev.getDouble("dur")) {
+                    lo = mid + 1;
+                } else {
+                    String s = ev.optString("sym", "");
+                    return "-".equals(s) ? "" : s;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return "";
+    }
+
+    /** The notation key for the current context: the selected track
+     * inside a project, the legacy key for picked files. */
+    private String notationKey() {
+        if (currentEntryId != null && selectedTrackId != null) {
+            return selectedTrackId;
+        }
+        return inputPath != null ? "file:" + inputPath
+                : LEGACY_NOTATION_KEY;
+    }
+
+    /** Karaoke readouts live on the lanes: each lane shows its own
+     * track's notation (updateLaneHeader paints visibility). Kept as
+     * a lane-refresh for callers that stored new notation. */
+    private void refreshNotationUi() {
+        for (TrackLane lane : lanes) {
+            LibraryDb.Track t = getTrackById(lane.trackId);
+            if (t != null) {
+                updateLaneHeader(lane, t);
+            }
+        }
+    }
+
+    /** Re-render one lane's header (its tonic label may have changed). */
+    private void refreshLaneHeaderFor(String trackId) {
+        for (TrackLane lane : lanes) {
+            if (lane.trackId.equals(trackId)) {
+                LibraryDb.Track t = getTrackById(trackId);
+                if (t != null) {
+                    updateLaneHeader(lane, t);
+                }
+                return;
+            }
+        }
     }
 
     // In-memory session state for Undo.
@@ -392,10 +483,14 @@ public class MainActivity extends Activity {
         btnSave2 = findViewById(R.id.btn_save2);
         btnShare = findViewById(R.id.btn_share);
         btnDiagnose = findViewById(R.id.btn_diagnose);
+        btnNotation = findViewById(R.id.btn_notation);
+        btnPitch = findViewById(R.id.btn_pitch);
         btnOpen.setOnClickListener(v -> pickAudio());
         btnSave2.setOnClickListener(v -> onSaveClicked());
         btnShare.setOnClickListener(v -> shareAudio());
         btnDiagnose.setOnClickListener(v -> onDiagnoseClicked());
+        btnNotation.setOnClickListener(v -> onNotationClicked());
+        btnPitch.setOnClickListener(v -> onPitchClicked());
         updateTrackActions();
         btnNormalize = findViewById(R.id.btn_normalize);
         btnNormalize.setOnClickListener(v -> normalizeAudio());
@@ -597,6 +692,10 @@ public class MainActivity extends Activity {
         btnShare.setAlpha(hasTrack ? 1f : 0.4f);
         btnDiagnose.setEnabled(hasTrack);
         btnDiagnose.setAlpha(hasTrack ? 1f : 0.4f);
+        btnNotation.setEnabled(hasTrack);
+        btnNotation.setAlpha(hasTrack ? 1f : 0.4f);
+        btnPitch.setEnabled(hasTrack);
+        btnPitch.setAlpha(hasTrack ? 1f : 0.4f);
     }
 
     /** Project status bar: entry/file name, or an untitled placeholder. */
@@ -1124,6 +1223,7 @@ public class MainActivity extends Activity {
                 || "deplosive".equals(opType) || "deess".equals(opType)
                 || "level".equals(opType) || "loudness".equals(opType)
                 || "eq_balance".equals(opType) || "tune_up".equals(opType)
+                || "pitch_shift".equals(opType)
                 || "punch_in".equals(opType);
     }
 
@@ -1526,6 +1626,326 @@ public class MainActivity extends Activity {
                 });
             }
         }).start();
+    }
+
+    /** Tonic + swara notation for the SELECTED track: render it
+     * fresh (like Diagnose), then run tonic_file on the render with
+     * the lane waveform's progress animation. Legacy picked files
+     * notate their current render / pristine input instead. */
+    private void onNotationClicked() {
+        final String entryId = currentEntryId;
+        if (entryId != null) {
+            notateSelectedTrack(entryId);
+            return;
+        }
+        String path = (currentOutputPath != null
+                && new File(currentOutputPath).exists()) ? currentOutputPath
+                        : inputPath;
+        if (path == null || !new File(path).exists()) {
+            setStatus("Open or record audio first.");
+            return;
+        }
+        runNotation(path, notationKey(), null, null);
+    }
+
+    private void notateSelectedTrack(final String entryId) {
+        final LibraryDb.Track track = getSelectedTrack();
+        if (track == null) {
+            setStatus("Open or record audio first.");
+            return;
+        }
+        if (!trackHasAudio(track)) {
+            setStatus("The selected track has no audio to notate.");
+            return;
+        }
+        final String trackId = track.id;
+        final String path =
+                libraryDb.trackRenderFile(trackId).getAbsolutePath();
+        runNotation(path, trackId, entryId, laneWave(trackId));
+    }
+
+    private void runNotation(final String path, final String key,
+            final String entryId, final WaveformView wave) {
+        runNotation(path, key, entryId, wave, null);
+    }
+
+    private void runNotation(final String path, final String key,
+            final String entryId, final WaveformView wave,
+            final Runnable afterSuccess) {
+        setBusy(true);
+        setStatus("Notating \u2014 detecting Sa and tracing the melody...");
+        if (wave != null) {
+            wave.startProgressAnimation();
+        }
+        new Thread(() -> {
+            try {
+                if (entryId != null) {
+                    renderTrackBlocking(entryId, key);
+                }
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                final String infoJson = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("tonic_file", path).toString();
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    if (wave != null) {
+                        wave.finishProgressAnimation();
+                    }
+                    applyNotation(infoJson, key);
+                    if (afterSuccess != null) {
+                        afterSuccess.run();
+                    }
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    if (wave != null) {
+                        wave.clearProgress();
+                    }
+                    setStatus("Notation failed: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    /** Store a notation result for its track and refresh the
+     * readouts (tonic chip by the title, karaoke label). */
+    private void applyNotation(String infoJson, String key) {
+        try {
+            JSONObject info = new JSONObject(infoJson);
+            if (!info.has("sa_hz") || !info.has("events")) {
+                setStatus("No tonic found in this audio.");
+                return;
+            }
+            notationByTrack.put(key, info.getJSONArray("events"));
+            tonicInfoByTrack.put(key, info);
+            refreshLaneHeaderFor(key);
+            refreshNotationUi();
+            setStatus("Notation ready \u2014 play to follow the swarams.");
+        } catch (Exception e) {
+            setStatus("Notation failed: bad report.");
+        }
+    }
+
+    /** "Sa G3 +4c" display text for a stored tonic info. */
+    private static String tonicText(JSONObject info) {
+        int cents = info.optInt("cents", 0);
+        return "Sa " + info.optString("note", "?") + " "
+                + (cents >= 0 ? "+" : "") + cents + "c";
+    }
+
+    private static final String[] PITCH_NOTES = {
+            "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+
+    /** Pitch shift for the SELECTED track: show its current tonic,
+     * take a target note/octave/cents, and apply a "pitch_shift" op
+     * (undoable, lane progress animation via applyLibraryOp). If the
+     * track has no tonic yet, detect it first, then open the dialog. */
+    private void onPitchClicked() {
+        final String entryId = currentEntryId;
+        if (entryId == null) {
+            setStatus("Pitch shift works on library tracks.");
+            return;
+        }
+        final LibraryDb.Track track = getSelectedTrack();
+        if (track == null) {
+            setStatus("Open or record audio first.");
+            return;
+        }
+        if (!trackHasAudio(track)) {
+            setStatus("The selected track has no audio to shift.");
+            return;
+        }
+        if (!checkTrackUnlocked(track.id)) {
+            return;
+        }
+        JSONObject info = tonicInfoByTrack.get(track.id);
+        if (info != null) {
+            showPitchDialog(track.id, info);
+            return;
+        }
+        final String path =
+                libraryDb.trackRenderFile(track.id).getAbsolutePath();
+        runNotation(path, track.id, entryId, laneWave(track.id), () -> {
+            JSONObject inf = tonicInfoByTrack.get(track.id);
+            if (inf != null) {
+                showPitchDialog(track.id, inf);
+            }
+        });
+    }
+
+    private void showPitchDialog(final String trackId,
+            final JSONObject info) {
+        final double saHz = info.optDouble("sa_hz", 0);
+        final String noteFull = info.optString("note", "?");
+        int split = noteFull.length();
+        while (split > 0 && Character.isDigit(noteFull.charAt(split - 1))) {
+            split--;
+        }
+        String curNote = noteFull.substring(0, split);
+        int curOct = 4;
+        try {
+            curOct = Integer.parseInt(noteFull.substring(split));
+        } catch (Exception ignored) {
+        }
+        final float dp = getResources().getDisplayMetrics().density;
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (20 * dp);
+        root.setPadding(pad, pad, pad, 0);
+
+        TextView cur = new TextView(this);
+        cur.setText("Current tonic: " + tonicText(info));
+        cur.setTextColor(getColor(R.color.sl_txt));
+        cur.setTextSize(15f);
+        root.addView(cur);
+
+        TextView targetLbl = new TextView(this);
+        targetLbl.setText("Shift to (target tonic):");
+        targetLbl.setTextColor(getColor(R.color.sl_mut));
+        targetLbl.setTextSize(13f);
+        LinearLayout.LayoutParams lblLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        lblLp.topMargin = (int) (14 * dp);
+        root.addView(targetLbl, lblLp);
+
+        // One full-width field per row: a shared horizontal row
+        // squeezed the cents box to a sliver on narrow screens.
+        TextView noteLbl = new TextView(this);
+        noteLbl.setText("Note");
+        noteLbl.setTextColor(getColor(R.color.sl_mut));
+        noteLbl.setTextSize(12.5f);
+        LinearLayout.LayoutParams noteLblLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        noteLblLp.topMargin = (int) (12 * dp);
+        root.addView(noteLbl, noteLblLp);
+
+        final Spinner noteSp = new Spinner(this);
+        ArrayAdapter<String> noteAd = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, PITCH_NOTES);
+        noteAd.setDropDownViewResource(
+                android.R.layout.simple_spinner_dropdown_item);
+        noteSp.setAdapter(noteAd);
+        int noteIdx = 0;
+        for (int i = 0; i < PITCH_NOTES.length; i++) {
+            if (PITCH_NOTES[i].equals(curNote)) {
+                noteIdx = i;
+            }
+        }
+        noteSp.setSelection(noteIdx);
+        noteSp.setMinimumHeight((int) (52 * dp));
+        root.addView(noteSp, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        TextView octLbl = new TextView(this);
+        octLbl.setText("Octave");
+        octLbl.setTextColor(getColor(R.color.sl_mut));
+        octLbl.setTextSize(12.5f);
+        LinearLayout.LayoutParams octLblLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        octLblLp.topMargin = (int) (10 * dp);
+        root.addView(octLbl, octLblLp);
+
+        final Spinner octSp = new Spinner(this);
+        String[] octs = {"1", "2", "3", "4", "5", "6"};
+        ArrayAdapter<String> octAd = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, octs);
+        octAd.setDropDownViewResource(
+                android.R.layout.simple_spinner_dropdown_item);
+        octSp.setAdapter(octAd);
+        octSp.setSelection(Math.max(0, Math.min(octs.length - 1, curOct - 1)));
+        octSp.setMinimumHeight((int) (52 * dp));
+        root.addView(octSp, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        TextView centsLbl = new TextView(this);
+        centsLbl.setText("Cents (-99 to 99)");
+        centsLbl.setTextColor(getColor(R.color.sl_mut));
+        centsLbl.setTextSize(12.5f);
+        LinearLayout.LayoutParams centsLblLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        centsLblLp.topMargin = (int) (10 * dp);
+        root.addView(centsLbl, centsLblLp);
+
+        final EditText centsEt = new EditText(this);
+        centsEt.setInputType(InputType.TYPE_CLASS_NUMBER
+                | InputType.TYPE_NUMBER_FLAG_SIGNED);
+        centsEt.setText(String.valueOf(info.optInt("cents", 0)));
+        centsEt.setTextSize(17f);
+        centsEt.setSingleLine(true);
+        centsEt.setMinHeight((int) (52 * dp));
+        centsEt.selectAll();
+        root.addView(centsEt, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        final AlertDialog dialog = new AlertDialog.Builder(
+                this, R.style.Theme_SoundLab_Dialog)
+                .setTitle("Pitch shift")
+                .setView(root)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Convert", null)
+                .create();
+        dialog.show();
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    int cents;
+                    try {
+                        cents = Integer.parseInt(
+                                centsEt.getText().toString().trim());
+                    } catch (Exception e) {
+                        centsEt.setError("Enter cents (-99 to 99)");
+                        return;
+                    }
+                    if (cents < -99 || cents > 99) {
+                        centsEt.setError("Cents must be -99 to 99");
+                        return;
+                    }
+                    int ni = noteSp.getSelectedItemPosition();
+                    int oct = octSp.getSelectedItemPosition() + 1;
+                    int midi = (oct + 1) * 12 + ni;
+                    double targetHz = 440.0
+                            * Math.pow(2.0, (midi - 69) / 12.0)
+                            * Math.pow(2.0, cents / 1200.0);
+                    double semis = 12.0 * Math.log(targetHz / saHz)
+                            / Math.log(2.0);
+                    double rounded = Math.round(semis * 100.0) / 100.0;
+                    if (Math.abs(rounded) < 0.01) {
+                        setStatus("The track is already at that pitch.");
+                        dialog.dismiss();
+                        return;
+                    }
+                    if (Math.abs(rounded) > 12.0) {
+                        centsEt.setError("Shift is limited to one octave");
+                        return;
+                    }
+                    String params;
+                    try {
+                        params = new JSONObject()
+                                .put("semitones", rounded).toString();
+                    } catch (Exception e) {
+                        return;
+                    }
+                    String label = "Pitch "
+                            + (rounded >= 0 ? "+" : "")
+                            + String.format(Locale.US, "%.2f", rounded)
+                            + " st";
+                    String done = "Pitch shifted to " + PITCH_NOTES[ni]
+                            + oct + " " + (cents >= 0 ? "+" : "") + cents
+                            + "c.";
+                    dialog.dismiss();
+                    applyLibraryOp("pitch_shift", params, label,
+                            "Shifting pitch\u2026", done, null, true,
+                            null, 0);
+                });
     }
 
     /** The mechanic's report card (Option A): score hero, grouped findings,
@@ -2602,6 +3022,7 @@ public class MainActivity extends Activity {
         diagLastPath = null;
         diagTrackId = null;
         diagSummaryCache.clear();
+        refreshNotationUi();
         refreshLanes();
         // History and the undo badge follow the selection.
         updateUndoBadge();
@@ -2774,6 +3195,16 @@ public class MainActivity extends Activity {
         });
         lane.nameView = name;
 
+        TextView tonic = new TextView(this);
+        tonic.setTextSize(12.5f);
+        tonic.setTextColor(getColor(R.color.sl_mut));
+        tonic.setSingleLine(true);
+        tonic.setVisibility(View.GONE);
+        header.addView(tonic, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        lane.tonicView = tonic;
+
         Button lockBtn = new Button(this);
         lockBtn.setTextSize(14f);
         lockBtn.setBackgroundResource(R.drawable.bg_zoom_btn);
@@ -2828,11 +3259,52 @@ public class MainActivity extends Activity {
         header.addView(deleteBtn, delLp);
         lane.deleteBtn = deleteBtn;
 
-        FrameLayout frame = new FrameLayout(this);
-        LinearLayout.LayoutParams frameLp = new LinearLayout.LayoutParams(
+        LinearLayout waveRow = new LinearLayout(this);
+        waveRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams waveRowLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, (int) (110 * density));
-        frameLp.topMargin = (int) (8 * density);
-        root.addView(frame, frameLp);
+        waveRowLp.topMargin = (int) (8 * density);
+        root.addView(waveRow, waveRowLp);
+
+        FrameLayout frame = new FrameLayout(this);
+        waveRow.addView(frame, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+
+        // Per-track volume: a vertical slider on the right of the
+        // waveform (a SeekBar rotated -90 inside a fixed box; max at
+        // the top). 0..150 maps to gain 0..1.5, 100 = unity.
+        FrameLayout volBox = new FrameLayout(this);
+        LinearLayout.LayoutParams volBoxLp = new LinearLayout.LayoutParams(
+                (int) (40 * density), LinearLayout.LayoutParams.MATCH_PARENT);
+        volBoxLp.leftMargin = (int) (4 * density);
+        waveRow.addView(volBox, volBoxLp);
+        SeekBar vol = new SeekBar(this);
+        vol.setMax(150);
+        vol.setProgress((int) Math.round(track.volume * 100));
+        FrameLayout.LayoutParams volLp = new FrameLayout.LayoutParams(
+                (int) (110 * density), (int) (40 * density));
+        volLp.gravity = Gravity.CENTER;
+        vol.setLayoutParams(volLp);
+        vol.setRotation(-90f);
+        vol.setContentDescription("Track volume");
+        vol.setOnSeekBarChangeListener(
+                new SeekBar.OnSeekBarChangeListener() {
+                    @Override
+                    public void onProgressChanged(SeekBar sb, int progress,
+                            boolean fromUser) {
+                    }
+
+                    @Override
+                    public void onStartTrackingTouch(SeekBar sb) {
+                    }
+
+                    @Override
+                    public void onStopTrackingTouch(SeekBar sb) {
+                        applyTrackVolume(track.id, sb.getProgress() / 100.0);
+                    }
+                });
+        volBox.addView(vol);
+        lane.volumeBar = vol;
 
         final WaveformView wv = new WaveformView(this);
         wv.setBackgroundResource(R.drawable.bg_wave);
@@ -2852,6 +3324,25 @@ public class MainActivity extends Activity {
         wv.setOnSelectionListener((s, e) -> onLaneSelectionChanged(track.id, s, e));
         frame.addView(wv);
         lane.wave = wv;
+
+        TextView swara = new TextView(this);
+        swara.setTextSize(20f);
+        swara.setTypeface(null, android.graphics.Typeface.BOLD);
+        swara.setTextColor(getColor(R.color.sl_txt));
+        swara.setBackgroundResource(R.drawable.bg_chip);
+        int spx = (int) (10 * density);
+        int spy = (int) (4 * density);
+        swara.setPadding(spx, spy, spx, spy);
+        swara.setVisibility(View.GONE);
+        FrameLayout.LayoutParams swaraLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT);
+        swaraLp.gravity = Gravity.BOTTOM | Gravity.END;
+        int sm = (int) (8 * density);
+        swaraLp.setMargins(0, 0, sm, sm);
+        swara.setLayoutParams(swaraLp);
+        frame.addView(swara);
+        lane.swaraView = swara;
 
         // Per-lane tune-up step overlay, initially hidden.
         LinearLayout overlay = new LinearLayout(this);
@@ -2892,6 +3383,21 @@ public class MainActivity extends Activity {
     /** Name, lock/mute icons, and the muted dim for one lane. */
     private void updateLaneHeader(TrackLane lane, LibraryDb.Track t) {
         lane.nameView.setText(t.name);
+        JSONObject tonicInfo = tonicInfoByTrack.get(t.id);
+        if (tonicInfo != null) {
+            lane.tonicView.setText(tonicText(tonicInfo));
+            lane.tonicView.setVisibility(View.VISIBLE);
+        } else {
+            lane.tonicView.setVisibility(View.GONE);
+        }
+        if (lane.swaraView != null) {
+            lane.swaraView.setVisibility(
+                    notationByTrack.containsKey(t.id)
+                            ? View.VISIBLE : View.GONE);
+        }
+        if (lane.volumeBar != null) {
+            lane.volumeBar.setProgress((int) Math.round(t.volume * 100));
+        }
         lane.lockBtn.setText(t.locked ? "\uD83D\uDD12" : "\uD83D\uDD13");
         lane.lockBtn.setTextColor(getColor(
                 t.locked ? R.color.sl_teal2 : R.color.sl_mut));
@@ -2948,6 +3454,27 @@ public class MainActivity extends Activity {
      * stale (rebuilt on demand for play/overdub/share). No peak
      * recompute — each lane shows its own audio independently.
      */
+    /** Per-track volume slider release: persist the gain, reload,
+     * and invalidate the mix (same contract as mute). */
+    private void applyTrackVolume(String trackId, double gain) {
+        if (currentEntryId == null) {
+            return;
+        }
+        if (isRecordingSession()) {
+            setStatus("Stop recording first.");
+            return;
+        }
+        try {
+            libraryDb.setTrackVolume(trackId, gain);
+            mTracks = libraryDb.listTracks(currentEntryId);
+            mixDirty = true;
+            releasePlayer(); // the playing mix no longer matches
+            setStatus("Track volume " + Math.round(gain * 100) + "%");
+        } catch (Exception e) {
+            setStatus("Volume failed: " + e.getMessage());
+        }
+    }
+
     private void toggleTrackMute(String trackId, boolean muted) {
         if (currentEntryId == null) {
             return;
@@ -3296,10 +3823,12 @@ public class MainActivity extends Activity {
     static final class MixTrack {
         final String id;
         final String path;
+        final double gain;
 
-        MixTrack(String id, String path) {
+        MixTrack(String id, String path, double gain) {
             this.id = id;
             this.path = path;
+            this.gain = gain;
         }
     }
 
@@ -3313,6 +3842,9 @@ public class MainActivity extends Activity {
         String trackId;
         LinearLayout root;
         TextView nameView;
+        TextView tonicView;
+        TextView swaraView;
+        SeekBar volumeBar;
         Button lockBtn;
         Button muteBtn;
         Button deleteBtn;
@@ -3335,7 +3867,7 @@ public class MainActivity extends Activity {
                 File render = libraryDb.trackRenderFile(t.id);
                 if (render.exists() && render.length() > 44) {
                     mixTracks.add(new MixTrack(t.id,
-                            render.getAbsolutePath()));
+                            render.getAbsolutePath(), t.volume));
                 }
             } catch (Exception ignored) {
             }
@@ -3353,6 +3885,7 @@ public class MainActivity extends Activity {
             JSONObject o = new JSONObject();
             o.put("id", mt.id);
             o.put("path", mt.path);
+            o.put("gain", mt.gain);
             tracksJson.put(o);
         }
         JSONArray mutedJson = new JSONArray();
