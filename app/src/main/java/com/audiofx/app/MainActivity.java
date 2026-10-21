@@ -719,9 +719,7 @@ public class MainActivity extends Activity {
                         + "tracks recorded at different shrutis match."));
         tutSteps.add(new TutorialStep(R.id.btn_share, "Save & share",
                 "Save your mix as MP3 or share it. Finished projects "
-                        + "live in the Recordings library, and the menu "
-                        + "can export a track's notation as text or a "
-                        + "PDF of all tracks."));
+                        + "live in the Recordings library."));
     }
 
     private void showTutorial() {

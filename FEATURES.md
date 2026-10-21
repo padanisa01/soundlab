@@ -363,7 +363,7 @@ or the plan changes.
   ringed in teal) over the real UI with a caption card (Skip /
   step count / Next-Done). Steps: Welcome, Open, Record, Tracks,
   Effects, Diagnose & Tune Up, Notation, Pitch shift, Save &
-  share (which also points at the library and notation exports).
+  share (which also points at the Recordings library).
   The card docks opposite the highlighted control; a target that
   is scrolled off-screen falls back to a centered card with no
   hole. Shown once (`tutorial_done_v1` in the "soundlab"
