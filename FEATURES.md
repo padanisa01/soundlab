@@ -357,5 +357,18 @@ or the plan changes.
 - Every export of a library entry is logged (file name, folder, op count
   at export time); picked files are not logged.
 
+## First-use tutorial
+- On first launch the app shows a 9-step guided tour: a dim
+  overlay (`TutorialOverlayView`, CLEAR-xfermode spotlight hole
+  ringed in teal) over the real UI with a caption card (Skip /
+  step count / Next-Done). Steps: Welcome, Open, Record, Tracks,
+  Effects, Diagnose & Tune Up, Notation, Pitch shift, Save &
+  share (which also points at the Recordings library).
+  The card docks opposite the highlighted control; a target that
+  is scrolled off-screen falls back to a centered card with no
+  hole. Shown once (`tutorial_done_v1` in the "soundlab"
+  SharedPreferences, set on Skip or Done) and replayable anytime
+  from the main menu's "Tutorial" item.
+
 ## Planned / known gaps
 - Compressed formats (MP3, etc.) as *input* — v1 is WAV-only.
