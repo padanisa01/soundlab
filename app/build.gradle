@@ -30,6 +30,22 @@ android {
             keyAlias "androiddebugkey"
             keyPassword "android"
         }
+        // Real upload key for Play bundles, defined only when the
+        // keystore properties are present in local.properties. The
+        // keystore path must be absolute and the passwords live only
+        // on the build machine, never in git:
+        //   upload.keystore=/abs/path/audio-mechanic-upload.keystore
+        //   upload.store.password=...
+        //   upload.key.alias=upload
+        //   upload.key.password=...
+        if (!localProps.getProperty("upload.keystore", "").trim().isEmpty()) {
+            upload {
+                storeFile file(localProps.getProperty("upload.keystore").trim())
+                storePassword localProps.getProperty("upload.store.password", "")
+                keyAlias localProps.getProperty("upload.key.alias", "upload")
+                keyPassword localProps.getProperty("upload.key.password", "")
+            }
+        }
     }
 
     defaultConfig {
@@ -90,11 +106,16 @@ android {
             // is created; verification is skipped with a warning then.
             buildConfigField "String", "PLAY_LICENSE_KEY",
                     "\"${localProps.getProperty('play.license.key', '')}\""
-            // Optional: sign release with the debug key for on-device
-            // testing, so the IDE can install the release variant directly
-            // from the run button. Opt in via sign.release.with.debug=true
-            // in local.properties. Never use for Play uploads.
-            if (localProps.getProperty("sign.release.with.debug", "false").toBoolean()) {
+            // Signing precedence for release: the real upload key wins
+            // whenever upload.keystore is set in local.properties (Play
+            // bundles and APKs come out Play-signed, and
+            // sign.release.with.debug is ignored). Without it, fall back
+            // to the debug key for on-device testing when
+            // sign.release.with.debug=true, so the IDE can install the
+            // release variant directly from the run button.
+            if (!localProps.getProperty("upload.keystore", "").trim().isEmpty()) {
+                signingConfig signingConfigs.upload
+            } else if (localProps.getProperty("sign.release.with.debug", "false").toBoolean()) {
                 signingConfig signingConfigs.debugKeyAsRelease
             }
         }
