@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace "com.audiofx.app"
-    compileSdk 34
+    compileSdk 36
 
     buildFeatures {
         buildConfig true
@@ -41,7 +41,7 @@ android {
                 "\"${localProps.getProperty('summary.proxy.url', '')}\""
         applicationId "com.audiofx.app"
         minSdk 24
-        targetSdk 34
+        targetSdk 36
         versionCode 1
         versionName "1.0"
 
