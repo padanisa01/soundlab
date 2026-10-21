@@ -7,6 +7,7 @@ import struct
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import wave
 
 sys.path.insert(
@@ -15,6 +16,7 @@ sys.path.insert(
 
 from audiofx import Echo, EffectChain, Reverb, Warmth, read_wav_mono, write_wav
 from audiofx import android_bridge
+from audiofx import pipeline
 from audiofx.live import LiveChain, StereoLiveChain
 
 
@@ -711,6 +713,75 @@ class TestRenderChain(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     android_bridge.render_chain(src, bad,
                                                 os.path.join(d, "o.wav"))
+
+
+class _FakeWav:
+    """Stub for wave.Wave_read: reports header params, never returns frames."""
+
+    def __init__(self, n_channels, sampwidth, sample_rate, n_frames):
+        self._n_channels = n_channels
+        self._sampwidth = sampwidth
+        self._sample_rate = sample_rate
+        self._n_frames = n_frames
+        self.readframes_called = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def getnchannels(self):
+        return self._n_channels
+
+    def getsampwidth(self):
+        return self._sampwidth
+
+    def getframerate(self):
+        return self._sample_rate
+
+    def getnframes(self):
+        return self._n_frames
+
+    def readframes(self, n):
+        self.readframes_called = True
+        return b""
+
+
+class TestWavSizeGuard(unittest.TestCase):
+    SR = 44100
+
+    def test_check_wav_size_accepts_normal_file(self):
+        # 3 minutes at 44.1 kHz: under both the duration and memory caps.
+        pipeline._check_wav_size(3 * 60 * self.SR, self.SR)
+
+    def test_check_wav_size_rejects_over_duration(self):
+        # 3 hours at 44.1 kHz: over the 2 hour cap.
+        with self.assertRaises(ValueError):
+            pipeline._check_wav_size(3 * 3600 * self.SR, self.SR)
+
+    def test_check_wav_size_rejects_over_bytes(self):
+        # 300M frames at 44.1 kHz: ~1.9 hours (under duration) but ~2.4 GB
+        # of float64, over the 2 GB buffer cap.
+        with self.assertRaises(ValueError):
+            pipeline._check_wav_size(300000000, self.SR)
+
+    def test_read_wav_mono_rejects_huge_header_before_readframes(self):
+        fake = _FakeWav(1, 2, self.SR, 10000000000)
+        with unittest.mock.patch("audiofx.pipeline.wave") as mock_wave:
+            mock_wave.open.return_value = fake
+            with self.assertRaises(ValueError):
+                read_wav_mono("/nonexistent/huge.wav")
+        self.assertFalse(fake.readframes_called)
+
+    def test_small_real_wav_still_loads(self):
+        sig = sine(440, 0.01, self.SR)
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "tiny.wav")
+            write_wav(p, sig, self.SR)
+            back, sr = read_wav_mono(p)
+        self.assertEqual(sr, self.SR)
+        self.assertEqual(len(back), len(sig))
 
 
 if __name__ == "__main__":

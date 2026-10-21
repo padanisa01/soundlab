@@ -6,6 +6,8 @@ import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 
+import org.json.JSONObject;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -537,19 +539,11 @@ public class LibraryDb extends SQLiteOpenHelper {
     }
 
     private static String escapeJson(String s) {
-        StringBuilder sb = new StringBuilder(s.length() + 8);
-        for (int i = 0; i < s.length(); i++) {
-            char ch = s.charAt(i);
-            switch (ch) {
-                case '"': sb.append("\\\""); break;
-                case '\\': sb.append("\\\\"); break;
-                case '\n': sb.append("\\n"); break;
-                case '\r': sb.append("\\r"); break;
-                case '\t': sb.append("\\t"); break;
-                default: sb.append(ch);
-            }
-        }
-        return sb.toString();
+        // JSONObject.quote() escapes every U+0000-U+001F control character.
+        // It adds surrounding quotes, which the call sites already supply,
+        // so strip them here.
+        String q = JSONObject.quote(s);
+        return q.substring(1, q.length() - 1);
     }
 
     // ------------------------------------------------------------------

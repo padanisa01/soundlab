@@ -11,17 +11,34 @@ android {
         buildConfig true
     }
 
-    defaultConfig {
-        // Groq API key for the diagnosis summary (qwen via Groq). The user
-        // adds GROQ_API_KEY=<key> to the git-ignored local.properties on
-        // their build machine; empty means the summary is skipped.
-        def localProps = new Properties()
-        def lpFile = rootProject.file("local.properties")
-        if (lpFile.exists()) {
-            lpFile.withInputStream { localProps.load(it) }
+    // local.properties carries build-machine secrets (Groq key for debug,
+    // AdMob IDs for release). Hoisted here so every build type can use it.
+    def localProps = new Properties()
+    def lpFile = rootProject.file("local.properties")
+    if (lpFile.exists()) {
+        lpFile.withInputStream { localProps.load(it) }
+    }
+
+    signingConfigs {
+        // Debug-key signing for the release build type, strictly for
+        // on-device testing. Off by default; opt in with
+        // sign.release.with.debug=true in the git-ignored local.properties.
+        // Never use for Play uploads: those need the real upload key.
+        debugKeyAsRelease {
+            storeFile file("${System.getProperty('user.home')}/.android/debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
         }
-        buildConfigField "String", "GROQ_API_KEY",
-                "\"${localProps.getProperty('GROQ_API_KEY', '')}\""
+    }
+
+    defaultConfig {
+        // URL of the summary proxy (Cloud Run service, ticket AM-1). The
+        // user adds summary.proxy.url=<url> to the git-ignored
+        // local.properties on their build machine; empty means the app
+        // calls Groq directly (debug builds with a local API key only).
+        buildConfigField "String", "SUMMARY_PROXY_URL",
+                "\"${localProps.getProperty('summary.proxy.url', '')}\""
         applicationId "com.audiofx.app"
         minSdk 24
         targetSdk 34
@@ -35,9 +52,51 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Google test AdMob IDs: safe for development and sideloaded
+            // test builds. Release builds (below) inject the real IDs.
+            manifestPlaceholders = [admobAppId: "ca-app-pub-3940256099942544~3347511713"]
+            resValue "string", "banner_ad_unit_id",
+                    "ca-app-pub-3940256099942544/6300978111"
+            // Groq API key ships in debug builds only. Release builds must
+            // go through the summary proxy, so the key never leaves the
+            // developer's machine.
+            buildConfigField "String", "GROQ_API_KEY",
+                    "\"${localProps.getProperty('GROQ_API_KEY', '')}\""
+            // Play Console license key for on-device purchase signature
+            // verification (ticket AM-2). Empty until the Play Console app
+            // is created; verification is skipped with a warning then.
+            buildConfigField "String", "PLAY_LICENSE_KEY",
+                    "\"${localProps.getProperty('play.license.key', '')}\""
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            // Real AdMob IDs are mandatory for release: the user adds
+            // admob.app.id and admob.banner.id to the git-ignored
+            // local.properties on their build machine.
+            def admobAppId = localProps.getProperty("admob.app.id", "").trim()
+            def admobBannerId = localProps.getProperty("admob.banner.id", "").trim()
+            if (admobAppId.isEmpty() || admobBannerId.isEmpty()) {
+                throw new GradleException("Release build requires admob.app.id and admob.banner.id in local.properties. Add your real AdMob IDs from https://apps.admob.com.");
+            }
+            manifestPlaceholders = [admobAppId: admobAppId]
+            resValue "string", "banner_ad_unit_id", admobBannerId
+            // No Groq key in release: the diagnosis summary goes through
+            // the proxy (SUMMARY_PROXY_URL) with an App Check token.
+            buildConfigField "String", "GROQ_API_KEY", "\"\""
+            // Play Console license key for on-device purchase signature
+            // verification (ticket AM-2). Empty until the Play Console app
+            // is created; verification is skipped with a warning then.
+            buildConfigField "String", "PLAY_LICENSE_KEY",
+                    "\"${localProps.getProperty('play.license.key', '')}\""
+            // Optional: sign release with the debug key for on-device
+            // testing, so the IDE can install the release variant directly
+            // from the run button. Opt in via sign.release.with.debug=true
+            // in local.properties. Never use for Play uploads.
+            if (localProps.getProperty("sign.release.with.debug", "false").toBoolean()) {
+                signingConfig signingConfigs.debugKeyAsRelease
+            }
         }
     }
 
@@ -68,4 +127,10 @@ dependencies {
     implementation 'androidx.recyclerview:recyclerview:1.3.2'
     implementation 'com.android.billingclient:billing:7.1.1'
     implementation 'com.google.android.gms:play-services-ads:23.0.0'
+    // Play Integrity App Check for the summary proxy (ticket AM-1).
+    implementation 'com.google.firebase:firebase-appcheck-playintegrity:18.0.0'
+    // Remote Config for ads + paid-feature gating.
+    implementation 'com.google.firebase:firebase-config:21.6.0'
+    // Analytics for product usage.
+    implementation 'com.google.firebase:firebase-analytics:22.0.0'
 }

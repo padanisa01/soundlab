@@ -4,6 +4,22 @@ import struct
 import wave
 
 
+# WAV size guards (defense in depth for read_wav_mono): the decode builds a
+# full mono float64 buffer in memory, so a malformed or huge header can OOM
+# the process before any audio is touched. The duration cap mirrors the
+# Android import cap; the byte cap bounds the actual buffer allocation.
+MAX_WAV_DURATION_SEC = 2 * 3600  # 2 hours, mirrors the Android import cap
+MAX_WAV_FLOAT64_BYTES = 2000000000  # 2 GB ceiling for the mono float64 buffer (8 bytes per frame)
+
+
+def _check_wav_size(n_frames, sample_rate):
+    """Raise ValueError if the WAV would exceed the duration or memory cap."""
+    if sample_rate > 0 and n_frames / sample_rate > MAX_WAV_DURATION_SEC:
+        raise ValueError("WAV exceeds 2 hour import cap")
+    if n_frames * 8 > MAX_WAV_FLOAT64_BYTES:
+        raise ValueError("WAV exceeds 2 GB decode buffer cap")
+
+
 class EffectChain:
     """Applies effects in order: ``process`` feeds each effect's output into
     the next."""
@@ -44,6 +60,7 @@ def read_wav_mono(path):
         sampwidth = w.getsampwidth()
         sample_rate = w.getframerate()
         n_frames = w.getnframes()
+        _check_wav_size(n_frames, sample_rate)
         raw = w.readframes(n_frames)
     if n_frames == 0:
         raise ValueError("WAV file has no audio frames: %s" % path)

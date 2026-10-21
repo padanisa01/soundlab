@@ -85,6 +85,11 @@ public class MainActivity extends Activity {
     private static final int PICK_FOLDER = 1002;
     private static final int REQ_RECORD_AUDIO = 2001;
 
+    // Import caps (ticket AM-3): oversized WAVs risk OOM in the float64
+    // render pipeline, so imports are capped at 500 MB or 2 hours.
+    private static final long MAX_IMPORT_BYTES = 500L * 1024 * 1024;
+    private static final double MAX_IMPORT_SECONDS = 2 * 3600;
+
     private TextView tvProjectName;
     /** Karaoke notation state (feature/tonic), PER TRACK: notation
      * events and tonic chip text keyed by track id (LEGACY_NOTATION_KEY
@@ -96,6 +101,7 @@ public class MainActivity extends Activity {
     private ImageButton btnMenu;
     private AdView adView;
     private PremiumBilling premiumBilling;
+    private final RemoteConfigManager remoteConfig = new RemoteConfigManager();
     private Button btnOpen;
     private Button btnSave2;
     private Button btnShare;
@@ -195,6 +201,8 @@ public class MainActivity extends Activity {
      * was open); stopRecording finalizes its metadata instead of
      * creating it. */
     private boolean pendingPreCreatedEntry;
+    /** Wall-clock ms when the current recording started (for analytics). */
+    private long recordStartMs;
     /** True when the active recording is the live-FX monitor. */
     private boolean recordingLive;
     /** Plays the existing mix back while a take is recorded (overdub). */
@@ -476,7 +484,42 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // Crash reporter: write uncaught exceptions to a file in Downloads
+        // so they can be shared without debug tools.
+        final Thread.UncaughtExceptionHandler defaultHandler =
+                Thread.getDefaultUncaughtExceptionHandler();
+        final android.content.Context appCtx = getApplicationContext();
+        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
+            try {
+                java.io.File dir = android.os.Environment.getExternalStoragePublicDirectory(
+                        android.os.Environment.DIRECTORY_DOWNLOADS);
+                java.io.File f = new java.io.File(dir,
+                        "audiomechanic_crash.txt");
+                java.io.PrintWriter pw = new java.io.PrintWriter(
+                        new java.io.FileWriter(f, false));
+                pw.println("Crash at " + new java.util.Date());
+                throwable.printStackTrace(pw);
+                pw.close();
+            } catch (Exception ignored) {
+            }
+            if (defaultHandler != null) {
+                defaultHandler.uncaughtException(thread, throwable);
+            }
+        });
         setContentView(R.layout.activity_main);
+
+        // App Check for the summary proxy (ticket AM-1): defensive, since
+        // Firebase may not be configured on this build machine. Never crash.
+        try {
+            if (com.google.firebase.FirebaseApp.initializeApp(this) != null) {
+                com.google.firebase.appcheck.FirebaseAppCheck.getInstance()
+                        .installAppCheckProviderFactory(
+                                com.google.firebase.appcheck.playintegrity
+                                        .PlayIntegrityAppCheckProviderFactory
+                                        .getInstance());
+            }
+        } catch (Exception ignored) {
+        }
 
         tvProjectName = findViewById(R.id.tv_project_name);
         btnMenu = findViewById(R.id.btn_menu);
@@ -611,17 +654,23 @@ public class MainActivity extends Activity {
         restoreSaveFolderUri(prefs);
         updateProjectName();
         refreshHistoryPanel();
+        Analytics.appOpen(this);
+
+        // Remote Config: ads + paid-feature gates. Defaults are
+        // fail-closed (ads on, paid hidden); the fetch may flip them.
+        remoteConfig.init(() -> runOnUiThread(() -> {
+            // Re-apply gates after the fetch (e.g. launch mode disables
+            // ads and unlocks paid tuneups).
+            applyAdVisibility();
+            refreshDiagProfileSegments();
+        }));
 
         // AdMob banner (test ad unit ID until the real one is configured).
         // Premium users never see ads.
         MobileAds.initialize(this, status -> {
         });
         adView = findViewById(R.id.ad_view);
-        if (isPremium()) {
-            adView.setVisibility(View.GONE);
-        } else {
-            adView.loadAd(new AdRequest.Builder().build());
-        }
+        applyAdVisibility();
         premiumBilling = new PremiumBilling(this, premium -> {
             if (premium && adView != null) {
                 adView.setVisibility(View.GONE);
@@ -1208,6 +1257,11 @@ public class MainActivity extends Activity {
                 }).start();
                 return;
             }
+            long size = contentSize(uri);
+            if (size > MAX_IMPORT_BYTES) {
+                setStatus("This file is too large to import (limit 500 MB or 2 hours).");
+                return;
+            }
             try {
                 File dest = new File(getCacheDir(), "input.wav");
                 copyUriToFile(uri, dest);
@@ -1249,6 +1303,23 @@ public class MainActivity extends Activity {
         }
         String seg = uri.getLastPathSegment();
         return seg != null ? seg : "audio.wav";
+    }
+
+    /** Byte size of a content Uri from OpenableColumns.SIZE, or -1 when
+     * the provider does not report one. Used for the AM-3 import cap on
+     * the WAV branch (MP3s are checked after decoding in adoptAudioFile). */
+    private long contentSize(Uri uri) {
+        try (Cursor c = getContentResolver().query(
+                uri, new String[]{OpenableColumns.SIZE}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(OpenableColumns.SIZE);
+                if (idx >= 0 && !c.isNull(idx)) {
+                    return c.getLong(idx);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return -1;
     }
 
     private static String toMp3Name(String audioName) {
@@ -1320,6 +1391,14 @@ public class MainActivity extends Activity {
         try {
             copyFile(wavFile, dest);
             double[] info = wavInfo(dest);
+            // AM-3 import cap, enforced here too so MP3s that decode to an
+            // oversized WAV are rejected as well.
+            if (dest.length() > MAX_IMPORT_BYTES
+                    || info[2] > MAX_IMPORT_SECONDS) {
+                dest.delete();
+                setStatus("This file is too large to import (limit 500 MB or 2 hours).");
+                return;
+            }
             String name = displayName;
             int dot = name.lastIndexOf('.');
             if (dot > 0) {
@@ -1648,6 +1727,16 @@ public class MainActivity extends Activity {
             return;
         }
         final String trackId = track.id;
+        // Analytics: log the applied effect (with reverb preset for fx).
+        String reverbPreset = null;
+        if ("fx".equals(opType) && paramsJson != null) {
+            try {
+                reverbPreset = new JSONObject(paramsJson)
+                        .optString("reverb_preset", null);
+            } catch (Exception ignored) {
+            }
+        }
+        Analytics.effectApplied(this, opType, reverbPreset);
         // Capture the lane's view now: a mid-op selection change must not
         // misroute progress onto another lane.
         final WaveformView opWave = laneWave(trackId);
@@ -1724,6 +1813,7 @@ public class MainActivity extends Activity {
      * the selected track's freshly rendered file; picked files diagnose
      * the current output as before. */
     private void onDiagnoseClicked() {
+        Analytics.diagnoseClicked(this);
         final String entryId = currentEntryId;
         if (entryId != null) {
             diagnoseSelectedTrack(entryId);
@@ -2209,9 +2299,12 @@ public class MainActivity extends Activity {
         list.setPadding(pad, pad, pad, (int) (8 * dp));
 
         // LLM executive summary (Groq/Qwen). Fills in async; the card is
-        // hidden entirely when no API key is configured.
+        // hidden entirely when neither a Groq key (debug) nor the summary
+        // proxy (release) is configured.
         diagFindingsJson = findingsJson;
-        final String groqKey = BuildConfig.GROQ_API_KEY;        LinearLayout summaryCard = new LinearLayout(this);
+        final boolean summaryAvailable = !groqApiKey().isEmpty()
+                || !summaryProxyUrl().isEmpty();
+        LinearLayout summaryCard = new LinearLayout(this);
         summaryCard.setOrientation(LinearLayout.VERTICAL);
         summaryCard.setBackgroundResource(R.drawable.bg_card);
         LinearLayout.LayoutParams scLp = new LinearLayout.LayoutParams(
@@ -2232,7 +2325,7 @@ public class MainActivity extends Activity {
         diagSummaryTv.setLineSpacing(0, 1.25f);
         diagSummaryTv.setPadding(0, (int) (4 * dp), 0, 0);
         summaryCard.addView(diagSummaryTv);
-        if (groqKey == null || groqKey.trim().isEmpty()) {
+        if (!summaryAvailable) {
             summaryCard.setVisibility(android.view.View.GONE);
         } else {
             diagSummaryTv.setText("Summarizing your report…");
@@ -2373,9 +2466,8 @@ public class MainActivity extends Activity {
                     LinearLayout.LayoutParams.WRAP_CONTENT));
             diagTuneUpBtn.setOnClickListener(v -> {
                 final String profile = currentTuneUpProfile();
-                if (isProfileLocked(profile)) {
-                    showProfileUpsell(profile);
-                    return;
+                if (!isProfileVisible(profile)) {
+                    return; // hidden profiles can't run
                 }
                 if (diagDialog != null) {
                     diagDialog.dismiss();
@@ -2560,7 +2652,27 @@ public class MainActivity extends Activity {
 
     private String currentTuneUpProfile() {
         return getSharedPreferences("soundlab", MODE_PRIVATE)
-                .getString("tuneup_profile", "podcast");
+                .getString("tuneup_profile", "singing");
+    }
+
+    /** True when a tune-up profile should be shown: free, or unlocked via
+     * Remote Config, or premium. Paid profiles are invisible otherwise. */
+    private boolean isProfileVisible(String pid) {
+        if (isPremium()) {
+            return true;
+        }
+        JSONObject meta = tuneUpProfiles().optJSONObject(pid);
+        if (meta == null || !meta.optBoolean("premium", false)) {
+            return true; // free profile
+        }
+        // Paid profile: visible only if Remote Config unlocks it.
+        if ("podcast".equals(pid)) {
+            return remoteConfig.isPodcastUnlocked();
+        }
+        if ("music".equals(pid)) {
+            return remoteConfig.isMusicUnlocked();
+        }
+        return false;
     }
 
     private JSONObject tuneUpProfiles() {
@@ -2573,16 +2685,10 @@ public class MainActivity extends Activity {
         return new JSONObject();
     }
 
-    /** True when the recipe is premium-gated and not owned. */
-    private boolean isProfileLocked(String pid) {
-        JSONObject meta = tuneUpProfiles().optJSONObject(pid);
-        return meta != null && meta.optBoolean("premium", false) && !isPremium();
-    }
-
     /** Profile segment tap: locked Pro recipes open the upsell instead. */
     private void onProfileSelected(String pid) {
-        if (isProfileLocked(pid)) {
-            showProfileUpsell(pid);
+        // Hidden profiles can't be tapped (GONE); visible ones are allowed.
+        if (!isProfileVisible(pid)) {
             return;
         }
         getSharedPreferences("soundlab", MODE_PRIVATE).edit()
@@ -2598,6 +2704,33 @@ public class MainActivity extends Activity {
     private String groqApiKey() {
         String k = BuildConfig.GROQ_API_KEY;
         return k == null ? "" : k.trim();
+    }
+
+    /** Summary proxy URL from BuildConfig (release builds), or "" when not
+     * configured. The proxy calls Groq server-side so the API key never
+     * ships in the APK (ticket AM-1). */
+    private String summaryProxyUrl() {
+        String u = BuildConfig.SUMMARY_PROXY_URL;
+        return u == null ? "" : u.trim();
+    }
+
+    /** Current App Check token for the summary proxy, or "" when Firebase
+     * is unconfigured or the token fetch fails. Blocks up to 10 seconds:
+     * call from a worker thread only. */
+    private String appCheckToken() {
+        try {
+            com.google.android.gms.tasks.Task<
+                    com.google.firebase.appcheck.AppCheckToken> task =
+                    com.google.firebase.appcheck.FirebaseAppCheck.getInstance()
+                            .getAppCheckToken(false);
+            com.google.firebase.appcheck.AppCheckToken token =
+                    com.google.android.gms.tasks.Tasks.await(task, 10,
+                            java.util.concurrent.TimeUnit.SECONDS);
+            String t = token == null ? null : token.getToken();
+            return t == null ? "" : t;
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     private static String summaryCacheKey(String findingsJson, String profile) {
@@ -2616,19 +2749,27 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             String summary = "";
             try {
-                if (!Python.isStarted()) {
-                    Python.start(new AndroidPlatform(this));
-                }
-                String body = Python.getInstance()
-                        .getModule("audiofx.android_bridge")
-                        .callAttr("summarize_request_body", findingsJson,
-                                profile).toString();
-                if (!body.isEmpty()) {
-                    String resp = postGroqSummary(body, apiKey);
-                    if (!resp.isEmpty()) {
-                        summary = Python.getInstance()
-                                .getModule("audiofx.android_bridge")
-                                .callAttr("summarize_parse", resp).toString();
+                String proxyUrl = summaryProxyUrl();
+                if (!proxyUrl.isEmpty()) {
+                    // Release builds: the proxy calls Groq server-side; no
+                    // API key or Authorization header leaves the device.
+                    summary = postProxySummary(proxyUrl, findingsJson,
+                            profile);
+                } else {
+                    if (!Python.isStarted()) {
+                        Python.start(new AndroidPlatform(this));
+                    }
+                    String body = Python.getInstance()
+                            .getModule("audiofx.android_bridge")
+                            .callAttr("summarize_request_body", findingsJson,
+                                    profile).toString();
+                    if (!body.isEmpty()) {
+                        String resp = postGroqSummary(body, apiKey);
+                        if (!resp.isEmpty()) {
+                            summary = Python.getInstance()
+                                    .getModule("audiofx.android_bridge")
+                                    .callAttr("summarize_parse", resp).toString();
+                        }
                     }
                 }
             } catch (Exception e) {
@@ -2646,7 +2787,7 @@ public class MainActivity extends Activity {
      * report and profile. */
     private void warmDiagSummaryCache(final String findingsJson) {
         final String apiKey = groqApiKey();
-        if (apiKey.isEmpty()) {
+        if (apiKey.isEmpty() && summaryProxyUrl().isEmpty()) {
             return;
         }
         final String profile = currentTuneUpProfile();
@@ -2672,7 +2813,7 @@ public class MainActivity extends Activity {
             return;
         }
         final String apiKey = groqApiKey();
-        if (apiKey.isEmpty()) {
+        if (apiKey.isEmpty() && summaryProxyUrl().isEmpty()) {
             return;
         }
         final String profile = currentTuneUpProfile();
@@ -2698,6 +2839,9 @@ public class MainActivity extends Activity {
         });
     }
 
+    /* Standing logging rule (AM-6): never concatenate secrets, tokens, or
+     * user identity into a log string. API keys may live in memory and
+     * request headers only. HTTP failures are logged by status code alone. */
     /** POST the summary request to Groq; returns the response body or "". */
     private String postGroqSummary(String bodyJson, String apiKey) {
         java.net.HttpURLConnection conn = null;
@@ -2739,6 +2883,56 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** POST the summary request to the proxy (ticket AM-1); returns the
+     * "summary" from {"summary"} or "". No Authorization header and no API
+     * key: the proxy identifies the app by its App Check token. */
+    private String postProxySummary(String proxyUrl, String findingsJson,
+            String profile) {
+        java.net.HttpURLConnection conn = null;
+        try {
+            java.net.URL url = new java.net.URL(proxyUrl);
+            conn = (java.net.HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(20000);
+            conn.setReadTimeout(20000);
+            org.json.JSONObject payload = new org.json.JSONObject();
+            payload.put("findings_json", findingsJson);
+            payload.put("profile", profile);
+            payload.put("app_check_token", appCheckToken());
+            byte[] body = payload.toString().getBytes(
+                    java.nio.charset.StandardCharsets.UTF_8);
+            conn.setFixedLengthStreamingMode(body.length);
+            try (java.io.OutputStream os = conn.getOutputStream()) {
+                os.write(body);
+            }
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                android.util.Log.w("AudioMechanic",
+                        "summarize: proxy HTTP " + code);
+                return "";
+            }
+            String resp;
+            try (java.io.InputStream is = conn.getInputStream();
+                 java.util.Scanner s = new java.util.Scanner(is, "UTF-8")
+                         .useDelimiter("\\A")) {
+                resp = s.hasNext() ? s.next() : "";
+            }
+            String summary = new org.json.JSONObject(resp)
+                    .optString("summary", "");
+            return summary == null ? "" : summary;
+        } catch (Exception e) {
+            android.util.Log.w("AudioMechanic",
+                    "summarize: proxy request failed: " + e);
+            return "";
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+    }
+
     /** Sync the segment control, recipe line and Tune Up label. */
     private void refreshDiagProfileSegments() {
         if (diagProfileBtns == null) {
@@ -2746,19 +2940,29 @@ public class MainActivity extends Activity {
         }
         String current = currentTuneUpProfile();
         JSONObject profiles = tuneUpProfiles();
-        boolean premium = isPremium();
         for (Button seg : diagProfileBtns) {
             String pid = (String) seg.getTag();
             JSONObject meta = profiles.optJSONObject(pid);
             String label = meta != null ? meta.optString("label", pid) : pid;
-            boolean locked = meta != null && meta.optBoolean("premium", false)
-                    && !premium;
-            seg.setText(label + (locked ? " \uD83D\uDD12" : ""));
+            // Paid profiles are invisible unless unlocked (Remote Config)
+            // or premium; no lock icon, no upsell clutter.
+            boolean visible = isProfileVisible(pid);
+            seg.setVisibility(visible ? View.VISIBLE : View.GONE);
+            if (!visible) {
+                continue;
+            }
+            seg.setText(label);
             boolean selected = pid.equals(current);
             seg.setTextColor(getColor(
                     selected ? R.color.sl_teal2 : R.color.sl_mut));
             seg.setTypeface(null, selected ? android.graphics.Typeface.BOLD
                     : android.graphics.Typeface.NORMAL);
+        }
+        // If the current profile is now hidden, fall back to singing.
+        if (!isProfileVisible(current)) {
+            getSharedPreferences("soundlab", MODE_PRIVATE).edit()
+                    .putString("tuneup_profile", "singing").apply();
+            current = "singing";
         }
         JSONObject cur = profiles.optJSONObject(current);
         if (diagProfileDesc != null) {
@@ -2773,19 +2977,6 @@ public class MainActivity extends Activity {
     }
 
     /** Upsell for the premium tune-up recipes. */
-    private void showProfileUpsell(final String pid) {
-        JSONObject meta = tuneUpProfiles().optJSONObject(pid);
-        String label = meta != null ? meta.optString("label", pid) : pid;
-        new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
-                .setTitle(label + " is a Pro recipe")
-                .setMessage("The " + label
-                        + " tune-up recipe comes with Premium, our one-time "
-                        + "purchase. It also removes all ads.")
-                .setPositiveButton("Buy premium", (d, w) -> buyPremium())
-                .setNegativeButton("Not now", null)
-                .show();
-    }
-
     /** One row of the tune-up step tracker: label + per-step bar. */
     private static class TuneUpRow {
         TextView label;
@@ -3009,6 +3200,7 @@ public class MainActivity extends Activity {
                         "^Tune Up \\([^)]*\\): ", "");
                 runOnUiThread(() -> {
                     hideTuneUpOverlay();
+                    Analytics.tuneUpCompleted(this, currentTuneUpProfile());
                     if (preRendered != null) {
                         applyTuneUpOp(params.toString(), summary,
                                 "Tuning up...",
@@ -3639,6 +3831,7 @@ public class MainActivity extends Activity {
                     createNumberedTrack(currentEntryId);
             selectedTrackId = created.id;
             refreshLanes();
+            Analytics.trackAdded(this);
             setStatus("Track added.");
         } catch (Exception e) {
             setStatus("Could not add track: " + e.getMessage());
@@ -3816,6 +4009,7 @@ public class MainActivity extends Activity {
                 updateProjectDuration();
                 mixDirty = true;
                 setBusy(false);
+                Analytics.trackDeleted(this);
                 setStatus(mTracks.isEmpty() ? "Track deleted."
                         : "Track deleted.");
             });
@@ -4571,6 +4765,8 @@ public class MainActivity extends Activity {
                 + new SimpleDateFormat("yyyy-MM-dd HH-mm", Locale.US).format(new Date())
                 + ".wav";
         enterRecordingUi(false);
+        Analytics.recordStart(this);
+        recordStartMs = System.currentTimeMillis();
         StringBuilder fx = new StringBuilder();
         if (recorder.agcActive()) {
             fx.append(" + AGC");
@@ -4615,6 +4811,8 @@ public class MainActivity extends Activity {
                 + new SimpleDateFormat("yyyy-MM-dd HH-mm", Locale.US).format(new Date())
                 + ".wav";
         enterRecordingUi(true);
+        Analytics.recordStart(this);
+        recordStartMs = System.currentTimeMillis();
         String fxDesc = "Warmth " + seekWarmth.getProgress() + "%, Reverb "
                 + reverbDisplayName(reverbPreset) + ", Echo " + seekEcho.getProgress() + "%";
         StringBuilder fx = new StringBuilder();
@@ -4812,6 +5010,7 @@ public class MainActivity extends Activity {
         final boolean newProject = currentEntryId == null;
         final String entryId;
         final String trackId;
+        boolean wasPunch = false;
         try {
             if (newProject) {
                 // No project open: create one first (the existing
@@ -4837,7 +5036,8 @@ public class MainActivity extends Activity {
                     throw new Exception("no empty track available");
                 }
                 trackId = target.id;
-                if (pendingPunchStartSec != null) {
+                wasPunch = pendingPunchStartSec != null;
+                if (wasPunch) {
                     // Punch-in: the take becomes a durable file referenced
                     // by the op; the op splices it into the track at the
                     // marker. Undoable like any other op.
@@ -4883,6 +5083,11 @@ public class MainActivity extends Activity {
                                     dest.getAbsolutePath());
                         } catch (Exception ignored) {
                         }
+                        // Mirror the entry row in memory: adoptLibraryEntry
+                        // (which sets inputPath) is skipped for the
+                        // pre-created flow, and without inputPath the
+                        // Diagnose/Save/Share buttons stay disabled.
+                        inputPath = dest.getAbsolutePath();
                         pendingPreCreatedEntry = false;
                     }
                 }
@@ -4920,6 +5125,10 @@ public class MainActivity extends Activity {
         }
         refreshLanes();
         onTrackContentChanged(trackId);
+        updateTrackActions();
+        double recordDurSec = (System.currentTimeMillis() - recordStartMs)
+                / 1000.0;
+        Analytics.recordStop(this, recordDurSec, wasPunch);
         setStatus(switchAutoNorm.isChecked()
                 ? "Take saved and normalized."
                 : "Take saved.");
@@ -5952,7 +6161,7 @@ public class MainActivity extends Activity {
                 && new File(currentOutputPath).exists()) ? currentOutputPath : inputPath;
         final boolean raw = srcPath.equals(inputPath);
         showEncodeWaitScreen(raw ? "Encoding MP3 (no effects)..."
-                : "Encoding MP3...", !isPremium());
+                : "Encoding MP3...", showAds());
         new Thread(() -> {
             try {
                 if (!Python.isStarted()) {
@@ -6046,9 +6255,6 @@ public class MainActivity extends Activity {
     private volatile File shareMp3Result;
     private volatile String shareEncodeError;
 
-    /** Test banner unit for the wait screen: swap for the real one at release. */
-    private static final String ENCODE_WAIT_AD_UNIT =
-            "ca-app-pub-3940256099942544/6300978111";
     /** Fresh ad request every interval while encoding is still running. */
     private static final long ENCODE_AD_REFRESH_MS = 15000;
 
@@ -6093,7 +6299,7 @@ public class MainActivity extends Activity {
             adPanel.setPadding(0, (int) (12 * density), 0, (int) (4 * density));
             encodeWaitAd = new AdView(this);
             encodeWaitAd.setAdSize(AdSize.MEDIUM_RECTANGLE);
-            encodeWaitAd.setAdUnitId(ENCODE_WAIT_AD_UNIT);
+            encodeWaitAd.setAdUnitId(getString(R.string.banner_ad_unit_id));
             adPanel.addView(encodeWaitAd);
             root.addView(adPanel);
         }
@@ -6179,7 +6385,7 @@ public class MainActivity extends Activity {
         shareEncodeDone = false;
         shareMp3Result = null;
         shareEncodeError = null;
-        showEncodeWaitScreen("Preparing share file...", !isPremium());
+        showEncodeWaitScreen("Preparing share file...", showAds());
         new Thread(() -> encodeShareFile(srcPath)).start();
     }
 
@@ -6220,7 +6426,7 @@ public class MainActivity extends Activity {
                     shareMp3Result = null;
                     shareEncodeError = null;
                     showEncodeWaitScreen("Preparing share file...",
-                            !isPremium());
+                            showAds());
                     new Thread(() -> encodeShareFile(mixPath)).start();
                 });
             } catch (Exception e) {
@@ -6293,6 +6499,7 @@ public class MainActivity extends Activity {
             send.putExtra(Intent.EXTRA_STREAM, uri);
             send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             setStatus("Sharing " + shareMp3Result.getName() + ".");
+            Analytics.shareCompleted(this);
             startActivity(Intent.createChooser(send, "Share audio"));
         } catch (Exception e) {
             setStatus("Share failed: " + e.getMessage());
@@ -6302,6 +6509,25 @@ public class MainActivity extends Activity {
     /** True once the premium one-time purchase is owned. */
     boolean isPremium() {
         return PremiumBilling.isPremium(this);
+    }
+
+    /** True when ads should show: Remote Config on and not premium. */
+    private boolean showAds() {
+        return remoteConfig.adsEnabled() && !isPremium();
+    }
+
+    /** Banner ad visibility: premium never sees ads; otherwise gated by
+     * Remote Config (ads_enabled). */
+    private void applyAdVisibility() {
+        if (adView == null) {
+            return;
+        }
+        if (!showAds()) {
+            adView.setVisibility(View.GONE);
+        } else {
+            adView.setVisibility(View.VISIBLE);
+            adView.loadAd(new AdRequest.Builder().build());
+        }
     }
 
     private String copyToSaveFolder(File src, String baseName, boolean overwrite)

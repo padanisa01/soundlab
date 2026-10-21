@@ -131,7 +131,7 @@ SCAFFOLD_CHECKS = [
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "finishShare"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "showEncodeWaitScreen"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "dismissEncodeWaitScreen"),
-    ("app/src/main/java/com/audiofx/app/MainActivity.java", "ENCODE_WAIT_AD_UNIT"),
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", "banner_ad_unit_id"),
     ("app/src/main/java/com/audiofx/app/PremiumBilling.java", "PRODUCT_ID"),
     ("app/src/main/java/com/audiofx/app/PremiumBilling.java", "soundlab_premium"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "buyPremium"),
