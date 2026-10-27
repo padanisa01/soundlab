@@ -1464,14 +1464,30 @@ public class MainActivity extends Activity {
             return;
         }
         if (!(new File(e.pristinePath).exists())) {
-            // Defensive per spec: drop entries whose take is gone.
+            // The entry's legacy pristine file is gone. In a multitrack
+            // project the audio lives in the per-track take files, so
+            // only drop the entry when no track has audio either;
+            // otherwise adopt it and let the tracks carry the project.
+            boolean anyTrackAudio = false;
             try {
-                libraryDb.deleteEntry(entryId);
+                for (LibraryDb.Track t : libraryDb.listTracks(entryId)) {
+                    if (trackHasAudio(t)) {
+                        anyTrackAudio = true;
+                        break;
+                    }
+                }
             } catch (Exception ignored) {
             }
-            currentEntryId = null;
-            setStatus("Recording file missing — removed from library.");
-            return;
+            if (!anyTrackAudio) {
+                // Defensive per spec: drop entries whose take is gone.
+                try {
+                    libraryDb.deleteEntry(entryId);
+                } catch (Exception ignored) {
+                }
+                currentEntryId = null;
+                setStatus("Recording file missing — removed from library.");
+                return;
+            }
         }
         currentEntryId = entryId;
         inputPath = e.pristinePath;
