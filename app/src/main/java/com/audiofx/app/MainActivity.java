@@ -1111,7 +1111,7 @@ public class MainActivity extends Activity {
     }
 
     private void showMainMenu() {
-        boolean canSave = inputPath != null && new File(inputPath).exists();
+        boolean canSave = hasUsableAudio();
         List<String> menu = new ArrayList<>();
         menu.add("Open audio file");
         menu.add("Recordings library");
@@ -1182,11 +1182,31 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** True when there is audio the actions can work on: in a project,
+     * any track holding audio (recorded OR opened/imported -- both land
+     * as library tracks, so the source makes no difference); for a
+     * legacy picked file, the file itself. Single source of truth for
+     * every action gate (buttons, menu, Save). */
+    private boolean hasUsableAudio() {
+        if (currentEntryId != null) {
+            for (LibraryDb.Track t : mTracks) {
+                if (trackHasAudio(t)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return inputPath != null && new File(inputPath).exists();
+    }
+
     /**
      * The Open/Save/Share bar is always visible. Save and Share are enabled
      * only when a track is loaded; Open is always available.
      */
     private void updateTrackActions() {
+        if (btnNotation == null || btnSave2 == null) {
+            return; // views not bound yet
+        }
         // In a project, the five actions work off the tracks: Notation,
         // Diagnose and Pitch render the selected track from its own
         // take file, and Save and Share use the track files and the
@@ -1195,18 +1215,7 @@ public class MainActivity extends Activity {
         // is the entry's legacy pristine file, and gating on it greyed
         // out every action when that file went missing even though all
         // tracks were intact (Notation reported "off" on new tracks).
-        boolean hasTrack;
-        if (currentEntryId != null) {
-            hasTrack = false;
-            for (LibraryDb.Track t : mTracks) {
-                if (trackHasAudio(t)) {
-                    hasTrack = true;
-                    break;
-                }
-            }
-        } else {
-            hasTrack = inputPath != null && new File(inputPath).exists();
-        }
+        boolean hasTrack = hasUsableAudio();
         btnSave2.setEnabled(hasTrack);
         btnSave2.setAlpha(hasTrack ? 1f : 0.4f);
         btnShare.setEnabled(hasTrack);
@@ -1745,11 +1754,19 @@ public class MainActivity extends Activity {
         refreshPlayPause(); // the take is savable as-is, no Apply needed
         tvTimeCur.setText("0:00");
         tvTimeTot.setText("0:00");
-        updateTrackActions();
         updateProjectName();
         // ---- Multitrack: every open entry shows its tracks ----
+        // Load the tracks BEFORE evaluating the action gates: this
+        // method used to call updateTrackActions() first, when
+        // mTracks still held the PREVIOUS project (or nothing, at
+        // app start), so audio opened from a file or the library
+        // landed with Notation/Pitch/Diagnose/Save/Share disabled
+        // and nothing ever re-enabled them. Freshly recorded takes
+        // only worked because stopRecording calls
+        // updateTrackActions() again after its own refreshLanes().
         ensureTracksForEntry(entryId);
         refreshLanes();
+        updateTrackActions();
         int depth = undoDepth(selectedTrackId);
         setStatus(depth > 0
                 ? "Loaded from library — " + depth + " effects in history."
@@ -3791,6 +3808,11 @@ public class MainActivity extends Activity {
         waveformView = sel != null ? sel.wave : null;
         updateLaneSelectionHighlights();
         updateProjectDuration();
+        // Lanes just (re)loaded the track list: re-evaluate the action
+        // gates against the tracks that are actually here now. This is
+        // what makes opened/imported audio behave like recorded audio
+        // regardless of call order elsewhere.
+        updateTrackActions();
     }
 
     /** Selection highlight across lanes. */
@@ -5451,40 +5473,150 @@ public class MainActivity extends Activity {
             adoptLibraryEntry(entryId, false);
         }
         refreshLanes();
-        onTrackContentChanged(trackId);
         updateTrackActions();
         double recordDurSec = (System.currentTimeMillis() - recordStartMs)
                 / 1000.0;
-        String scVerdict = null;
-        if (pendingSoundcheck) {
-            scVerdict = finalizeSoundcheckTake(entryId, trackId, wasPunch);
-            pendingSoundcheck = false;
-        }
         Analytics.recordStop(this, recordDurSec, wasPunch);
-        setStatus(scVerdict != null ? scVerdict
-                : switchAutoNorm.isChecked()
-                ? "Take saved and normalized."
-                : "Take saved.");
+        if (pendingSoundcheck) {
+            // Soundcheck: render first, THEN scan the final rendered
+            // track (and the raw take) for ceiling clipping before
+            // forming the verdict. The old flow formed the verdict
+            // from the live capture counters alone, so clipping
+            // created afterwards by processing (the auto-normalize
+            // hard hold flattened ~1% of samples at -1 dBFS in the
+            // soundcheck_1 QA take) was reported as "no clipping".
+            pendingSoundcheck = false;
+            final boolean punch = wasPunch;
+            renderTrackAndScanSoundcheck(entryId, trackId, punch,
+                    captureClipText());
+            setStatus("Soundcheck take saved — scanning the rendered "
+                    + "track for clipping...");
+        } else {
+            onTrackContentChanged(trackId);
+            setStatus(switchAutoNorm.isChecked()
+                    ? "Take saved and normalized."
+                    : "Take saved.");
+        }
         pendingRecordTrackId = null;
         monitorMixFile = null;
+    }
+
+    /** Live-capture half of the soundcheck verdict, from the block
+     * counters read at stop time. */
+    private String captureClipText() {
+        String peakTxt = livePeakAcc > 0.001f
+                ? String.format(Locale.US, "%.1f dB",
+                        20 * Math.log10(livePeakAcc))
+                : "silence";
+        return scClipBlocks == 0
+                ? "capture: no clipping, peak " + peakTxt
+                : "capture: " + scClipBlocks + " clipped blocks, peak "
+                        + peakTxt;
+    }
+
+    /** Ceiling-clipping scan of one WAV via Python (null on failure).
+     * Blocking: call off the UI thread. */
+    private JSONObject scanClippingBlocking(String path) {
+        if (path == null) {
+            return null;
+        }
+        try {
+            if (!Python.isStarted()) {
+                Python.start(new AndroidPlatform(this));
+            }
+            String json = Python.getInstance()
+                    .getModule("audiofx.android_bridge")
+                    .callAttr("scan_clipping_file", path).toString();
+            return new JSONObject(json);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Soundcheck render + scan: mirrors onTrackContentChanged (render
+     * the track, refresh its lane) and, once the render file is final,
+     * scans the rendered track and the raw take for flat-top ceiling
+     * clipping, then posts the full verdict. Capture clipping and
+     * processing clipping are reported separately.
+     */
+    private void renderTrackAndScanSoundcheck(final String entryId,
+            final String trackId, final boolean wasPunch,
+            final String captureTxt) {
+        cachedDiagJson = null;
+        cachedDiagPath = null;
+        diagLastPath = null;
+        diagTrackId = null;
+        diagSummaryCache.clear();
+        final WaveformView tcWave = laneWave(trackId);
+        final LibraryDb.Track track = getTrackById(trackId);
+        final String rawPath = (!wasPunch && track != null)
+                ? track.wavPath : null;
+        setBusy(true);
+        if (tcWave != null) {
+            tcWave.startProgressAnimation();
+        }
+        setStatus("Rendering track...");
+        new Thread(() -> {
+            try {
+                renderTrackBlocking(entryId, trackId);
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setStatus("Render failed: " + e.getMessage());
+                    setBusy(false);
+                    if (tcWave != null) {
+                        tcWave.clearProgress();
+                    }
+                });
+                return;
+            }
+            final JSONObject renderedScan = scanClippingBlocking(
+                    libraryDb.trackRenderFile(trackId).getAbsolutePath());
+            final JSONObject rawScan = scanClippingBlocking(rawPath);
+            runOnUiThread(() -> {
+                refreshLanePeaks(trackId);
+                setStatus(finalizeSoundcheckTake(entryId, trackId,
+                        wasPunch, captureTxt, rawScan, renderedScan));
+            });
+        }).start();
     }
 
     /** Soundcheck take bookkeeping: a fresh take gets the default
      * soundcheck name (when it still carries an auto "Track N" name)
      * and lands muted, so it stays out of the mix until unmuted on
      * purpose. Punch-ins splice into an existing track, so they keep
-     * that track's name and mute state. Returns the verdict line. */
+     * that track's name and mute state. Returns the verdict line,
+     * which reports the live capture result and the final rendered
+     * track's ceiling scan separately, so processing-created
+     * clipping is never hidden behind a clean capture (or the
+     * reverse). */
     private String finalizeSoundcheckTake(String entryId,
-            String trackId, boolean wasPunch) {
-        String peakTxt = livePeakAcc > 0.001f
-                ? String.format(Locale.US, "%.1f dB",
-                        20 * Math.log10(livePeakAcc))
-                : "silence";
-        String clipTxt = scClipBlocks == 0
-                ? "no clipping, peak " + peakTxt
-                : scClipBlocks + " clipped blocks, peak " + peakTxt;
+            String trackId, boolean wasPunch, String captureTxt,
+            JSONObject rawScan, JSONObject renderedScan) {
+        String finalTxt;
+        boolean finalClipped = renderedScan != null
+                && renderedScan.optBoolean("is_clipped", false);
+        if (renderedScan == null) {
+            finalTxt = "final track: scan unavailable";
+        } else if (finalClipped) {
+            finalTxt = String.format(Locale.US,
+                    "final track: %d samples flat-topped at the "
+                            + "%.1f dBFS ceiling (%d spots)",
+                    renderedScan.optInt("flat_samples", 0),
+                    renderedScan.optDouble("peak_db", 0),
+                    renderedScan.optInt("flat_runs", 0));
+            if (rawScan != null) {
+                finalTxt += rawScan.optBoolean("is_clipped", false)
+                        ? " — present in the raw take too"
+                        : " — NOT in the raw take: introduced by "
+                                + "processing";
+            }
+        } else {
+            finalTxt = "final track: no flat-top clipping";
+        }
         if (wasPunch) {
-            return "Soundcheck punch-in saved: " + clipTxt + ".";
+            return "Soundcheck punch-in saved: " + captureTxt + "; "
+                    + finalTxt + ".";
         }
         try {
             LibraryDb.Track t = getTrackById(trackId);
@@ -5501,7 +5633,13 @@ public class MainActivity extends Activity {
         }
         String hint = scClipBlocks >= 10
                 ? " Move the phone back or lower the source." : "";
-        return "Soundcheck take saved and muted: " + clipTxt + "." + hint;
+        if (finalClipped && rawScan != null
+                && !rawScan.optBoolean("is_clipped", false)) {
+            hint += " Processing added the clipping — check "
+                    + "auto-normalize/effects on this track.";
+        }
+        return "Soundcheck take saved and muted: " + captureTxt + "; "
+                + finalTxt + "." + hint;
     }
 
     /** First free default label: soundcheck, soundcheck_1, ... */
@@ -6208,13 +6346,19 @@ public class MainActivity extends Activity {
     }
 
     private void onSaveClicked() {
-        if (inputPath == null || !(new File(inputPath).exists())) {
-            Toast.makeText(this, "Pick an audio file or record first", Toast.LENGTH_SHORT).show();
+        if (currentEntryId != null) {
+            // Multitrack project: one WAV per track. The tracks are
+            // the audio; the entry's legacy pristine file is not the
+            // gate (same rule as updateTrackActions).
+            if (!hasUsableAudio()) {
+                Toast.makeText(this, "Pick an audio file or record first", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            showSaveTracksDialog();
             return;
         }
-        if (currentEntryId != null) {
-            // Multitrack project: one WAV per track.
-            showSaveTracksDialog();
+        if (inputPath == null || !(new File(inputPath).exists())) {
+            Toast.makeText(this, "Pick an audio file or record first", Toast.LENGTH_SHORT).show();
             return;
         }
         showSaveDialog();

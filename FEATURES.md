@@ -55,7 +55,19 @@ or the plan changes.
   keep the target track's name and mute state. The take is otherwise
   a regular track: unmute or rename it to keep it. On the live-FX
   path the watch reads the post-chain (wet) peaks, i.e. what is
-  actually baked into the take.
+  actually baked into the take. Block peaks are per-channel maxima
+  (no mono averaging, so one clipped channel cannot be diluted by
+  the other). After the take renders, the verdict ALSO scans the
+  final rendered track (and the raw take) for flat-top ceiling
+  clipping -- repeated runs of samples held exactly at the track's
+  own peak, at full scale or below it (e.g. -1 dBFS) -- and reports
+  capture clipping and final-track clipping separately, including
+  whether flat-topping was introduced by processing. (Fix
+  2026-10-27: the first soundcheck QA take was reported "no
+  clipping" while auto-normalize had flattened 11,004 samples at
+  -1 dBFS; see the Normalize entry.) Diagnose's clipping check uses
+  the same ceiling detector, so it catches below-full-scale
+  flat-topping too.
 - **Settings** (hamburger menu): a tabbed dialog; the Soundcheck tab
   holds the four cue switches (border flash, burst beeps, headset
   routing, vibration), each stored live in prefs and on by default,
@@ -72,17 +84,29 @@ or the plan changes.
   lock during a live take.
 - 8-bit and 16-bit PCM supported; stereo is mixed down to mono.
 - The input file name is remembered and reused for the MP3 save name.
-- **Normalize** normalizes the current audio so its 99th-percentile
-  peak reaches -1 dBFS. Using the 99th percentile (not the absolute
-  max) keeps pops and bursts from misleading the gain; the gain is one
-  whole-file constant (dynamics preserved) and anything that would
-  exceed the target is hard-held at -1 dBFS, so transients are limited,
-  never boosted into clipping. The percentile is a code-level
-  parameter (`percentile=99.0`), not user-facing. Applies to the
-  processed output when there is one, else the input; undoable like any
+- **Normalize** normalizes the current audio so its absolute peak
+  reaches -1 dBFS, introducing NO new clipping. The 99th-percentile
+  level is still measured and reported, but the applied gain is
+  capped by the absolute peak (`gain = min(target/p99, target/peak)`,
+  one whole-file constant, dynamics preserved) and no sample is ever
+  hard-held at the target. (Changed 2026-10-27: the previous
+  percentile gain + hard hold flattened ~1% of samples on dynamic
+  recordings -- audible clipping created by the app itself. A
+  deliberate limiter is the separate Limiter feature, not a clip
+  inside Normalize.) The percentile is a code-level parameter
+  (`percentile=99.0`), not user-facing. Applies to the processed
+  output when there is one, else the input; undoable like any
   effect; the status reports the percentile reference and the target.
+- **Opened audio is first-class**: audio opened from a file (WAV or
+  MP3) or from the library gets every function recorded audio gets
+  -- Notation, Pitch, Diagnose, effects, Normalize, Trim/Join,
+  Save, Share. (Fix 2026-10-27: opening used to evaluate the action
+  gates before the project's tracks loaded, so opened audio landed
+  with Notation/Pitch disabled; the gates now evaluate after the
+  tracks load and re-evaluate on every lane refresh, via the single
+  `hasUsableAudio()` rule.)
 - **Normalize** button (transport row): smart-volume icon (level bars
-  rising to a target line); same 99th-percentile normalize as before.
+  rising to a target line); same peak-safe normalize as above.
 - **Live recording waveform**: while recording, the waveform grows bar
   by bar from the mic's live block peaks, with a red record-head line
   at the frontier; selection taps are ignored until the take ends.
