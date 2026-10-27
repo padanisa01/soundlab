@@ -949,7 +949,26 @@ public class MainActivity extends Activity {
      * only when a track is loaded; Open is always available.
      */
     private void updateTrackActions() {
-        boolean hasTrack = inputPath != null && new File(inputPath).exists();
+        // In a project, the five actions work off the tracks: Notation,
+        // Diagnose and Pitch render the selected track from its own
+        // take file, and Save and Share use the track files and the
+        // mix. Enable them when any track has audio. The inputPath
+        // check is kept for picked files only: in a project inputPath
+        // is the entry's legacy pristine file, and gating on it greyed
+        // out every action when that file went missing even though all
+        // tracks were intact (Notation reported "off" on new tracks).
+        boolean hasTrack;
+        if (currentEntryId != null) {
+            hasTrack = false;
+            for (LibraryDb.Track t : mTracks) {
+                if (trackHasAudio(t)) {
+                    hasTrack = true;
+                    break;
+                }
+            }
+        } else {
+            hasTrack = inputPath != null && new File(inputPath).exists();
+        }
         btnSave2.setEnabled(hasTrack);
         btnSave2.setAlpha(hasTrack ? 1f : 0.4f);
         btnShare.setEnabled(hasTrack);
