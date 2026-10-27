@@ -34,6 +34,9 @@ public class LiveFxMonitor {
     private static final int BLOCK_SAMPLES = 2048;
 
     private MicCapture.Handle cap;
+    /** Limiter choice from start(); spawnWorker() reads it (it is
+     * also called from resume(), where no parameter is in scope). */
+    private boolean wantLimiter;
     private AudioTrack track;
     private AcousticEchoCanceler aec;
     private final CaptureFx fx = new CaptureFx();
@@ -208,6 +211,7 @@ public class LiveFxMonitor {
             return false;
         }
         cap = h;
+        this.wantLimiter = wantLimiter;
         track = newTrack;
         aec = newAec;
         chain = newChain;
