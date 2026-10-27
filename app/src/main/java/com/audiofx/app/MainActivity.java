@@ -17,7 +17,16 @@ import android.database.Cursor;
 import android.graphics.Typeface;
 import android.graphics.RectF;
 import android.util.TypedValue;
+import android.media.AudioAttributes;
+import android.media.AudioDeviceInfo;
+import android.media.AudioFormat;
+import android.media.AudioManager;
+import android.media.AudioTrack;
 import android.media.MediaPlayer;
+import android.os.Build;
+import android.os.SystemClock;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -108,6 +117,37 @@ public class MainActivity extends Activity {
     private Button btnDiagnose;
     private ImageButton btnNotation;
     private ImageButton btnPitch;
+    private View transportCard;
+    private TextView segRecord;
+    private TextView segSoundcheck;
+    /** Soundcheck mode (the segmented Record|Soundcheck control):
+     * takes get live clipping cues, land muted, and take a default
+     * soundcheck name. pendingSoundcheck snapshots the mode at the
+     * start of a take, like pendingRecordTrackId for the target. */
+    private boolean soundcheckMode;
+    private boolean pendingSoundcheck;
+    // Soundcheck clip watch, per take: armed in enterRecordingUi and
+    // read by stopRecording for the verdict. Thresholds are named so
+    // they can be tuned without touching the logic.
+    private static final float SC_CLIP_PEAK = 0.99f;
+    private static final int SC_BURST_CLIPS = 3;
+    private static final long SC_BURST_WINDOW_MS = 500;
+    private static final long SC_BURST_REFRACTORY_MS = 600;
+    private static final long SC_FLASH_MS = 350;
+    private int scClipBlocks;
+    private int scWindowCount;
+    private long scWindowStartMs;
+    private long scLastBurstMs;
+    private boolean scCueBorder;
+    private boolean scCueBeep;
+    private boolean scCueVibrate;
+    private AudioTrack scBeepTrack;
+    private byte[] scBeepData;
+    private final Runnable scFlashOff = () -> {
+        if (transportCard != null) {
+            transportCard.setBackgroundResource(R.drawable.bg_card);
+        }
+    };
     private TextView toastView;
     private final Runnable hideToast = () -> {
         toastView.animate().alpha(0f).setDuration(250)
@@ -274,6 +314,165 @@ public class MainActivity extends Activity {
     private void onCaptureBlock(float peak) {
         if (peak > livePeakAcc) {
             livePeakAcc = peak;
+        }
+        if (pendingSoundcheck && peak >= SC_CLIP_PEAK) {
+            onScClipBlock();
+        }
+    }
+
+    /** One full-scale block during a soundcheck take: count it, flash
+     * the transport card border, and fire the burst cues when the
+     * clipping is sustained. Runs on the capture thread: keep it
+     * cheap, UI work goes through the main handler. */
+    private void onScClipBlock() {
+        scClipBlocks++;
+        long now = SystemClock.uptimeMillis();
+        if (scCueBorder && transportCard != null) {
+            mainHandler.post(() -> {
+                transportCard.setBackgroundResource(
+                        R.drawable.bg_card_alert);
+                mainHandler.removeCallbacks(scFlashOff);
+                mainHandler.postDelayed(scFlashOff, SC_FLASH_MS);
+            });
+        }
+        if (now - scWindowStartMs > SC_BURST_WINDOW_MS) {
+            scWindowStartMs = now;
+            scWindowCount = 0;
+        }
+        scWindowCount++;
+        if (scWindowCount >= SC_BURST_CLIPS
+                && now - scLastBurstMs >= SC_BURST_REFRACTORY_MS) {
+            scLastBurstMs = now;
+            scWindowCount = 0;
+            if (scCueBeep) {
+                mainHandler.post(this::playScBeep);
+            }
+            if (scCueVibrate) {
+                vibrateSc();
+            }
+        }
+    }
+
+    /** Release the soundcheck cue resources (flash state, beep
+     * player). Counters survive: stopRecording reads them for the
+     * verdict after exitRecordingUi runs. */
+    private void stopScCues() {
+        mainHandler.removeCallbacks(scFlashOff);
+        if (transportCard != null) {
+            transportCard.setBackgroundResource(R.drawable.bg_card);
+        }
+        if (scBeepTrack != null) {
+            try {
+                scBeepTrack.stop();
+            } catch (Exception ignored) {
+            }
+            scBeepTrack.release();
+            scBeepTrack = null;
+        }
+    }
+
+    /** Create the beep player for a soundcheck take: a short 2 kHz
+     * burst on the media stream, routed per the headset cue pref. */
+    private void startScBeepTrack(boolean headsetRouting) {
+        try {
+            int rate = 44100;
+            int frames = (int) (rate * 0.07);
+            scBeepData = new byte[frames * 2];
+            for (int i = 0; i < frames; i++) {
+                double env = Math.min(1.0,
+                        Math.min(i, frames - i) / (rate * 0.005));
+                short s = (short) (Math.sin(
+                        2 * Math.PI * 2000 * i / rate) * 0.5 * env * 32767);
+                scBeepData[i * 2] = (byte) (s & 0xff);
+                scBeepData[i * 2 + 1] = (byte) ((s >> 8) & 0xff);
+            }
+            int minBuf = AudioTrack.getMinBufferSize(rate,
+                    AudioFormat.CHANNEL_OUT_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT);
+            AudioTrack t = new AudioTrack.Builder()
+                    .setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(
+                                    AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build())
+                    .setAudioFormat(new AudioFormat.Builder()
+                            .setSampleRate(rate)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .build())
+                    .setBufferSizeInBytes(
+                            Math.max(minBuf, scBeepData.length * 2))
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build();
+            AudioDeviceInfo pref = pickScCueDevice(headsetRouting);
+            if (pref != null) {
+                t.setPreferredDevice(pref);
+            }
+            scBeepTrack = t;
+        } catch (Exception e) {
+            scBeepTrack = null;
+        }
+    }
+
+    /** The output device beeps should use: a wired or Bluetooth
+     * headset when routing is on and one is connected; the built-in
+     * speaker when routing is off, so a connected headset stays
+     * silent; null for the system default route. */
+    private AudioDeviceInfo pickScCueDevice(boolean headsetRouting) {
+        try {
+            AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+            if (am == null) {
+                return null;
+            }
+            AudioDeviceInfo speaker = null;
+            for (AudioDeviceInfo d
+                    : am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+                int type = d.getType();
+                if (type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                    speaker = d;
+                }
+                if (headsetRouting && (type
+                                == AudioDeviceInfo.TYPE_WIRED_HEADSET
+                        || type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+                        || type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
+                        || type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO)) {
+                    return d;
+                }
+            }
+            return headsetRouting ? null : speaker;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private void playScBeep() {
+        AudioTrack t = scBeepTrack;
+        if (t == null || scBeepData == null) {
+            return;
+        }
+        try {
+            if (t.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
+                t.play();
+            }
+            t.write(scBeepData, 0, scBeepData.length,
+                    AudioTrack.WRITE_NON_BLOCKING);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void vibrateSc() {
+        try {
+            Vibrator v = (Vibrator) getSystemService(VIBRATOR_SERVICE);
+            if (v == null || !v.hasVibrator()) {
+                return;
+            }
+            if (Build.VERSION.SDK_INT >= 26) {
+                v.vibrate(VibrationEffect.createOneShot(
+                        120, VibrationEffect.DEFAULT_AMPLITUDE));
+            } else {
+                v.vibrate(120);
+            }
+        } catch (Exception ignored) {
         }
     }
 
@@ -637,6 +836,14 @@ public class MainActivity extends Activity {
         btnUndo.setOnClickListener(v -> undoLastEffect());
         btnPlayPause.setOnClickListener(v -> togglePlayPause());
         btnRecord.setOnClickListener(v -> onRecordClicked());
+        transportCard = findViewById(R.id.transport_card);
+        segRecord = findViewById(R.id.seg_record);
+        segSoundcheck = findViewById(R.id.seg_soundcheck);
+        soundcheckMode = getSharedPreferences("soundlab", MODE_PRIVATE)
+                .getBoolean("soundcheck_mode", false);
+        segRecord.setOnClickListener(v -> setSoundcheckMode(false));
+        segSoundcheck.setOnClickListener(v -> setSoundcheckMode(true));
+        updateRecordModeUi();
         tracksBar = findViewById(R.id.tracks_bar);
         laneList = findViewById(R.id.lane_list);
         btnAddTrack = findViewById(R.id.btn_add_track);
@@ -909,6 +1116,7 @@ public class MainActivity extends Activity {
         menu.add("Open audio file");
         menu.add("Recordings library");
         menu.add("Tutorial");
+        menu.add("Settings");
         if (canSave) {
             menu.add("Save as MP3");
             menu.add("Share");
@@ -926,6 +1134,8 @@ public class MainActivity extends Activity {
                         openLibrary();
                     } else if (sel.equals("Tutorial")) {
                         showTutorial();
+                    } else if (sel.equals("Settings")) {
+                        showSettingsDialog();
                     } else if (sel.equals("Share")) {
                         shareAudio();
                     } else if (sel.equals("Buy premium version")) {
@@ -935,6 +1145,34 @@ public class MainActivity extends Activity {
                     }
                 })
                 .show();
+    }
+
+    /** App settings: a tabbed dialog (tabs across the top, one page
+     * per tab). The Soundcheck tab holds the cue combination: border
+     * flash, burst beeps, headset routing, vibration. Each switch is
+     * stored live in prefs and defaults to on. */
+    private void showSettingsDialog() {
+        View view = getLayoutInflater()
+                .inflate(R.layout.dialog_settings, null);
+        SharedPreferences prefs =
+                getSharedPreferences("soundlab", MODE_PRIVATE);
+        bindCueSwitch(view, R.id.sw_sc_border, prefs, "sc_cue_border");
+        bindCueSwitch(view, R.id.sw_sc_beep, prefs, "sc_cue_beep");
+        bindCueSwitch(view, R.id.sw_sc_headset, prefs, "sc_cue_headset");
+        bindCueSwitch(view, R.id.sw_sc_vibrate, prefs, "sc_cue_vibrate");
+        new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+                .setTitle("Settings")
+                .setView(view)
+                .setPositiveButton("Close", null)
+                .show();
+    }
+
+    private void bindCueSwitch(View root, int id,
+            SharedPreferences prefs, String key) {
+        Switch sw = root.findViewById(id);
+        sw.setChecked(prefs.getBoolean(key, true));
+        sw.setOnCheckedChangeListener((b, on) ->
+                prefs.edit().putBoolean(key, on).apply());
     }
 
     /** Starts the one-time premium purchase flow. */
@@ -4663,6 +4901,38 @@ public class MainActivity extends Activity {
         return recorder.isRecording() || liveMonitor.isRecording();
     }
 
+    /** Flip the Record|Soundcheck segmented control (sticky, kept in
+     * prefs). Locked during a recording session: the mode is
+     * snapshotted per take. */
+    private void setSoundcheckMode(boolean on) {
+        if (isRecordingSession()) {
+            setStatus("Stop recording to change the record mode.");
+            return;
+        }
+        soundcheckMode = on;
+        getSharedPreferences("soundlab", MODE_PRIVATE).edit()
+                .putBoolean("soundcheck_mode", on).apply();
+        updateRecordModeUi();
+        setStatus(on
+                ? "Soundcheck mode: takes get clipping cues and land muted."
+                : "Record mode: normal takes.");
+    }
+
+    private void updateRecordModeUi() {
+        paintSegment(segRecord, !soundcheckMode);
+        paintSegment(segSoundcheck, soundcheckMode);
+    }
+
+    private void paintSegment(TextView seg, boolean selected) {
+        if (seg == null) {
+            return;
+        }
+        seg.setBackgroundResource(selected ? R.drawable.bg_chip : 0);
+        seg.setTextColor(getColor(selected
+                ? R.color.sl_teal2 : R.color.sl_mut));
+        seg.setTypeface(null, selected ? Typeface.BOLD : Typeface.NORMAL);
+    }
+
     private void onRecordClicked() {
         if (recorder.isPaused() || liveMonitor.isPaused()) {
             resumeRecording();
@@ -4782,6 +5052,7 @@ public class MainActivity extends Activity {
 
     /** Start the mic capture (UI thread); the monitor mix is already fresh. */
     private void beginCapture(File monitorMixFile) {
+        pendingSoundcheck = soundcheckMode;
         if (switchLiveFx.isChecked()) {
             startLiveRecording(monitorMixFile);
             return;
@@ -4791,6 +5062,7 @@ public class MainActivity extends Activity {
         if (!recorder.start(take)) {
             pendingRecordTrackId = null;
             pendingPunchStartSec = null;
+            pendingSoundcheck = false;
             setStatus("Microphone unavailable on this device.");
             return;
         }
@@ -4837,6 +5109,7 @@ public class MainActivity extends Activity {
         if (!liveMonitor.start(take, warmth, reverbPreset, echo,
                 switchAgc.isChecked(), switchNs.isChecked())) {
             pendingRecordTrackId = null;
+            pendingSoundcheck = false;
             setStatus("Live FX unavailable on this device.");
             return;
         }
@@ -4958,6 +5231,22 @@ public class MainActivity extends Activity {
         btnNormalize.setAlpha(0.4f);
         // Live waveform: capture threads feed block peaks via the listener.
         livePeakAcc = 0f;
+        // Soundcheck: reset the clip watch and arm the enabled cues.
+        scClipBlocks = 0;
+        scWindowCount = 0;
+        scWindowStartMs = 0;
+        scLastBurstMs = 0;
+        if (pendingSoundcheck) {
+            SharedPreferences scPrefs =
+                    getSharedPreferences("soundlab", MODE_PRIVATE);
+            scCueBorder = scPrefs.getBoolean("sc_cue_border", true);
+            scCueBeep = scPrefs.getBoolean("sc_cue_beep", true);
+            scCueVibrate = scPrefs.getBoolean("sc_cue_vibrate", true);
+            if (scCueBeep) {
+                startScBeepTrack(
+                        scPrefs.getBoolean("sc_cue_headset", true));
+            }
+        }
         recorder.setBlockListener(this::onCaptureBlock);
         liveMonitor.setBlockListener(this::onCaptureBlock);
         TrackLane recLane = laneById.get(pendingRecordTrackId);
@@ -5001,6 +5290,7 @@ public class MainActivity extends Activity {
         }
         recorder.setBlockListener(null);
         liveMonitor.setBlockListener(null);
+        stopScCues();
         seekWarmth.setEnabled(true);
         seekEcho.setEnabled(true);
         chipStudio.setEnabled(true);
@@ -5035,6 +5325,7 @@ public class MainActivity extends Activity {
             }
             setStatus("No audio captured.");
             pendingRecordTrackId = null;
+            pendingSoundcheck = false;
             pendingPunchStartSec = null;
             monitorMixFile = null;
             return;
@@ -5145,6 +5436,7 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             setStatus("Could not save recording: " + e.getMessage());
             pendingRecordTrackId = null;
+            pendingSoundcheck = false;
             pendingPunchStartSec = null;
             pendingPreCreatedEntry = false;
             monitorMixFile = null;
@@ -5163,12 +5455,70 @@ public class MainActivity extends Activity {
         updateTrackActions();
         double recordDurSec = (System.currentTimeMillis() - recordStartMs)
                 / 1000.0;
+        String scVerdict = null;
+        if (pendingSoundcheck) {
+            scVerdict = finalizeSoundcheckTake(entryId, trackId, wasPunch);
+            pendingSoundcheck = false;
+        }
         Analytics.recordStop(this, recordDurSec, wasPunch);
-        setStatus(switchAutoNorm.isChecked()
+        setStatus(scVerdict != null ? scVerdict
+                : switchAutoNorm.isChecked()
                 ? "Take saved and normalized."
                 : "Take saved.");
         pendingRecordTrackId = null;
         monitorMixFile = null;
+    }
+
+    /** Soundcheck take bookkeeping: a fresh take gets the default
+     * soundcheck name (when it still carries an auto "Track N" name)
+     * and lands muted, so it stays out of the mix until unmuted on
+     * purpose. Punch-ins splice into an existing track, so they keep
+     * that track's name and mute state. Returns the verdict line. */
+    private String finalizeSoundcheckTake(String entryId,
+            String trackId, boolean wasPunch) {
+        String peakTxt = livePeakAcc > 0.001f
+                ? String.format(Locale.US, "%.1f dB",
+                        20 * Math.log10(livePeakAcc))
+                : "silence";
+        String clipTxt = scClipBlocks == 0
+                ? "no clipping, peak " + peakTxt
+                : scClipBlocks + " clipped blocks, peak " + peakTxt;
+        if (wasPunch) {
+            return "Soundcheck punch-in saved: " + clipTxt + ".";
+        }
+        try {
+            LibraryDb.Track t = getTrackById(trackId);
+            if (t != null && t.name != null
+                    && t.name.matches("Track \\d+")) {
+                libraryDb.renameTrack(trackId, nextSoundcheckLabel());
+            }
+            libraryDb.setTrackMuted(trackId, true);
+            mTracks = libraryDb.listTracks(entryId);
+            mixDirty = true;
+            releasePlayer();
+            refreshLanes();
+        } catch (Exception ignored) {
+        }
+        String hint = scClipBlocks >= 10
+                ? " Move the phone back or lower the source." : "";
+        return "Soundcheck take saved and muted: " + clipTxt + "." + hint;
+    }
+
+    /** First free default label: soundcheck, soundcheck_1, ... */
+    private String nextSoundcheckLabel() {
+        java.util.Set<String> names = new java.util.HashSet<>();
+        for (LibraryDb.Track t : mTracks) {
+            names.add(t.name);
+        }
+        if (!names.contains("soundcheck")) {
+            return "soundcheck";
+        }
+        for (int i = 1; ; i++) {
+            String cand = "soundcheck_" + i;
+            if (!names.contains(cand)) {
+                return cand;
+            }
+        }
     }
 
     /** Library path for Apply: append an fx op, re-render cumulatively. */

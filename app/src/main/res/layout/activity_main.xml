@@ -198,6 +198,7 @@
                  The waveform itself now lives in the per-track lanes
                  above; playback here is always the mix. -->
             <LinearLayout
+                android:id="@+id/transport_card"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="14dp"
@@ -295,6 +296,40 @@
                         android:textColor="@color/sl_teal2"
                         android:textSize="18sp"
                         android:visibility="gone" />
+                </LinearLayout>
+
+                <!-- Record mode: normal take or soundcheck take. -->
+                <LinearLayout
+                    android:id="@+id/record_mode_row"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center_horizontal"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/bg_sel_chip_empty"
+                    android:orientation="horizontal"
+                    android:padding="3dp">
+
+                    <TextView
+                        android:id="@+id/seg_record"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:paddingStart="16dp"
+                        android:paddingEnd="16dp"
+                        android:paddingTop="5dp"
+                        android:paddingBottom="5dp"
+                        android:text="Record"
+                        android:textSize="12sp" />
+
+                    <TextView
+                        android:id="@+id/seg_soundcheck"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:paddingStart="16dp"
+                        android:paddingEnd="16dp"
+                        android:paddingTop="5dp"
+                        android:paddingBottom="5dp"
+                        android:text="Soundcheck"
+                        android:textSize="12sp" />
                 </LinearLayout>
 
                 <LinearLayout

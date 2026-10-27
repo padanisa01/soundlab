@@ -36,6 +36,30 @@ or the plan changes.
   AutomaticGainControl / NoiseSuppressor effects (both off by
   default, choices persist). The record-start toast reports which
   effects actually engaged, or that the device doesn't support them.
+- **Soundcheck mode** (branch feature/soundcheck, awaiting on-device
+  QA): a segmented Record|Soundcheck control above the record button
+  (sticky, persisted, locked during a session). A soundcheck take
+  records exactly like a normal take, but a clip watch rides the
+  per-block peak feed: blocks at or above 0.99 full scale count as
+  clipped, and the enabled cues fire live. Cues (Settings, below):
+  the transport card border flashes red while clipping (V5);
+  sustained clipping (3+ clipped blocks within 500 ms, 600 ms
+  refractory) triggers a short 2 kHz beep (A2), routed to a connected
+  wired/Bluetooth headset when headset routing is on and to the
+  speaker otherwise (A4); sustained clipping also buzzes (A5). At
+  stop, a fresh take is renamed to the first free default label
+  (soundcheck, soundcheck_1, ...) when it still carries an auto
+  "Track N" name, is auto-muted so it stays out of the mix, and the
+  status reports the verdict (clipped block count, take peak in dB,
+  plus a placement hint when clipping is heavy). Punch-in soundchecks
+  keep the target track's name and mute state. The take is otherwise
+  a regular track: unmute or rename it to keep it. On the live-FX
+  path the watch reads the post-chain (wet) peaks, i.e. what is
+  actually baked into the take.
+- **Settings** (hamburger menu): a tabbed dialog; the Soundcheck tab
+  holds the four cue switches (border flash, burst beeps, headset
+  routing, vibration), each stored live in prefs and on by default,
+  so any combination can be used.
 - **Live effects** toggle: while recording, the mic feeds a Python
   live chain (Warmth -> Reverb -> Echo, params snapshotted from the
   sliders at record start) in 2048-sample blocks. The wet signal
