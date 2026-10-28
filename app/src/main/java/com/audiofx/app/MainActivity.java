@@ -3412,9 +3412,9 @@ public class MainActivity extends Activity {
     }
 
     /** Debug builds only: write the App Check debug secret to
-     * appcheck-debug-token.txt in the app-specific external folder
-     * (Android/data/com.audiofx.app/files/), because the user's
-     * build terminal has no logcat -- the SDK's only channel for it.
+     * appcheck-debug-token.txt in the public Download folder,
+     * because the user's build terminal has no logcat -- the SDK's
+     * only channel for it.
      * The secret is the UUID the debug provider persists in its own
      * SharedPreferences store; find it by scanning the app's
      * shared_prefs for that store / the DEBUG_SECRET key, falling
@@ -3466,25 +3466,70 @@ public class MainActivity extends Activity {
                             lines[0].indexOf(": ") + 2);
                 }
             }
+            String text;
+            if (found != null) {
+                text = "App Check debug token for Audio Mechanic"
+                        + " (register it in Firebase Console > App Check"
+                        + " > com.audiofx.app > Manage debug tokens,"
+                        + " then delete this file):\n" + found + "\n";
+            } else {
+                text = "Debug token not identified yet."
+                        + " UUID-shaped candidates found:\n"
+                        + candidates.toString();
+            }
+            writeTokenTextFile(text);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** Write the debug-token text to the public Download folder via
+     * MediaStore (no permission needed, API 29+; any previous copy
+     * is deleted first so re-launches replace rather than pile up
+     * "(1)" duplicates). Falls back to the app-specific external
+     * folder when MediaStore is unavailable or fails. */
+    private void writeTokenTextFile(String text) {
+        final String name = "appcheck-debug-token.txt";
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            try {
+                android.content.ContentResolver cr = getContentResolver();
+                android.net.Uri collection =
+                        android.provider.MediaStore.Downloads
+                                .EXTERNAL_CONTENT_URI;
+                cr.delete(collection,
+                        android.provider.MediaStore.Downloads.DISPLAY_NAME
+                                + "=?",
+                        new String[]{name});
+                android.content.ContentValues cv =
+                        new android.content.ContentValues();
+                cv.put(android.provider.MediaStore.Downloads.DISPLAY_NAME,
+                        name);
+                cv.put(android.provider.MediaStore.Downloads.MIME_TYPE,
+                        "text/plain");
+                cv.put(android.provider.MediaStore.Downloads.RELATIVE_PATH,
+                        android.os.Environment.DIRECTORY_DOWNLOADS);
+                android.net.Uri uri = cr.insert(collection, cv);
+                if (uri != null) {
+                    java.io.OutputStream os = cr.openOutputStream(
+                            uri, "wt");
+                    if (os != null) {
+                        os.write(text.getBytes(
+                                java.nio.charset.StandardCharsets.UTF_8));
+                        os.close();
+                        return;
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        try {
             java.io.File outDir = getExternalFilesDir(null);
             if (outDir == null) {
                 outDir = getFilesDir();
             }
-            java.io.File out = new java.io.File(
-                    outDir, "appcheck-debug-token.txt");
+            java.io.File out = new java.io.File(outDir, name);
             java.io.PrintWriter pw = new java.io.PrintWriter(
                     new java.io.FileWriter(out, false));
-            if (found != null) {
-                pw.println("App Check debug token for Audio Mechanic"
-                        + " (register it in Firebase Console > App Check"
-                        + " > com.audiofx.app > Manage debug tokens,"
-                        + " then delete this file):");
-                pw.println(found);
-            } else {
-                pw.println("Debug token not identified yet."
-                        + " UUID-shaped candidates found:");
-                pw.print(candidates.toString());
-            }
+            pw.print(text);
             pw.close();
         } catch (Exception ignored) {
         }
