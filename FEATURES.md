@@ -324,6 +324,18 @@ or the plan changes.
   the nearest swara relative to Sa and segmented into note events.
   Each histogram peak also gets a width: narrow = fixed note,
   wide = kampita/gamaka oscillation.
+- Notation event extraction (DSP-4 segmenter, 2026-10-28): note
+  events now come from the plateau-vs-transit segmenter
+  (`segment_plateaus` in `audiofx/tonic.py`) on the classic
+  engine's melody track -- frames within ±35 cents of a swara
+  centre sustained for at least the minimum note duration form a
+  plateau, transit frames (e.g. a glide between two notes) are
+  absorbed into the plateaus they connect instead of becoming
+  notes, and a sustained oscillation around one centre is emitted
+  as a single note carrying the existing `fixed: False`
+  (kampita) flag. The segmenter is shared, so the later neural
+  engine will feed it the same way; `detect_tonic`, the swara
+  stats and the event dict shape are unchanged.
 - Python: `audiofx/tonic.py` (`detect_tonic`, `notate_song`),
   `tonic_file` in `android_bridge.py`.
 

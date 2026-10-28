@@ -2,6 +2,7 @@
 import math
 import sys
 import os
+import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
                                 "app", "src", "main", "python"))
@@ -124,6 +125,123 @@ def test_true_sa_with_strong_pa_not_flipped():
     res = tonic.detect_tonic(_render_parts(parts), SR)
     assert res is not None
     assert abs(res["sa_hz"] - sa) < sa * 0.015, res
+
+
+# ---------------------------------------------------------------------------
+# Plateau-vs-transit segmenter (DSP-4, tasks N1/N2). TestCase style so
+# tools/verify.py discovers them; fixtures are synthetic f0 tracks
+# (no NN). segment_plateaus times are at MELODY_HOP_SEC, tonic = SA.
+# ---------------------------------------------------------------------------
+
+def _track_from_cents(cents, voiced=None):
+    cents = np.asarray(cents, dtype=float)
+    times = np.arange(len(cents)) * tonic.MELODY_HOP_SEC
+    freqs = np.where(np.isfinite(cents),
+                     SA * 2.0 ** (cents / 1200.0), np.nan)
+    if voiced is None:
+        voiced = np.isfinite(cents)
+    return times, freqs, np.asarray(voiced, dtype=bool)
+
+
+def _notes(events):
+    return [ev for ev in events if ev["sym"] != "-"]
+
+
+class TestSegmentPlateaus(unittest.TestCase):
+
+    def test_steady_plateau_one_event(self):
+        times, freqs, voiced = _track_from_cents(np.zeros(100))
+        events = tonic.segment_plateaus(times, freqs, voiced, SA)
+        self.assertEqual(len(events), 1, events)
+        ev = events[0]
+        self.assertEqual(ev["sym"], "S")
+        self.assertAlmostEqual(ev["start"], 0.0, delta=0.02)
+        self.assertAlmostEqual(ev["dur"], 1.0, delta=0.02)
+        # A fixed note keeps the exact legacy event shape; the
+        # _swara_stats oscillation flag ("fixed") is carried only
+        # by a kampita note.
+        self.assertNotIn("fixed", ev)
+
+    def test_glide_between_plateaus_absorbed_two_events(self):
+        # 0.50 s at Sa, a 260 ms glide to the adjacent swara (+100
+        # cents), then 0.50 s there: the transit frames belong to
+        # the plateaus they connect, never to a note of their own.
+        # (Steady-to-steady the glide spans 0.49 s -> 0.75 s; the
+        # 25 frames strictly between the plateau levels are the
+        # linspace interior.)
+        cents = np.concatenate([
+            np.zeros(50),
+            np.linspace(0.0, 100.0, 27)[1:-1],
+            np.full(50, 100.0),
+        ])
+        times, freqs, voiced = _track_from_cents(cents)
+        events = tonic.segment_plateaus(times, freqs, voiced, SA)
+        notes = _notes(events)
+        self.assertEqual([ev["sym"] for ev in notes], ["S", "r"],
+                         events)
+        self.assertEqual(len(events), 2, events)
+        for ev in notes:
+            self.assertGreater(ev["dur"], 0.5)
+        self.assertAlmostEqual(
+            sum(ev["dur"] for ev in notes), len(cents) * 0.01,
+            delta=0.02)
+
+    def test_kampita_oscillation_single_event_flagged(self):
+        # +/-140 cents around Sa at 5 Hz for 1.2 s: one note, not a
+        # stream of fragments, flagged the _swara_stats way -- a
+        # wide oscillation centre is not "fixed".
+        t = np.arange(120) * tonic.MELODY_HOP_SEC
+        cents = 140.0 * np.sin(2 * np.pi * 5.0 * t)
+        times, freqs, voiced = _track_from_cents(cents)
+        events = tonic.segment_plateaus(times, freqs, voiced, SA)
+        notes = _notes(events)
+        self.assertEqual(len(notes), 1, events)
+        self.assertEqual(notes[0]["sym"], "S")
+        self.assertIn("fixed", notes[0])
+        self.assertIs(notes[0]["fixed"], False)
+        self.assertAlmostEqual(notes[0]["start"], 0.0, delta=0.02)
+        self.assertAlmostEqual(notes[0]["dur"], 1.2, delta=0.02)
+
+    def test_short_blip_no_event(self):
+        # 50 ms at R: below NOTATE_MIN_NOTE_SEC, so no event.
+        self.assertLess(0.05, tonic.NOTATE_MIN_NOTE_SEC)
+        times, freqs, voiced = _track_from_cents(np.full(5, 200.0))
+        events = tonic.segment_plateaus(times, freqs, voiced, SA)
+        self.assertEqual(events, [])
+
+    def test_unvoiced_gaps_split_events(self):
+        cents = np.concatenate([
+            np.zeros(50), np.full(30, np.nan), np.zeros(50)])
+        times, freqs, voiced = _track_from_cents(cents)
+        events = tonic.segment_plateaus(times, freqs, voiced, SA)
+        notes = _notes(events)
+        self.assertEqual([ev["sym"] for ev in notes], ["S", "S"],
+                         events)
+        self.assertAlmostEqual(notes[1]["start"], 0.8, delta=0.02)
+        # The 300 ms gap is a rest event between the two notes
+        # (>= NOTATE_MIN_REST_SEC), in the legacy event shape.
+        self.assertEqual([ev["sym"] for ev in events],
+                         ["S", "-", "S"], events)
+
+
+class TestNotateSongUsesSegmenter(unittest.TestCase):
+
+    def test_classic_path_calls_segment_plateaus(self):
+        calls = []
+        orig = tonic.segment_plateaus
+
+        def spy(times, freqs_hz, voiced, tonic_hz):
+            calls.append((len(times), tonic_hz))
+            return orig(times, freqs_hz, voiced, tonic_hz)
+
+        tonic.segment_plateaus = spy
+        try:
+            info = tonic.notate_song(_song(), SR)
+        finally:
+            tonic.segment_plateaus = orig
+        self.assertIsNotNone(info)
+        self.assertEqual(len(calls), 1)
+        self.assertGreater(len(info["events"]), 0)
 
 
 if __name__ == "__main__":
