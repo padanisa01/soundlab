@@ -7,22 +7,27 @@ daily quota, forwards to Groq, and returns the plain-language summary.
 
 No em dashes in this service: colons and commas only.
 
-## Deployment layout (split projects, since 2026-10-20)
+## Deployment layout (split projects, since 2026-10-20; quota moved 2026-10-28)
 
 - Deploy project: `garednx` (has billing). Hosts Cloud Run, Secret
-  Manager, and the dedicated service account `audio-mechanic-proxy`.
-- Firebase project: `audiomech-a86dc` (Spark, no billing). Owns the App
-  Check tokens and the Firestore quota database.
-- The proxy reads one env var, `FIREBASE_PROJECT_ID`, for both App Check
-  verification and Firestore, so the deploy script takes the two project
-  IDs separately.
+  Manager, the dedicated service account `audio-mechanic-proxy`,
+  and (since 2026-10-28) the Firestore quota database.
+- Firebase project: `audiomech-a86dc` (Spark, no billing). Issues the
+  App Check tokens — that is its only role now.
+- The proxy reads `FIREBASE_PROJECT_ID` only for App Check token
+  verification (local JWKS signature checking; no IAM grant needed
+  in that project) and `QUOTA_PROJECT_ID` (set by deploy.sh to the
+  deploy project) for the Firestore quota client. The quota store
+  originally lived in the Firebase project; that put a cross-project
+  IAM grant — grantable only by that project's owner account — on
+  the critical path, so it was moved beside the service.
 
 ## Deploy steps (in this order)
 
 1. Enable APIs and create the service account in the deploy project:
 
    ```bash
-   gcloud services enable run.googleapis.com secretmanager.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com iam.googleapis.com --project garednx
+   gcloud services enable run.googleapis.com secretmanager.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com iam.googleapis.com firestore.googleapis.com --project garednx
    gcloud iam service-accounts create audio-mechanic-proxy --project garednx --display-name "Audio Mechanic summary proxy"
    ```
 
@@ -39,10 +44,12 @@ No em dashes in this service: colons and commas only.
 
    The key is never committed to the repo and never pasted in chat.
 
-3. Grant the service account Firestore access in the Firebase project:
+3. Create the quota Firestore database in the deploy project (skip
+   if it already exists) and grant the service account access to it:
 
    ```bash
-   gcloud projects add-iam-policy-binding audiomech-a86dc --member "serviceAccount:audio-mechanic-proxy@garednx.iam.gserviceaccount.com" --role "roles/datastore.user"
+   gcloud firestore databases create --project garednx --location us-central1
+   gcloud projects add-iam-policy-binding garednx --member "serviceAccount:audio-mechanic-proxy@garednx.iam.gserviceaccount.com" --role "roles/datastore.user"
    ```
 
 4. Firebase console, https://console.firebase.google.com (project
@@ -68,11 +75,12 @@ No em dashes in this service: colons and commas only.
 
 ## User todos
 
-- [x] Firestore enabled in audiomech (done 2026-10-20).
+- [x] Firestore enabled in audiomech (done 2026-10-20; quota store
+  moved to garednx 2026-10-28 — the audiomech database is unused now).
 - [x] Android app registered in audiomech (done).
 - [ ] Enable APIs and create the service account in garednx (step 1).
 - [ ] Create the `groq-api-key` secret with a new key (step 2).
-- [ ] Firestore IAM grant in audiomech (step 3).
+- [ ] Quota database + Firestore IAM grant in garednx (step 3).
 - [ ] App Check with Play Integrity in the Firebase console (step 4).
 - [ ] Deploy, point the app at the URL, verify, revoke the old Groq key
       (steps 5 and 6).

@@ -49,15 +49,46 @@ DAILY_QUOTA = 30
 
 
 def _init_firebase():
-    """Initialize firebase_admin once, using ambient Cloud Run credentials."""
+    """Initialize the default firebase_admin app, using ambient
+    Cloud Run credentials. This app is used ONLY for App Check
+    token verification: FIREBASE_PROJECT_ID is the token-issuing
+    Firebase project. Verification itself is local JWKS signature
+    checking -- it needs no IAM grant in that project."""
     project_id = os.environ.get("FIREBASE_PROJECT_ID")
     if not project_id:
         raise RuntimeError("FIREBASE_PROJECT_ID env var is not set")
     initialize_app(credentials.ApplicationDefault(), {"projectId": project_id})
-    return firestore.client()
 
 
-db = _init_firebase()
+_init_firebase()
+
+
+def _init_quota_db():
+    """Firestore client for the daily-quota store, in
+    QUOTA_PROJECT_ID (deploy.sh sets it to the deploy project).
+
+    Rearchitected 2026-10-28: the quota database originally lived
+    in the Firebase project, which put a cross-project IAM grant
+    (roles/datastore.user, grantable only by that project's owner
+    account) on the critical path -- and that grant could not be
+    made from the account that operates the service. The quota
+    data is the proxy's own bookkeeping, so it now lives beside
+    the service, in the same project as the Cloud Run service,
+    its service account, and the Groq secret. Falls back to
+    FIREBASE_PROJECT_ID when QUOTA_PROJECT_ID is unset (the
+    pre-rearchitecture layout)."""
+    project_id = (os.environ.get("QUOTA_PROJECT_ID")
+                  or os.environ.get("FIREBASE_PROJECT_ID"))
+    if not project_id:
+        raise RuntimeError("QUOTA_PROJECT_ID / FIREBASE_PROJECT_ID"
+                           " env vars are not set")
+    quota_app = initialize_app(
+        credentials.ApplicationDefault(), {"projectId": project_id},
+        name="quota")
+    return firestore.client(app=quota_app)
+
+
+quota_db = _init_quota_db()
 
 
 def _strip_thinking(text):
@@ -194,7 +225,7 @@ def _verify_app_check(token):
 def _check_and_consume_quota(installation_id):
     """Atomically consume one daily quota slot; True if allowed."""
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    doc_ref = db.collection("summary_quota").document(
+    doc_ref = quota_db.collection("summary_quota").document(
         "%s_%s" % (installation_id, day))
 
     @firestore.transactional
@@ -208,7 +239,7 @@ def _check_and_consume_quota(installation_id):
         transaction.set(doc_ref, {"count": count + 1}, merge=True)
         return True
 
-    return _consume(db.transaction())
+    return _consume(quota_db.transaction())
 
 
 @app.get("/healthz")

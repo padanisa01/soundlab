@@ -42,7 +42,7 @@ def _stub_modules():
     creds = types.SimpleNamespace(ApplicationDefault=lambda: None)
     fa.credentials = creds
     fs = types.SimpleNamespace(
-        client=lambda: types.SimpleNamespace(
+        client=lambda *a, **k: types.SimpleNamespace(
             collection=lambda *a, **k: None,
             transaction=lambda: None),
         transactional=lambda fn: fn)

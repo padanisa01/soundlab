@@ -2,10 +2,14 @@
 # Deploy the Audio Mechanic summary proxy to Cloud Run.
 # Usage: ./deploy.sh DEPLOY_PROJECT_ID [FIREBASE_PROJECT_ID]
 #
-# The two projects may differ: the service can run in a project that has
-# billing (e.g. garednx) while the App Check tokens and the Firestore
-# quota database belong to the Firebase project (e.g. audiomech-a86dc).
-# FIREBASE_PROJECT_ID defaults to the deploy project when omitted.
+# The two projects may differ: the service runs in a project that has
+# billing (e.g. garednx) while the App Check tokens are issued by the
+# Firebase project (e.g. audiomech-a86dc). FIREBASE_PROJECT_ID is used
+# ONLY to verify those tokens (local JWKS signature checking; no IAM
+# grant needed there) and defaults to the deploy project when omitted.
+# The Firestore quota database lives in the DEPLOY project
+# (QUOTA_PROJECT_ID below), beside the service and its secret --
+# rearchitected 2026-10-28 so no cross-project IAM grant is needed.
 set -euo pipefail
 
 PROJECT_ID="${1:-}"
@@ -26,4 +30,4 @@ gcloud run deploy audio-mechanic-summary \
   --allow-unauthenticated \
   --service-account "$SA_EMAIL" \
   --set-secrets GROQ_API_KEY=groq-api-key:latest \
-  --set-env-vars FIREBASE_PROJECT_ID="$FIREBASE_PROJECT_ID"
+  --set-env-vars FIREBASE_PROJECT_ID="$FIREBASE_PROJECT_ID",QUOTA_PROJECT_ID="$PROJECT_ID"
