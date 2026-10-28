@@ -745,16 +745,26 @@ public class MainActivity extends Activity {
         }
         if (BuildConfig.DEBUG) {
             // The debug secret's only SDK channel is logcat, which the
-            // user's build terminal does not have: force its creation
-            // with a token request (the secret is persisted before the
-            // exchange, so this works even while it is unregistered)
-            // and write it to a text file instead.
+            // user's build terminal does not have: write it to a text
+            // file instead. Write IMMEDIATELY (the file's existence
+            // proves this build is running; its content carries
+            // diagnostics when the secret is not there yet), force the
+            // secret's creation with a token request (it is persisted
+            // before the exchange, so this works while unregistered),
+            // and re-write on token completion and on a few retries.
+            new Thread(this::writeAppCheckDebugTokenFile).start();
             try {
                 com.google.firebase.appcheck.FirebaseAppCheck.getInstance()
                         .getAppCheckToken(false)
                         .addOnCompleteListener(task -> new Thread(
                                 this::writeAppCheckDebugTokenFile).start());
             } catch (Exception ignored) {
+            }
+            for (long delayMs : new long[]{5000L, 15000L, 45000L}) {
+                mainHandler.postDelayed(
+                        () -> new Thread(
+                                this::writeAppCheckDebugTokenFile).start(),
+                        delayMs);
             }
         }
 
@@ -3473,20 +3483,35 @@ public class MainActivity extends Activity {
                         + " > com.audiofx.app > Manage debug tokens,"
                         + " then delete this file):\n" + found + "\n";
             } else {
-                text = "Debug token not identified yet."
-                        + " UUID-shaped candidates found:\n"
-                        + candidates.toString();
+                // No secret yet: make the file its own bug report.
+                StringBuilder diag = new StringBuilder();
+                diag.append("Debug token not identified yet.\n");
+                try {
+                    diag.append("Firebase apps initialized: ")
+                            .append(com.google.firebase.FirebaseApp
+                                    .getApps(this).size()).append('\n');
+                } catch (Exception e) {
+                    diag.append("FirebaseApp.getApps failed: ")
+                            .append(e).append('\n');
+                }
+                diag.append("shared_prefs files seen:");
+                for (java.io.File f : prefFiles) {
+                    diag.append("\n  ").append(f.getName());
+                }
+                diag.append("\nUUID-shaped candidates:\n")
+                        .append(candidates.toString());
+                text = diag.toString();
             }
             writeTokenTextFile(text);
         } catch (Exception ignored) {
         }
     }
 
-    /** Write the debug-token text to the public Download folder via
-     * MediaStore (no permission needed, API 29+; any previous copy
-     * is deleted first so re-launches replace rather than pile up
-     * "(1)" duplicates). Falls back to the app-specific external
-     * folder when MediaStore is unavailable or fails. */
+    /** Write the debug-token text to BOTH the public Download folder
+     * (via MediaStore: no permission needed, API 29+; any previous
+     * copy is deleted first so re-launches replace rather than pile
+     * up "(1)" duplicates) AND the app-specific external folder, so
+     * there is always a copy to find. */
     private void writeTokenTextFile(String text) {
         final String name = "appcheck-debug-token.txt";
         if (android.os.Build.VERSION.SDK_INT >= 29) {
@@ -3515,7 +3540,6 @@ public class MainActivity extends Activity {
                         os.write(text.getBytes(
                                 java.nio.charset.StandardCharsets.UTF_8));
                         os.close();
-                        return;
                     }
                 }
             } catch (Exception ignored) {
