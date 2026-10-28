@@ -295,6 +295,24 @@ or the plan changes.
   `{"findings": [...], "quality": {...}|null}` (findings inside
   unchanged; `diagnose.analyze` findings are byte-identical in every
   mode). The score is advisory only: Tune Up does not consume it.
+- **Quality follow-ups** (DSP-5): the report's quality line uses
+  full words ("Quality (estimate) — Signal · Background ·
+  Overall"), and two explainer lines separate the /100 ring
+  ("the 12 technical checks, weighted by severity") from the /5
+  quality estimate ("Signal = the voice itself, Background = the
+  noise behind it"). `score()` also returns a `drivers` breakdown
+  (pre-clamp penalty points per driver: clipping, sibilance,
+  level spread, loudness, noise, hum; the sub-scores themselves
+  are unchanged). When a summary is generated through the proxy,
+  the three quality values travel with the request (metadata
+  only) so the summary can name the weakest dimension, and the
+  summary cache key includes them. An **Improve quality** button
+  sits beside Master whenever any driver penalty reaches 0.3
+  points (`QUALITY_IMPROVE_MIN_PENALTY`): it applies only the
+  fixes for the penalized drivers — one `tune_up` composite in
+  Tune Up's canonical order, a single history entry / single
+  undo — then re-diagnoses and shows the Overall before → after
+  once, with the honest re-diagnosed numbers.
 - **DSP Lab tab** (DSP-6): Settings is now a two-tab dialog
   (Soundcheck | DSP Lab); the Soundcheck tab's four cue switches are
   unchanged. The DSP Lab tab holds the five engine defaults, each
