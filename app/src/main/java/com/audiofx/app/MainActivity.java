@@ -1211,6 +1211,21 @@ public class MainActivity extends Activity {
             // builds contain none of it.
             Button benchBtn = new Button(this);
             benchBtn.setText("Benchmark neural engine (debug)");
+            // Explicit size and colours: a bare default Button in
+            // this theme renders dark-on-dark and is effectively
+            // invisible in the dialog (verified on device -- the
+            // hook code was in the APK but no button could be
+            // seen). Every other programmatic view in this app
+            // sets its colours explicitly for the same reason.
+            float bd = getResources().getDisplayMetrics().density;
+            LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    Math.round(52 * bd));
+            blp.topMargin = Math.round(14 * bd);
+            benchBtn.setLayoutParams(blp);
+            benchBtn.setBackgroundColor(getColor(R.color.sl_teal));
+            benchBtn.setTextColor(getColor(R.color.sl_bg));
+            benchBtn.setTextSize(15);
             benchBtn.setOnClickListener(v -> startNeuralBenchmark());
             ((LinearLayout) view.findViewById(
                     R.id.settings_tab_dsplab)).addView(benchBtn);
