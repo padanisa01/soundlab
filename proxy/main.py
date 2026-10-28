@@ -64,6 +64,24 @@ def _strip_thinking(text):
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
+def _exc_chain(e):
+    """Render an exception with its cause/context chain, bounded.
+    Needed because library wrappers mask the real error: the
+    Firestore transactional decorator, when BeginTransaction fails,
+    raises a ValueError about the rollback instead -- the original
+    API error (permission denied, database not found, ...) rides
+    underneath as __context__ and is the part that matters.
+    Messages here name projects/databases/permissions, never
+    tokens or keys."""
+    parts = []
+    seen = set()
+    while e is not None and id(e) not in seen and len(parts) < 5:
+        seen.add(id(e))
+        parts.append("%s: %s" % (type(e).__name__, str(e)[:200]))
+        e = e.__cause__ or e.__context__
+    return " <- ".join(parts)
+
+
 # Quality metrics the app may attach to a summary request, as
 # (payload key, display name, one-phrase meaning). Metadata only --
 # the same diagnosis the findings already describe, never audio.
@@ -168,8 +186,8 @@ def _verify_app_check(token):
         # Log the reason, never the token: PyJWT messages name the
         # expected audience/issuer, which is what a real claims
         # mismatch diagnosis needs.
-        logger.warning("app check verification failed: %s: %s",
-                       type(e).__name__, str(e)[:200])
+        logger.warning("app check verification failed: %s",
+                       _exc_chain(e))
         return None
 
 
@@ -220,11 +238,10 @@ def summarize():
         if not _check_and_consume_quota(installation_id):
             return jsonify({"error": "daily quota exceeded"}), 429
     except Exception as e:
-        # Message included: Firestore errors name the project,
-        # database and missing permission -- exactly what a quota
-        # failure diagnosis needs. No user data or secrets in them.
-        logger.error("quota check failed: %s: %s",
-                     type(e).__name__, str(e)[:300])
+        # Full chain: the transactional wrapper masks the original
+        # Firestore API error under a rollback ValueError (seen
+        # 2026-10-28); the chain is where the cause lives.
+        logger.error("quota check failed: %s", _exc_chain(e))
         return jsonify({"error": "upstream failed"}), 502
 
     groq_body = _build_request_body(findings_json, profile, quality)
@@ -244,10 +261,9 @@ def summarize():
             timeout=60,
         )
     except requests.RequestException as e:
-        # Type + message: requests exceptions never contain the
+        # Chain included: requests exceptions never contain the
         # Authorization header, so the key cannot reach the logs.
-        logger.error("groq request failed: %s: %s",
-                     type(e).__name__, str(e)[:300])
+        logger.error("groq request failed: %s", _exc_chain(e))
         return jsonify({"error": "upstream failed"}), 502
 
     # Log HTTP status only, never bodies or the key.
