@@ -11,6 +11,7 @@ import wave
 
 from . import diagnose as _diagnose
 from . import pitch as _pitch
+from . import quality as _quality
 from . import repair as _repair
 from . import tonic as _tonic
 from .effects import Echo, Reverb, Warmth
@@ -614,15 +615,34 @@ def render_chain_from_tip(cache_key, new_ops_json, output_path,
     }
 
 
-def diagnose_file(input_wav_path):
-    """Run the diagnostics over a WAV file. Returns a JSON array of
-    findings (see diagnose.analyze). Runs on a background thread from
-    Java; a multi-minute file takes a few seconds."""
+def diagnose_file(input_wav_path, quality_engine="off"):
+    """Run the diagnostics over a WAV file. Runs on a background
+    thread from Java; a multi-minute file takes a few seconds.
+
+    ``quality_engine="off"`` (default) returns a JSON array of
+    findings (see diagnose.analyze), serialized exactly as before
+    DSP-5. ``"proxy"`` returns a JSON OBJECT ``{"findings": [...],
+    "quality": {...}|null}`` carrying the Tier 1 quality score
+    (estimate); the findings inside are identical to the "off"
+    array. ``"dnsmos"`` is reserved for a Tier 2 that does not exist
+    in v1: it is treated as "off" (plain array, no quality object)
+    and must never behave as "proxy". Unknown values raise
+    ValueError.
+    """
+    if quality_engine not in _diagnose.QUALITY_ENGINES:
+        raise ValueError("unknown quality_engine %r" % (quality_engine,))
     if not os.path.isfile(input_wav_path):
         raise ValueError("input file not found: %s" % input_wav_path)
     samples, sample_rate = read_wav_mono(input_wav_path)
-    findings = _diagnose.analyze(samples, sample_rate)
-    return json.dumps(findings)
+    if quality_engine != "proxy":
+        # "off", and "dnsmos" in v1, behave exactly as today.
+        findings = _diagnose.analyze(samples, sample_rate)
+        return json.dumps(findings)
+    findings = _diagnose.analyze(samples, sample_rate,
+                                 quality_engine="proxy")
+    measurements = _diagnose.quality_measurements(samples, sample_rate)
+    quality = _quality.score(samples, sample_rate, measurements)
+    return json.dumps({"findings": findings, "quality": quality})
 
 
 def tonic_file(input_wav_path):

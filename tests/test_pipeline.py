@@ -776,6 +776,62 @@ class TestRenderChain(unittest.TestCase):
                                                 os.path.join(d, "o.wav"))
 
 
+class TestDiagnoseFileQuality(unittest.TestCase):
+    """diagnose_file quality_engine shapes (DSP-5, Tier 1 only)."""
+
+    SR = 8000
+
+    def _fixture(self, d, name="in.wav", sig=None):
+        p = os.path.join(d, name)
+        write_wav(p, sig if sig is not None else sine(440, 0.5, self.SR),
+                  self.SR)
+        return p
+
+    def test_off_output_byte_identical_to_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._fixture(d)
+            default = android_bridge.diagnose_file(src)
+            off = android_bridge.diagnose_file(src, quality_engine="off")
+            self.assertEqual(off, default)
+            self.assertIsInstance(json.loads(off), list)
+
+    def test_proxy_returns_object_with_quality(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._fixture(d)
+            off = json.loads(android_bridge.diagnose_file(
+                src, quality_engine="off"))
+            parsed = json.loads(android_bridge.diagnose_file(
+                src, quality_engine="proxy"))
+            self.assertIsInstance(parsed, dict)
+            self.assertEqual(parsed["findings"], off)
+            quality = parsed["quality"]
+            self.assertIsInstance(quality, dict)
+            self.assertEqual(quality["engine"], "proxy")
+            for key in ("ovrl", "sig", "bak"):
+                self.assertGreaterEqual(quality[key], 1.0)
+                self.assertLessEqual(quality[key], 5.0)
+
+    def test_proxy_silence_quality_is_null(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._fixture(d, sig=[0.0] * self.SR)
+            parsed = json.loads(android_bridge.diagnose_file(
+                src, quality_engine="proxy"))
+            self.assertIsInstance(parsed, dict)
+            self.assertIsNone(parsed["quality"])
+            self.assertIsInstance(parsed["findings"], list)
+
+    def test_dnsmos_behaves_as_off_in_v1(self):
+        # Tier 2 does not exist in v1: "dnsmos" must NOT behave as
+        # "proxy" -- it returns the plain findings array, as "off".
+        with tempfile.TemporaryDirectory() as d:
+            src = self._fixture(d)
+            off = android_bridge.diagnose_file(src, quality_engine="off")
+            got = android_bridge.diagnose_file(
+                src, quality_engine="dnsmos")
+            self.assertEqual(got, off)
+            self.assertIsInstance(json.loads(got), list)
+
+
 class _FakeWav:
     """Stub for wave.Wave_read: reports header params, never returns frames."""
 
