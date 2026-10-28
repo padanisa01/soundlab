@@ -85,6 +85,9 @@ SWARA_FIXED_STD = 35.0
 #: Note segmentation: runs shorter than this merge / are absorbed.
 NOTATE_MIN_NOTE_SEC = 0.08
 NOTATE_MIN_REST_SEC = 0.15
+#: Plateau-vs-transit segmenter (PRD F4): a frame sits on a plateau
+#: when it is within this many cents of a swara centre.
+PLATEAU_TOLERANCE_CENTS = 35.0
 
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A",
                "A#", "B"]
@@ -422,6 +425,167 @@ def _note_events(times, f0s, sa, hop_sec):
              "sym": s} for st, en, s in events]
 
 
+def _phrase_note_segments(times, cents, ps, pe, hop_sec):
+    """Note segments inside one voiced phrase [ps, pe), as
+    (start_idx, end_idx, centre_cents) triples covering [ps, pe).
+
+    A plateau is a run of frames within PLATEAU_TOLERANCE_CENTS of
+    one swara centre sustained for >= NOTATE_MIN_NOTE_SEC. Transit
+    frames (voiced but off every centre) are absorbed into the
+    plateaus they connect: consecutive plateaus split the transit
+    between them at its midpoint, leading/trailing transit belongs
+    to the plateau it runs into / out of, and short off-centre or
+    other-centre runs between plateaus of one centre are absorbed
+    into that centre (so vibrato / kampita around one centre does
+    not fragment). A phrase with no plateau at all is emitted as a
+    single note only when it is a sustained oscillation around one
+    centre (its median sits on the centre, it crosses the centre
+    repeatedly, and it swings beyond plateau tolerance on both
+    sides); anything else (glides alone, short blips) yields no
+    segment.
+    """
+    seg_cents = cents[ps:pe]
+    centres = _np.floor(seg_cents / 100.0 + 0.5) * 100.0
+    on = _np.abs(seg_cents - centres) <= PLATEAU_TOLERANCE_CENTS
+    runs = []
+    i = 0
+    while i < len(seg_cents):
+        j = i + 1
+        if on[i]:
+            while j < len(seg_cents) and on[j] \
+                    and centres[j] == centres[i]:
+                j += 1
+            runs.append((ps + i, ps + j, float(centres[i])))
+        else:
+            while j < len(seg_cents) and not on[j]:
+                j += 1
+            runs.append((ps + i, ps + j, None))
+        i = j
+    anchors = [(s, e, c) for s, e, c in runs if c is not None
+               and times[e - 1] - times[s] + hop_sec
+               >= NOTATE_MIN_NOTE_SEC - 1e-9]
+    if not anchors:
+        dur = times[pe - 1] - times[ps] + hop_sec
+        if dur < NOTATE_MIN_NOTE_SEC - 1e-9:
+            return []
+        med = float(_np.median(seg_cents))
+        centre = math.floor(med / 100.0 + 0.5) * 100.0
+        dev = seg_cents - centre
+        signs = _np.sign(dev[dev != 0.0])
+        crossings = int((signs[1:] * signs[:-1] < 0).sum()) \
+            if len(signs) > 1 else 0
+        if abs(med - centre) <= PLATEAU_TOLERANCE_CENTS \
+                and float(_np.std(dev)) > SWARA_FIXED_STD \
+                and float(dev.max()) > PLATEAU_TOLERANCE_CENTS \
+                and float(dev.min()) < -PLATEAU_TOLERANCE_CENTS \
+                and crossings >= 2:
+            return [(ps, pe, centre)]
+        return []
+    groups = []
+    for s, e, c in anchors:
+        if groups and groups[-1][2] == c:
+            groups[-1][1] = e
+        else:
+            groups.append([s, e, c])
+    out = []
+    start = ps
+    for gi, (gs, ge, c) in enumerate(groups):
+        if gi + 1 < len(groups):
+            end = (ge + groups[gi + 1][0]) // 2
+        else:
+            end = pe
+        out.append((start, end, c))
+        start = end
+    return out
+
+
+def segment_plateaus(times, freqs_hz, voiced, tonic_hz):
+    """Plateau-vs-transit segmentation of an f0 track into note
+    events, shared by both notation engines (PRD F4 / DSP-4).
+
+    Args: per-frame `times` (sec), `freqs_hz` (NaN where unvoiced)
+    and `voiced` flags at a uniform hop (MELODY_HOP_SEC for both
+    existing front ends), plus the tonic `tonic_hz` the swara
+    centres are relative to.
+
+    Returns note events in the existing event dict shape used by
+    notate_song -- {"start", "dur", "sym"}, with "-" events for
+    rests of >= NOTATE_MIN_REST_SEC between notes -- plus one
+    addition mirroring _swara_stats: a note whose pitch width
+    around its centre exceeds SWARA_FIXED_STD (a sustained
+    oscillation, kampita) carries "fixed": False, the existing
+    oscillation flag; fixed notes keep the legacy shape exactly.
+    Unvoiced gaps split events; transit frames never become
+    events of their own.
+    """
+    _need_numpy()
+    times = _np.asarray(times, dtype=_np.float64)
+    freqs = _np.asarray(freqs_hz, dtype=_np.float64)
+    voiced = _np.asarray(voiced, dtype=bool)
+    n = min(len(times), len(freqs), len(voiced))
+    if n == 0 or not _np.isfinite(tonic_hz) or tonic_hz <= 0:
+        return []
+    times, freqs, voiced = times[:n], freqs[:n], voiced[:n]
+    diffs = _np.diff(times)
+    diffs = diffs[diffs > 0]
+    hop_sec = float(_np.median(diffs)) if len(diffs) else MELODY_HOP_SEC
+    valid = voiced & _np.isfinite(freqs) & (freqs > 0)
+    cents = _np.full(n, _np.nan)
+    cents[valid] = 1200.0 * _np.log2(freqs[valid] / float(tonic_hz))
+    # Voiced phrases: maximal runs of valid frames.
+    phrases = []
+    i = 0
+    while i < n:
+        if not valid[i]:
+            i += 1
+            continue
+        j = i + 1
+        while j < n and valid[j]:
+            j += 1
+        phrases.append((i, j))
+        i = j
+    # Chronological raw segments: notes, plus a rest segment for
+    # any inter-note gap of >= NOTATE_MIN_REST_SEC; shorter gaps
+    # are absorbed into the previous note, as _note_events did.
+    raw = []
+    last_note_phrase_end = None
+    for ps, pe in phrases:
+        notes = _phrase_note_segments(times, cents, ps, pe, hop_sec)
+        if not notes:
+            continue
+        if raw and last_note_phrase_end is not None:
+            gap_dur = times[ps - 1] - times[last_note_phrase_end] \
+                + hop_sec if ps > last_note_phrase_end else 0.0
+            if gap_dur >= NOTATE_MIN_REST_SEC - 1e-9:
+                raw.append((last_note_phrase_end, ps, None))
+            else:
+                s0, _e0, c0 = raw[-1]
+                raw[-1] = (s0, ps, c0)
+        raw.extend(notes)
+        last_note_phrase_end = pe
+    events = []
+    for s, e, centre in raw:
+        ev = {"start": round(float(times[s]), 2),
+              "dur": round(float(times[e - 1] - times[s] + hop_sec), 2),
+              "sym": "-" if centre is None else _symbol(centre)}
+        if centre is not None:
+            dev = cents[s:e] - centre
+            dev = dev[_np.isfinite(dev)]
+            if len(dev) >= 3:
+                # Width is measured on a 3-frame median: isolated
+                # single-frame tracker dropouts were absorbed as
+                # transit above and must not read as oscillation,
+                # while a sustained kampita swing is unaffected.
+                padded = _np.pad(dev, (1, 1), mode="edge")
+                dev = _np.median(_np.stack(
+                    [padded[i:i + len(dev)] for i in range(3)]),
+                    axis=0)
+            if len(dev) and float(_np.std(dev)) > SWARA_FIXED_STD:
+                ev["fixed"] = False
+        events.append(ev)
+    return events
+
+
 def notation_text(info):
     """Render a notate_song() result as plain text (4 s bars)."""
     lines = ["Sa = %.1f Hz (%s %+d cents); %d events; '-' = rest"
@@ -456,6 +620,7 @@ def notate_song(samples, sample_rate):
     sa = tonic["sa_hz"]
     info = dict(tonic)
     info["swaras"] = _swara_stats(times, f0s, rms, sa)
-    info["events"] = _note_events(times, f0s, sa, MELODY_HOP_SEC)
+    info["events"] = segment_plateaus(
+        times, f0s, _np.isfinite(f0s), sa)
     info["text"] = notation_text(info)
     return info
