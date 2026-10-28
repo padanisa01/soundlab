@@ -1155,7 +1155,9 @@ public class MainActivity extends Activity {
     /** App settings: a tabbed dialog (tabs across the top, one page
      * per tab). The Soundcheck tab holds the cue combination: border
      * flash, burst beeps, headset routing, vibration. Each switch is
-     * stored live in prefs and defaults to on. */
+     * stored live in prefs and defaults to on. The DSP Lab tab holds
+     * the DSP-upgrade engine defaults (DSP-6): every row is stored
+     * live in prefs and defaults to the pre-upgrade behavior. */
     private void showSettingsDialog() {
         View view = getLayoutInflater()
                 .inflate(R.layout.dialog_settings, null);
@@ -1165,6 +1167,54 @@ public class MainActivity extends Activity {
         bindCueSwitch(view, R.id.sw_sc_beep, prefs, "sc_cue_beep");
         bindCueSwitch(view, R.id.sw_sc_headset, prefs, "sc_cue_headset");
         bindCueSwitch(view, R.id.sw_sc_vibrate, prefs, "sc_cue_vibrate");
+        // DSP Lab rows (all stored live, on change).
+        bindEngineSeg(view, R.id.seg_pitch_classic, R.id.seg_pitch_formant,
+                prefs, "dsp_pitch_engine", "wsola", "formant", true);
+        // Notation row (PRD amendment A2): Classic is selectable; the
+        // Neural segment is disabled (the neural engine is descoped
+        // in this build) and can never write the pref.
+        bindEngineSeg(view, R.id.seg_notation_classic,
+                R.id.seg_notation_neural,
+                prefs, "notation_engine", "classic", "neural", false);
+        bindEngineSeg(view, R.id.seg_quality_off, R.id.seg_quality_estimate,
+                prefs, "quality_engine", "off", "proxy", true);
+        bindEngineSeg(view, R.id.seg_master_classic,
+                R.id.seg_master_multiband,
+                prefs, "dsp_mastering_default", "classic", "multiband",
+                true);
+        // True-peak detection: a switch in the bindCueSwitch live
+        // style, but default OFF (PRD D3) -- bindCueSwitch defaults
+        // to on, so this row binds explicitly. Toggling applies to
+        // the capture objects immediately, exactly as the capture
+        // start sites do (see beginCapture / startLiveRecording).
+        Switch tp = view.findViewById(R.id.sw_truepeak);
+        tp.setChecked(prefs.getBoolean("mic_truepeak", false));
+        tp.setOnCheckedChangeListener((b, on) -> {
+            prefs.edit().putBoolean("mic_truepeak", on).apply();
+            recorder.setTruePeak(on);
+            liveMonitor.setTruePeak(on);
+        });
+        // Tab strip: Soundcheck | DSP Lab, painted like the
+        // Record|Soundcheck segmented control (paintSegment).
+        final TextView tabSc = view.findViewById(R.id.tab_soundcheck);
+        final TextView tabDsp = view.findViewById(R.id.tab_dsplab);
+        final View pageSc = view.findViewById(R.id.settings_tab_soundcheck);
+        final View pageDsp = view.findViewById(R.id.settings_tab_dsplab);
+        final Runnable showSc = () -> {
+            pageSc.setVisibility(View.VISIBLE);
+            pageDsp.setVisibility(View.GONE);
+            paintSegment(tabSc, true);
+            paintSegment(tabDsp, false);
+        };
+        final Runnable showDsp = () -> {
+            pageSc.setVisibility(View.GONE);
+            pageDsp.setVisibility(View.VISIBLE);
+            paintSegment(tabSc, false);
+            paintSegment(tabDsp, true);
+        };
+        tabSc.setOnClickListener(v -> showSc.run());
+        tabDsp.setOnClickListener(v -> showDsp.run());
+        showSc.run();
         new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
                 .setTitle("Settings")
                 .setView(view)
@@ -1178,6 +1228,49 @@ public class MainActivity extends Activity {
         sw.setChecked(prefs.getBoolean(key, true));
         sw.setOnCheckedChangeListener((b, on) ->
                 prefs.edit().putBoolean(key, on).apply());
+    }
+
+    /** Bind a two-segment engine row in the DSP Lab tab: segment A
+     * stores {@code valueA}, segment B stores {@code valueB}, both
+     * written to prefs live on tap (the bindCueSwitch pattern
+     * extended to segmented rows). Segments are painted with
+     * paintSegment, like the Record|Soundcheck control. When
+     * {@code secondEnabled} is false the B segment is disabled and
+     * dimmed, gets no click listener, and can never be painted
+     * selected -- the pref can only ever hold {@code valueA} from
+     * this row. */
+    private void bindEngineSeg(View root, int idA, int idB,
+            SharedPreferences prefs, String key,
+            String valueA, String valueB, boolean secondEnabled) {
+        final TextView segA = root.findViewById(idA);
+        final TextView segB = root.findViewById(idB);
+        final Runnable paint = () -> {
+            String cur = prefs.getString(key, valueA);
+            paintSegment(segA, valueA.equals(cur));
+            paintSegment(segB, secondEnabled && valueB.equals(cur));
+            if (!secondEnabled) {
+                segB.setEnabled(false);
+                segB.setAlpha(0.35f);
+            }
+        };
+        paint.run();
+        segA.setOnClickListener(v -> {
+            prefs.edit().putString(key, valueA).apply();
+            paint.run();
+        });
+        if (secondEnabled) {
+            segB.setOnClickListener(v -> {
+                prefs.edit().putString(key, valueB).apply();
+                paint.run();
+            });
+        }
+    }
+
+    /** The DSP Lab true-peak pref (default OFF, PRD D3). Read at the
+     * capture start sites alongside the mic_limiter choice. */
+    private boolean truePeakPref() {
+        return getSharedPreferences("soundlab", MODE_PRIVATE)
+                .getBoolean("mic_truepeak", false);
     }
 
     /** Starts the one-time premium purchase flow. */
