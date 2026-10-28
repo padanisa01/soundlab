@@ -1203,6 +1203,18 @@ public class MainActivity extends Activity {
         bindEngineSeg(view, R.id.seg_notation_classic,
                 R.id.seg_notation_neural,
                 prefs, "notation_engine", "classic", "neural", false);
+        if (BuildConfig.DEBUG) {
+            // Neural benchmark harness (TFLite spike): the harness
+            // class, the model and the TFLite runtime live in the
+            // debug source set / debugImplementation; this button is
+            // the only trace in the main source set, and release
+            // builds contain none of it.
+            Button benchBtn = new Button(this);
+            benchBtn.setText("Benchmark neural engine (debug)");
+            benchBtn.setOnClickListener(v -> startNeuralBenchmark());
+            ((LinearLayout) view.findViewById(
+                    R.id.settings_tab_dsplab)).addView(benchBtn);
+        }
         bindEngineSeg(view, R.id.seg_quality_off, R.id.seg_quality_estimate,
                 prefs, "quality_engine", "off", "proxy", true);
         bindEngineSeg(view, R.id.seg_master_classic,
@@ -2409,6 +2421,54 @@ public class MainActivity extends Activity {
             return;
         }
         runNotation(path, notationKey(), null, null);
+    }
+
+    /** Debug builds only: time the TFLite CREPE model on the same
+     * audio the Notation action would use (the selected track's
+     * fresh render, or the picked file's current output / pristine
+     * input). The harness lives in the debug source set and is
+     * loaded reflectively, so release builds never reference it. */
+    private void startNeuralBenchmark() {
+        final String entryId = currentEntryId;
+        new Thread(() -> {
+            try {
+                final String path;
+                if (entryId != null) {
+                    LibraryDb.Track track = getSelectedTrack();
+                    if (track == null || !trackHasAudio(track)) {
+                        runOnUiThread(() ->
+                                setStatus("Open or record audio first."));
+                        return;
+                    }
+                    renderTrackBlocking(entryId, track.id);
+                    path = libraryDb.trackRenderFile(track.id)
+                            .getAbsolutePath();
+                } else {
+                    path = (currentOutputPath != null
+                            && new File(currentOutputPath).exists())
+                            ? currentOutputPath : inputPath;
+                    if (path == null || !new File(path).exists()) {
+                        runOnUiThread(() ->
+                                setStatus("Open or record audio first."));
+                        return;
+                    }
+                }
+                final java.lang.reflect.Method m = Class
+                        .forName("com.audiofx.app.NeuralBenchmark")
+                        .getMethod("run", android.app.Activity.class,
+                                String.class);
+                runOnUiThread(() -> {
+                    try {
+                        m.invoke(null, MainActivity.this, path);
+                    } catch (Exception e) {
+                        setStatus("Neural benchmark unavailable.");
+                    }
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> setStatus(
+                        "Neural benchmark failed: " + e.getMessage()));
+            }
+        }).start();
     }
 
     private void notateSelectedTrack(final String entryId) {

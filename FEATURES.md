@@ -350,7 +350,14 @@ or the plan changes.
   dimmed and not tappable, with a note that the neural engine is not
   included in this build (the DSP-0 spike projected 132–408 s of
   phone inference per 3-minute song against the ~90 s gate, so the
-  neural engine was descoped; PRD amendment A2). In-context
+  neural engine was descoped; PRD amendment A2). A follow-up TFLite
+  spike (branch dsp/tflite-spike; memo in tools/spike/) converted
+  CREPE-tiny to float32 TFLite with exact parity and a 75 s
+  projection, so debug builds on that branch carry a "Benchmark
+  neural engine (debug)" button in this tab: it times the TFLite
+  interpreter on the current track to settle the on-device number
+  before any engine wiring. The harness, model and TFLite runtime
+  are debug-only (src/debug + debugImplementation). In-context
   controls complete the picture: the pitch dialog gains a
   Classic | Formant segmented control preselected from
   `dsp_pitch_engine`, written into the pitch op's params as
