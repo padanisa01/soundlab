@@ -505,3 +505,15 @@ or the plan changes.
 
 ## Planned / known gaps
 - Compressed formats (MP3, etc.) as *input* — v1 is WAV-only.
+- DSP Lab spike (DSP-0, branch dsp/spike, 2026-10-28): CREPE-tiny
+  weights converted offline to `audiofx/crepe_tiny.npz`
+  (1,537,288 bytes — passes the ≤2 MB in-APK gate) and a pure-NumPy
+  inference core (`audiofx/nn.py`) written and unit-tested. The
+  benchmark verdict is NO-GO for on-device neural pitch in this
+  branch: the measured forward-pass rates project to
+  ~132–408 s of phone inference for a 3-minute song (empirical
+  range across implementer and reviewer measurements; no floor
+  claim is made), over the
+  ~90 s PRD gate, so neural Notation (DSP-4) is descoped pending a
+  separate TFLite proposal and quality scoring ships Tier 1 only.
+  Details: `SPIKE_MEMO.md` in the spike worktree / branch.
