@@ -768,6 +768,10 @@ public class MainActivity extends Activity {
                         delayMs);
             }
         }
+        // Start the summary proxy's Cloud Run instance warming now,
+        // so a Diagnose tap minutes later does not pay the ~14 s
+        // cold start inside the summary request itself.
+        warmUpSummaryProxy();
 
         tvProjectName = findViewById(R.id.tv_project_name);
         btnMenu = findViewById(R.id.btn_menu);
@@ -3795,6 +3799,43 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** Fire-and-forget POST with an empty token at startup: the
+     * proxy rejects it (401, no quota consumed, no Groq call), but
+     * the request spins up its Cloud Run instance, whose cold start
+     * (~14 s, measured 2026-10-28) would otherwise land inside the
+     * user's first summary request after idle. */
+    private void warmUpSummaryProxy() {
+        final String proxyUrl = summaryProxyUrl();
+        if (proxyUrl.isEmpty()) {
+            return;
+        }
+        new Thread(() -> {
+            java.net.HttpURLConnection conn = null;
+            try {
+                conn = (java.net.HttpURLConnection)
+                        new java.net.URL(proxyUrl).openConnection();
+                conn.setRequestMethod("POST");
+                conn.setRequestProperty("Content-Type",
+                        "application/json");
+                conn.setDoOutput(true);
+                conn.setConnectTimeout(20000);
+                conn.setReadTimeout(60000);
+                byte[] body = "{}".getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8);
+                conn.setFixedLengthStreamingMode(body.length);
+                try (java.io.OutputStream os = conn.getOutputStream()) {
+                    os.write(body);
+                }
+                conn.getResponseCode();
+            } catch (Exception ignored) {
+            } finally {
+                if (conn != null) {
+                    conn.disconnect();
+                }
+            }
+        }).start();
+    }
+
     /** POST the summary request to the proxy (ticket AM-1); returns the
      * "summary" from {"summary"} or "". No Authorization header and no API
      * key: the proxy identifies the app by its App Check token. */
@@ -3808,7 +3849,13 @@ public class MainActivity extends Activity {
             conn.setRequestProperty("Content-Type", "application/json");
             conn.setDoOutput(true);
             conn.setConnectTimeout(20000);
-            conn.setReadTimeout(20000);
+            // 60 s read: a cold Cloud Run instance costs ~14 s before
+            // the handler even runs (measured 2026-10-28), then token
+            // verification, the Firestore quota transaction and the
+            // Groq generation still have to fit. At 20 s the first
+            // request after idle routinely timed out and the report
+            // showed "Summary unavailable".
+            conn.setReadTimeout(60000);
             org.json.JSONObject payload = new org.json.JSONObject();
             payload.put("findings_json", findingsJson);
             payload.put("profile", profile);
