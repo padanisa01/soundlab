@@ -170,7 +170,11 @@ class TestLoadWeights(unittest.TestCase):
                 nn.load_weights(path)
 
     def test_crepe_tiny_artifact_loads_and_matches_topology(self):
-        path = os.path.join(AUDIOFX_DIR, "crepe_tiny.npz")
+        # The converted artifact is a spike record, not app payload:
+        # it lives in tools/spike/ and must NOT ship in the APK
+        # (neural engine descoped by the DSP-0 spike NO-GO).
+        path = os.path.join(os.path.dirname(__file__), "..",
+                            "tools", "spike", "crepe_tiny.npz")
         self.assertTrue(os.path.isfile(path), "crepe_tiny.npz missing")
         w = nn.load_weights(path)
         # CREPE-tiny topology: 6 conv blocks, capacity 4, 360 bins.
