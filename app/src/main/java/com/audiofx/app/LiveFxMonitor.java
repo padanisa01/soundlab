@@ -37,6 +37,9 @@ public class LiveFxMonitor {
     /** Limiter choice from start(); spawnWorker() reads it (it is
      * also called from resume(), where no parameter is in scope). */
     private boolean wantLimiter;
+    /** True-peak choice from setTruePeak(); spawnWorker() reads the
+     * FIELD, same pattern as wantLimiter. */
+    private boolean wantTruePeak;
     private AudioTrack track;
     private AcousticEchoCanceler aec;
     private final CaptureFx fx = new CaptureFx();
@@ -95,6 +98,15 @@ public class LiveFxMonitor {
     /** Set before start(): live peak feed for the recording waveform. */
     public void setBlockListener(MicCapture.BlockListener listener) {
         blockListener = listener;
+    }
+
+    /**
+     * Set before start(): whether the safety limiter (when on) also
+     * catches inter-sample peaks. Stored as a field read by
+     * spawnWorker(); start(...) signature is unchanged.
+     */
+    public synchronized void setTruePeak(boolean truePeakOn) {
+        wantTruePeak = truePeakOn;
     }
 
     /**
@@ -243,7 +255,7 @@ public class LiveFxMonitor {
         // Safety limiter on the mic input, before the FX chain, so hot
         // signals cannot clip the wet take.
         final LiveLimiter limiter =
-                wantLimiter ? new LiveLimiter(cap.sampleRate, channels) : null;
+                wantLimiter ? new LiveLimiter(cap.sampleRate, channels, wantTruePeak) : null;
         worker = new Thread(() -> {
             byte[] inBuf = new byte[blockBytes];
             int filled = 0;

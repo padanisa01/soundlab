@@ -28,6 +28,7 @@ public class AudioRecorder {
     private boolean wantAgc;
     private boolean wantNs;
     private boolean wantLimiter;
+    private boolean wantTruePeak;
     private volatile MicCapture.BlockListener blockListener;
     private final CaptureFx fx = new CaptureFx();
 
@@ -75,6 +76,16 @@ public class AudioRecorder {
         wantAgc = agcOn;
         wantNs = nsOn;
         wantLimiter = limiterOn;
+    }
+
+    /**
+     * Set before start(): whether the limiter (when on) also catches
+     * inter-sample peaks. Stored as a field; spawnWorker() reads the
+     * FIELD (it is also called from resume(), where no parameter is in
+     * scope) -- never a start() parameter.
+     */
+    public synchronized void setTruePeak(boolean truePeakOn) {
+        wantTruePeak = truePeakOn;
     }
 
     /** True when the AGC effect actually attached to the capture session. */
@@ -144,7 +155,7 @@ public class AudioRecorder {
         final AudioRecord rec = cap.rec;
         final int channels = cap.channels;
         final LiveLimiter limiter =
-                wantLimiter ? new LiveLimiter(cap.sampleRate, channels) : null;
+                wantLimiter ? new LiveLimiter(cap.sampleRate, channels, wantTruePeak) : null;
         worker = new Thread(() -> {
             byte[] buf = new byte[8192];
             try (FileOutputStream fos = new FileOutputStream(outFile, true)) {
