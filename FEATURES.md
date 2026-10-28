@@ -270,7 +270,14 @@ or the plan changes.
   is surfaced in-app: a dialog with a selectable text box and a Copy
   button appears once per launch when the secret is found, and the
   secret is also written to `appcheck-debug-token.txt` in the public
-  Download folder (plus the app-specific external folder).
+  Download folder (plus the app-specific external folder). Firebase
+  initialization depends on the `com.google.gms.google-services`
+  Gradle plugin (applied in `app/build.gradle`) processing the real
+  `app/google-services.json`, which lives only on the build machine
+  (git-ignored); without the plugin the json is ignored, Firebase
+  never initializes, and App Check, Analytics and Remote Config are
+  all silently inert (diagnosed on-device 2026-10-28 via the token
+  file's diagnostics: "Firebase apps initialized: 0").
 - Python: `audiofx/diagnose.py` (checks + `tune_up_fixes`), `audiofx/repair.py`
   (11 fix ops), wired into `render_chain` via a shared `_apply_op`
   dispatcher; `diagnose_file` / `tune_up_build` / `tune_up_converge`

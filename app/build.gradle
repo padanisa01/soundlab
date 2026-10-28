@@ -1,6 +1,12 @@
 plugins {
     id "com.android.application"
     id "com.chaquo.python"
+    // Generates google_app_id etc. from app/google-services.json.
+    // NOTE: with this plugin applied, the build FAILS when
+    // app/google-services.json is missing -- download the real file
+    // from the Firebase Console (audiomech project); it is
+    // git-ignored and must exist only on the build machine.
+    id "com.google.gms.google-services"
 }
 
 android {

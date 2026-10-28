@@ -2,6 +2,11 @@
 plugins {
     id "com.android.application" version "8.7.0" apply false
     id "com.chaquo.python" version "17.1.0" apply false
+    // Processes app/google-services.json into the string resources
+    // FirebaseApp.initializeApp reads at runtime. Without this plugin
+    // the json is ignored entirely and Firebase never initializes
+    // (found on-device 2026-10-28: "Firebase apps initialized: 0").
+    id "com.google.gms.google-services" version "4.4.2" apply false
 }
 
 // Runs the audiofx Python compile check + unit tests + Android scaffold
