@@ -1,4 +1,4 @@
 flask
 gunicorn
-firebase-admin
+firebase-admin>=6.5,<8
 requests

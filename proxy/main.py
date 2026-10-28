@@ -154,10 +154,22 @@ def _parse_response(response_json):
 def _verify_app_check(token):
     """Verify the App Check JWT; return the decoded claims or None."""
     try:
-        project_id = os.environ.get("FIREBASE_PROJECT_ID")
-        return app_check.verify_token(token, project_id=project_id)
+        # firebase_admin's verify_token takes (token, app=None) --
+        # there is NO project_id kwarg in any released version
+        # (checked 6.5.0 and 7.7.0 source). Passing one raised
+        # TypeError, which the except below swallowed, so EVERY
+        # token -- valid ones included -- was rejected with 401
+        # from the first deploy until 2026-10-28. The project comes
+        # from the app initialized in _init_firebase. (The AM-1
+        # smoke test could not catch this: a bogus token is
+        # supposed to get a 401 either way.)
+        return app_check.verify_token(token)
     except Exception as e:  # verification failure: wrong issuer, expired, etc.
-        logger.warning("app check verification failed: %s", type(e).__name__)
+        # Log the reason, never the token: PyJWT messages name the
+        # expected audience/issuer, which is what a real claims
+        # mismatch diagnosis needs.
+        logger.warning("app check verification failed: %s: %s",
+                       type(e).__name__, str(e)[:200])
         return None
 
 
