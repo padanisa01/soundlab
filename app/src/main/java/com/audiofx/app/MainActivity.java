@@ -3913,13 +3913,15 @@ public class MainActivity extends Activity {
     }
 
     /** Improve quality (DSP-5 follow-up): build the driver-filtered
-     * composite via quality_improve_build and apply it through the
-     * SAME path Tune Up's single-pass fallback uses -- one tune_up
-     * op through applyLibraryOp, so it is a single history entry /
-     * single undo -- then re-diagnose the track. The report that
-     * follows renders the remembered Overall as a before -> after
-     * line, once. An empty selection (every penalized driver's fix
-     * absent for this profile) applies nothing. */
+     * composite via quality_improve_converge on the track render
+     * (multi-pass, keep-best; quality_improve_build as fallback) and
+     * apply it through the SAME path Tune Up's single-pass fallback
+     * uses -- one tune_up op through applyLibraryOp, so it is a
+     * single history entry / single undo -- then re-diagnose the
+     * track. The report that follows renders the remembered Overall
+     * as a before -> after line, once. An empty selection (no
+     * penalized driver's fix applies, or every pass regressed)
+     * applies nothing. */
     private void runImproveQuality(final String findingsJson,
             final String qualityJson, final double ovrlBefore) {
         final String entryId = currentEntryId;
@@ -3948,10 +3950,27 @@ public class MainActivity extends Activity {
                 if (!Python.isStarted()) {
                     Python.start(new AndroidPlatform(this));
                 }
-                final String improveJson = Python.getInstance()
-                        .getModule("audiofx.android_bridge")
-                        .callAttr("quality_improve_build", findingsJson,
-                                qualityJson, profile).toString();
+                final PyObject bridge = Python.getInstance()
+                        .getModule("audiofx.android_bridge");
+                // Converge on the track's own rendered file when it
+                // exists (multi-pass, keep-best: a pass that lowers
+                // the measured Overall is discarded); fall back to
+                // the single-pass build when there is no render.
+                File trackRender = libraryDb.trackRenderFile(trackId);
+                if (!trackRender.exists()) {
+                    renderTrackBlocking(entryId, trackId);
+                }
+                final String improveJson;
+                if (trackRender.exists()) {
+                    improveJson = bridge.callAttr(
+                            "quality_improve_converge",
+                            trackRender.getAbsolutePath(), findingsJson,
+                            qualityJson, profile, 3).toString();
+                } else {
+                    improveJson = bridge.callAttr(
+                            "quality_improve_build", findingsJson,
+                            qualityJson, profile).toString();
+                }
                 final JSONObject params =
                         new JSONObject(improveJson).getJSONObject("params");
                 final JSONArray fixes = params.optJSONArray("fixes");

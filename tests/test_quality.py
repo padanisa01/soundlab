@@ -360,5 +360,120 @@ class QualityImproveBuildTest(unittest.TestCase):
                 "[]", "not json", "podcast")
 
 
+class QualityImproveConvergeTest(unittest.TestCase):
+    """quality_improve_converge: multi-pass, keep-best. The
+    single-pass build can regress the score it targets (a gain fix
+    re-raises the noise floor); converge re-derives drivers per
+    pass and discards a pass that lowers Overall, so its composite
+    can never measure worse than the starting Overall."""
+
+    SR2 = 16000
+
+    def _fixture(self, burst_amp, noise_sigma):
+        import random
+        rng = random.Random(42)
+        out = []
+        # 0.4 s tone bursts separated by 0.6 s noise-only gaps.
+        for sec in range(3):
+            for i in range(int(0.4 * self.SR2)):
+                out.append(burst_amp * math.sin(
+                    2.0 * math.pi * 300.0 * i / self.SR2)
+                    + rng.gauss(0.0, noise_sigma))
+            for _ in range(int(0.6 * self.SR2)):
+                out.append(rng.gauss(0.0, noise_sigma))
+        return out
+
+    def _run_case(self, samples):
+        from audiofx.pipeline import write_wav
+        import tempfile
+        findings = diagnose.analyze(samples, self.SR2)
+        q = quality.score(samples, self.SR2,
+                          diagnose.quality_measurements(
+                              samples, self.SR2))
+        self.assertIsNotNone(q)
+        findings_j = json.dumps(findings)
+        quality_j = json.dumps(q)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "take.wav")
+            write_wav(path, samples, self.SR2)
+            conv = json.loads(android_bridge.quality_improve_converge(
+                path, findings_j, quality_j, "singing"))
+        single = json.loads(android_bridge.quality_improve_build(
+            findings_j, quality_j, "singing"))
+
+        def ovrl_after(op_json):
+            fixes = op_json["params"]["fixes"]
+            if not fixes:
+                return q["ovrl"], 0
+            rendered, _ = android_bridge._run_ops(
+                list(samples), self.SR2,
+                [{"op": f["op"], "params": f["params"]}
+                 for f in fixes], None)
+            q2 = quality.score(rendered, self.SR2,
+                               diagnose.quality_measurements(
+                                   rendered, self.SR2))
+            return q2["ovrl"], len(fixes)
+
+        return q["ovrl"], single, conv, ovrl_after
+
+    def test_converge_never_measures_worse_than_start_or_build(self):
+        # Quiet take, faint hiss: the loudness gain is the trap —
+        # it re-raises the floor. (The user's on-device regression:
+        # Overall 3.9 -> 3.3 from the single-pass build.)
+        samples = self._fixture(0.10, 0.00035)
+        ovrl0, single, conv, ovrl_after = self._run_case(samples)
+        single_ovrl, single_n = ovrl_after(single)
+        conv_ovrl, _ = ovrl_after(conv)
+        self.assertGreater(single_n, 0)  # the trap was armed
+        self.assertGreaterEqual(conv_ovrl, ovrl0 - 1e-6)
+        self.assertGreaterEqual(conv_ovrl, single_ovrl - 1e-6)
+
+    def test_converge_refuses_a_take_no_fix_set_improves(self):
+        # Hissy AND quiet AND uneven: every selectable fix set makes
+        # the measured Overall worse (the gain fixes cost more
+        # Background than the Signal they buy; the spectral denoise
+        # cannot hold the floor against +12 dB of gain riding). The
+        # honest result is an empty composite, not a regression.
+        # Measured at authoring time: single-pass build takes this
+        # fixture 3.41 -> 2.85; converge must not.
+        samples = self._fixture(0.10, 0.004)
+        ovrl0, single, conv, ovrl_after = self._run_case(samples)
+        single_ovrl, single_n = ovrl_after(single)
+        self.assertGreater(single_n, 0)
+        self.assertLess(single_ovrl, ovrl0)  # build really regresses
+        self.assertEqual(conv["params"]["fixes"], [])
+        conv_ovrl, _ = ovrl_after(conv)
+        self.assertEqual(conv_ovrl, ovrl0)
+
+    def test_clean_take_converges_to_nothing(self):
+        samples = self._fixture(0.5, 0.00001)
+        from audiofx.pipeline import write_wav
+        import tempfile
+        findings = json.dumps(diagnose.analyze(samples, self.SR2))
+        q = quality.score(samples, self.SR2,
+                          diagnose.quality_measurements(
+                              samples, self.SR2))
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "take.wav")
+            write_wav(path, samples, self.SR2)
+            conv = json.loads(android_bridge.quality_improve_converge(
+                path, findings, json.dumps(q), "singing"))
+        self.assertEqual(conv["params"]["fixes"], [])
+        self.assertEqual(conv["params"]["passes"], 0)
+
+    def test_converge_errors(self):
+        with self.assertRaises(ValueError):
+            android_bridge.quality_improve_converge(
+                "/nonexistent/take.wav", "[]",
+                json.dumps({"ovrl": 3.0, "drivers": {}}), "singing")
+        with self.assertRaises(ValueError):
+            android_bridge.quality_improve_converge(
+                __file__, "[]", json.dumps({"drivers": {}}), "singing")
+        with self.assertRaises(ValueError):
+            android_bridge.quality_improve_converge(
+                __file__, "not json",
+                json.dumps({"ovrl": 3.0, "drivers": {}}), "singing")
+
+
 if __name__ == "__main__":
     unittest.main()

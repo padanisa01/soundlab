@@ -824,6 +824,45 @@ _QUALITY_DRIVER_OPS = {
 }
 
 
+def _quality_drivers_of(quality_obj):
+    """The drivers dict of a diagnose_file quality object (accepts
+    the object itself or a {"quality": {...}} wrapper)."""
+    if isinstance(quality_obj, dict):
+        inner = quality_obj.get("quality")
+        if not isinstance(inner, dict):
+            inner = quality_obj
+        raw = inner.get("drivers")
+        if isinstance(raw, dict):
+            return raw
+    return {}
+
+
+def _quality_driver_fixes(findings, drivers, profile):
+    """Fixes for the quality drivers at/above
+    quality.QUALITY_IMPROVE_MIN_PENALTY: Tune Up's canonical order;
+    the requested profile's version of a fix when it has one, else
+    the default profile's (recipe exclusions do not gate this
+    tool — see quality_improve_build)."""
+    wanted = set()
+    for driver, op in _QUALITY_DRIVER_OPS.items():
+        try:
+            penalty = float(drivers.get(driver, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            penalty = 0.0
+        if penalty >= _quality.QUALITY_IMPROVE_MIN_PENALTY:
+            wanted.add(op)
+    full = _diagnose.tune_up_fixes(
+        findings, _diagnose.DEFAULT_PROFILE)
+    by_op = {f.get("op"): f for f in
+             _diagnose.tune_up_fixes(findings, profile)}
+    fixes = []
+    for f in full:
+        op = f.get("op")
+        if op in wanted:
+            fixes.append(by_op.get(op, f))
+    return fixes
+
+
 def quality_improve_build(findings_json, quality_json, profile="podcast"):
     """Build the Improve quality composite op: the same tune_up op
     JSON shape tune_up_build returns, containing ONLY the fixes for
@@ -854,34 +893,8 @@ def quality_improve_build(findings_json, quality_json, profile="podcast"):
         quality_obj = json.loads(quality_json)
     except (TypeError, ValueError) as exc:
         raise ValueError("quality_json is not valid JSON: %s" % exc)
-    drivers = {}
-    if isinstance(quality_obj, dict):
-        inner = quality_obj.get("quality")
-        if not isinstance(inner, dict):
-            inner = quality_obj
-        raw = inner.get("drivers")
-        if isinstance(raw, dict):
-            drivers = raw
-    wanted = set()
-    for driver, op in _QUALITY_DRIVER_OPS.items():
-        try:
-            penalty = float(drivers.get(driver, 0.0) or 0.0)
-        except (TypeError, ValueError):
-            penalty = 0.0
-        if penalty >= _quality.QUALITY_IMPROVE_MIN_PENALTY:
-            wanted.add(op)
-    full = _diagnose.tune_up_fixes(
-        findings, _diagnose.DEFAULT_PROFILE)
-    by_op = {f.get("op"): f for f in
-             _diagnose.tune_up_fixes(findings, profile)}
-    fixes = []
-    for f in full:
-        op = f.get("op")
-        if op in wanted:
-            # Prefer the requested profile's own version of the fix
-            # (its params); fall back to the default profile's when
-            # the recipe excludes the op.
-            fixes.append(by_op.get(op, f))
+    drivers = _quality_drivers_of(quality_obj)
+    fixes = _quality_driver_fixes(findings, drivers, profile)
     prof = _diagnose.TUNE_UP_PROFILES.get(
         profile, _diagnose.TUNE_UP_PROFILES[_diagnose.DEFAULT_PROFILE])
     labels = [f.get("label", f.get("op", "?")) for f in fixes]
@@ -891,6 +904,98 @@ def quality_improve_build(findings_json, quality_json, profile="podcast"):
     return json.dumps({
         "op": "tune_up",
         "params": {"fixes": fixes, "summary": summary, "profile": profile},
+    })
+
+
+def quality_improve_converge(input_path, findings_json, quality_json,
+                             profile="podcast", max_passes=3):
+    """Multi-pass Improve quality, modeled on tune_up_converge.
+
+    The single-pass build can REGRESS the score it targets: fixes
+    interact (a loudness/level gain re-raises the noise floor, so
+    Background falls by more than Signal gains — seen on device,
+    Overall 3.9 -> 3.3). Each pass here re-diagnoses the previous
+    pass's render and re-derives the quality drivers, so a side
+    effect created by one pass (the newly penalized noise driver)
+    is itself fixed in a later pass. Keep-best: a pass whose render
+    measures a LOWER Overall than the best so far is discarded, and
+    the returned composite holds only the improving passes' fixes —
+    rendering that flat list reproduces the best measured state
+    (fixes are pure functions), so applying the result cannot make
+    the measured Overall worse. Overall is the guarantee; a kept
+    pass may still trade a little of one sub-score for more of the
+    other (that trade is what the 0.6/0.4 Overall weights arbitrate,
+    and the post-apply report shows both sub-scores honestly).
+    Note there are takes no available fix set improves — a quiet,
+    hissy take whose gain fixes cost more Background than the
+    Signal they buy — where this correctly returns "nothing to
+    fix" rather than a regression. Same tune_up op JSON shape as
+    quality_improve_build, plus "passes" in params.
+    """
+    try:
+        findings = json.loads(findings_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("findings_json is not valid JSON: %s" % exc)
+    if not isinstance(findings, list):
+        raise ValueError("findings_json must be a JSON array of findings")
+    try:
+        quality_obj = json.loads(quality_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("quality_json is not valid JSON: %s" % exc)
+    inner = quality_obj.get("quality") if isinstance(
+        quality_obj, dict) else None
+    if not isinstance(inner, dict):
+        inner = quality_obj if isinstance(quality_obj, dict) else {}
+    try:
+        best_ovrl = float(inner.get("ovrl"))
+    except (TypeError, ValueError):
+        raise ValueError("quality_json carries no ovrl to improve")
+    if not os.path.isfile(input_path):
+        raise ValueError("input file not found: %s" % input_path)
+    prof = _diagnose.TUNE_UP_PROFILES.get(
+        profile, _diagnose.TUNE_UP_PROFILES[_diagnose.DEFAULT_PROFILE])
+    samples, sample_rate = read_wav_mono(input_path)
+    drivers = _quality_drivers_of(quality_obj)
+    best_fixes = []
+    passes = 0
+    for _ in range(max_passes):
+        fixes = _quality_driver_fixes(findings, drivers, profile)
+        if not fixes:
+            break
+        new_samples, _sr = _run_ops(
+            samples, sample_rate,
+            [{"op": f["op"], "params": f["params"]} for f in fixes],
+            None)
+        new_quality = _quality.score(
+            new_samples, sample_rate,
+            _diagnose.quality_measurements(new_samples, sample_rate))
+        if new_quality is None:
+            break
+        if float(new_quality["ovrl"]) < best_ovrl - 1e-9:
+            break  # keep-best: discard this pass entirely
+        passes += 1
+        best_fixes.extend(fixes)
+        samples = new_samples
+        best_ovrl = float(new_quality["ovrl"])
+        findings = _diagnose.analyze(samples, sample_rate)
+        drivers = new_quality.get("drivers") or {}
+    labels = []
+    seen = set()
+    for f in best_fixes:
+        if f["op"] not in seen:
+            seen.add(f["op"])
+            labels.append(f.get("label", f["op"]))
+    if labels:
+        summary = "Improve quality (%s): %s" % (
+            prof["label"], ", ".join(labels))
+        if passes > 1:
+            summary += " (%d passes)" % passes
+    else:
+        summary = "Improve quality (%s): nothing to fix" % prof["label"]
+    return json.dumps({
+        "op": "tune_up",
+        "params": {"fixes": best_fixes, "summary": summary,
+                   "profile": profile, "passes": passes},
     })
 
 

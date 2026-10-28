@@ -316,6 +316,14 @@ or the plan changes.
   supplies fix parameters, but its exclusions do not gate this
   tool (e.g. the level fix applies under Singing despite the
   recipe's no-leveling rule — the tap is an explicit fix request).
+  On a track with a render, the button uses
+  `quality_improve_converge`: up to 3 passes, re-deriving the
+  drivers from each pass's render (a gain fix's noise-floor side
+  effect becomes the next pass's target), with keep-best — a pass
+  that lowers the measured Overall is discarded, so applying the
+  result cannot regress Overall. Some takes no fix set improves
+  (quiet + hissy, where gain costs more Background than the
+  Signal it buys); there the tool honestly applies nothing.
 - **DSP Lab tab** (DSP-6): Settings is now a two-tab dialog
   (Soundcheck | DSP Lab); the Soundcheck tab's four cue switches are
   unchanged. The DSP Lab tab holds the five engine defaults, each
