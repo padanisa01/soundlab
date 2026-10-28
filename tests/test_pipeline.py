@@ -845,5 +845,74 @@ class TestWavSizeGuard(unittest.TestCase):
         self.assertEqual(len(back), len(sig))
 
 
+class TestPitchShiftEngineDispatch(unittest.TestCase):
+    """pitch_shift op engine dispatch (DSP-1): params.engine selects
+    the WSOLA (default) or formant engine in _apply_op."""
+
+    SR = 22050
+
+    def _pristine(self, d, name="pristine.wav"):
+        # A harmonic stack (not a lone sine) so the two engines have
+        # distinguishable work to do.
+        sig = []
+        base = sine(220, 1.0, self.SR, amplitude=0.2)
+        for i, s in enumerate(base):
+            v = s
+            v += 0.5 * 0.2 * math.sin(2.0 * math.pi * 440 * i / self.SR)
+            v += 0.25 * 0.2 * math.sin(2.0 * math.pi * 660 * i / self.SR)
+            sig.append(v)
+        p = os.path.join(d, name)
+        write_wav(p, sig, self.SR)
+        return p
+
+    def _render(self, d, src, params, name):
+        dst = os.path.join(d, name)
+        android_bridge.render_chain(
+            src, json.dumps([{"op": "pitch_shift", "params": params}]), dst)
+        out, _ = read_wav_mono(dst)
+        return out
+
+    def _direct(self, d, src, fn, name):
+        orig, sr = read_wav_mono(src)
+        ref = os.path.join(d, name)
+        write_wav(ref, fn(orig, sr), sr)
+        out, _ = read_wav_mono(ref)
+        return out
+
+    def test_op_without_engine_is_bit_identical_to_wsola(self):
+        from audiofx import pitch as pitch_mod
+        with tempfile.TemporaryDirectory() as d:
+            src = self._pristine(d)
+            chained = self._render(d, src, {"semitones": 5.0}, "chain.wav")
+            direct = self._direct(
+                d, src,
+                lambda s, sr: pitch_mod.pitch_shift(s, sr, 5.0), "ref.wav")
+            self.assertEqual(chained, direct)
+            explicit = self._render(
+                d, src, {"semitones": 5.0, "engine": "wsola"}, "wsola.wav")
+            self.assertEqual(chained, explicit)
+
+    def test_op_with_formant_engine_uses_formant_path(self):
+        from audiofx import pitch as pitch_mod
+        with tempfile.TemporaryDirectory() as d:
+            src = self._pristine(d)
+            chained = self._render(
+                d, src, {"semitones": 5.0, "engine": "formant"},
+                "chain.wav")
+            direct = self._direct(
+                d, src,
+                lambda s, sr: pitch_mod.pitch_shift_formant(s, sr, 5.0),
+                "ref.wav")
+            self.assertEqual(chained, direct)
+
+    def test_op_with_unknown_engine_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._pristine(d)
+            with self.assertRaises(ValueError):
+                self._render(
+                    d, src, {"semitones": 5.0, "engine": "bogus"},
+                    "chain.wav")
+
+
 if __name__ == "__main__":
     unittest.main()

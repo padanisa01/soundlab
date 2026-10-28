@@ -89,9 +89,18 @@ def _apply_op(samples, sample_rate, op, params, index):
         samples = (_np.asarray(processed, dtype=_np.float64)
                    if _HAVE_NP else processed)
     elif op == "pitch_shift":
-        samples = _pitch.pitch_shift(
-            samples, sample_rate,
-            float(params.get("semitones", 0.0)))
+        engine = params.get("engine", "wsola")
+        if engine == "wsola":
+            samples = _pitch.pitch_shift(
+                samples, sample_rate,
+                float(params.get("semitones", 0.0)))
+        elif engine == "formant":
+            samples = _pitch.pitch_shift_formant(
+                samples, sample_rate,
+                float(params.get("semitones", 0.0)))
+        else:
+            raise ValueError(
+                "unknown pitch_shift engine: %r" % (engine,))
     elif op == "normalize":
         samples, _ = _apply_normalize(
             samples, sample_rate,
