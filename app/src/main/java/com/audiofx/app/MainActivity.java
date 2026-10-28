@@ -1273,6 +1273,15 @@ public class MainActivity extends Activity {
                 .getBoolean("mic_truepeak", false);
     }
 
+    /** The DSP Lab quality-score pref (default "off"). Passed to
+     * diagnose_file as its quality_engine argument and folded into
+     * the diagnosis cache key, so switching engines never serves a
+     * stale report. */
+    private String qualityEnginePref() {
+        return getSharedPreferences("soundlab", MODE_PRIVATE)
+                .getString("quality_engine", "off");
+    }
+
     /** One segment of a hand-rolled segmented control (the
      * Record|Soundcheck strip's dimensions), painted by
      * paintSegment. Used by dialogs that build their views in code
@@ -2235,7 +2244,8 @@ public class MainActivity extends Activity {
         final String diagPath = path;
         diagLastPath = diagPath;
         diagTrackId = null;
-        if (diagPath.equals(cachedDiagPath) && cachedDiagJson != null) {
+        if ((diagPath + "|" + qualityEnginePref()).equals(cachedDiagPath)
+                && cachedDiagJson != null) {
             showDiagnosisReport(cachedDiagJson);
             return;
         }
@@ -2261,7 +2271,8 @@ public class MainActivity extends Activity {
         final String trackId = track.id;
         final String diagPath =
                 libraryDb.trackRenderFile(trackId).getAbsolutePath();
-        if (diagPath.equals(cachedDiagPath) && cachedDiagJson != null
+        if ((diagPath + "|" + qualityEnginePref()).equals(cachedDiagPath)
+                && cachedDiagJson != null
                 && trackId.equals(diagTrackId)) {
             diagLastPath = diagPath;
             showDiagnosisReport(cachedDiagJson);
@@ -2307,20 +2318,27 @@ public class MainActivity extends Activity {
                 if (!Python.isStarted()) {
                     Python.start(new AndroidPlatform(this));
                 }
+                final String qualityEngine = qualityEnginePref();
                 final String findingsJson = Python.getInstance()
                         .getModule("audiofx.android_bridge")
-                        .callAttr("diagnose_file", diagPath).toString();
+                        .callAttr("diagnose_file", diagPath, qualityEngine)
+                        .toString();
                 cachedProfilesJson = Python.getInstance()
                         .getModule("audiofx.android_bridge")
                         .callAttr("list_tune_up_profiles").toString();
                 // Warm the LLM summary alongside the diagnosis cache.
-                warmDiagSummaryCache(findingsJson);
+                // The summary builder consumes the findings array, so
+                // hand it the array inside the object shape when the
+                // quality engine returned one.
+                warmDiagSummaryCache(diagFindingsArrayJson(findingsJson));
                 runOnUiThread(() -> {
                     setBusy(false);
                     if (diagWave != null) {
                         diagWave.finishProgressAnimation();
                     }
-                    cachedDiagPath = diagPath;
+                    // Cache key includes the quality engine (contracts):
+                    // switching engines never serves a stale report.
+                    cachedDiagPath = diagPath + "|" + qualityEngine;
                     cachedDiagJson = findingsJson;
                     showDiagnosisReport(findingsJson);
                 });
@@ -2703,9 +2721,54 @@ public class MainActivity extends Activity {
                 });
     }
 
+    /** The findings-array JSON inside a diagnose_file result: the
+     * result itself when it is the array shape (quality engine off),
+     * or its "findings" member when it is the object shape (quality
+     * engine on). Returns the input unchanged when it parses as
+     * neither, so the array path stays byte-for-byte identical. */
+    private static String diagFindingsArrayJson(String diagJson) {
+        if (diagJson == null) {
+            return null;
+        }
+        if (diagJson.trim().startsWith("{")) {
+            try {
+                JSONArray arr = new JSONObject(diagJson.trim())
+                        .optJSONArray("findings");
+                if (arr != null) {
+                    return arr.toString();
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return diagJson;
+    }
+
+    /** The quality object inside a diagnose_file object-shape result,
+     * or null for the array shape, or when quality is null (silence
+     * scores null, never 1 or 5). */
+    private static JSONObject diagQualityJson(String diagJson) {
+        if (diagJson == null || !diagJson.trim().startsWith("{")) {
+            return null;
+        }
+        try {
+            JSONObject obj = new JSONObject(diagJson.trim());
+            return obj.isNull("quality") ? null
+                    : obj.optJSONObject("quality");
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     /** The mechanic's report card (Option A): score hero, grouped findings,
-     * profile picker, sticky Tune Up bar. */
-    private void showDiagnosisReport(final String findingsJson) {
+     * profile picker, sticky Tune Up bar. Accepts both diagnose_file
+     * shapes: the findings array (quality off) renders exactly as
+     * before; the object shape (quality on) additionally renders the
+     * quality line in the score hero from its "quality" member, and
+     * everything downstream (summary, Tune Up, Master) consumes the
+     * extracted findings array. */
+    private void showDiagnosisReport(final String diagJson) {
+        final String findingsJson = diagFindingsArrayJson(diagJson);
+        final JSONObject quality = diagQualityJson(diagJson);
         final float dp = getResources().getDisplayMetrics().density;
         JSONArray findings;
         try {
@@ -2819,6 +2882,23 @@ public class MainActivity extends Activity {
         subTv.setTextSize(12.5f);
         subTv.setPadding(0, (int) (3 * dp), 0, 0);
         cap.addView(subTv);
+        // Quality score (DSP-5, object shape only): one line in the
+        // score hero. Omitted entirely when quality is null (silence)
+        // or absent (array shape) -- the array path renders exactly
+        // as before.
+        if (quality != null && quality.has("sig") && quality.has("bak")
+                && quality.has("ovrl")) {
+            TextView qualityTv = new TextView(this);
+            qualityTv.setText(String.format(Locale.US,
+                    "Quality score (estimate): SIG %.1f · BAK %.1f"
+                            + " · OVRL %.1f",
+                    quality.optDouble("sig"), quality.optDouble("bak"),
+                    quality.optDouble("ovrl")));
+            qualityTv.setTextColor(getColor(R.color.sl_teal2));
+            qualityTv.setTextSize(12.5f);
+            qualityTv.setPadding(0, (int) (3 * dp), 0, 0);
+            cap.addView(qualityTv);
+        }
         hero.addView(cap);
         list.addView(hero);
 
@@ -5514,6 +5594,7 @@ public class MainActivity extends Activity {
         }
         recorder.setPreprocessing(switchAgc.isChecked(), switchNs.isChecked(),
                 switchLimiter.isChecked());
+        recorder.setTruePeak(truePeakPref());
         File take = new File(getCacheDir(), "rec_take.wav");
         if (!recorder.start(take)) {
             pendingRecordTrackId = null;
@@ -5562,6 +5643,7 @@ public class MainActivity extends Activity {
         double warmth = seekWarmth.getProgress() / 100.0;
         double echo = seekEcho.getProgress() / 100.0;
         File take = new File(getCacheDir(), "rec_take.wav");
+        liveMonitor.setTruePeak(truePeakPref());
         if (!liveMonitor.start(take, warmth, reverbPreset, echo,
                 switchAgc.isChecked(), switchNs.isChecked(),
                 switchLimiter.isChecked())) {
