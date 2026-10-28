@@ -256,6 +256,19 @@ or the plan changes.
   (11 fix ops), wired into `render_chain` via a shared `_apply_op`
   dispatcher; `diagnose_file` / `tune_up_build` / `tune_up_converge`
   entry points in `android_bridge.py`.
+- **Mastering op — Multiband engine** (DSP-2): a renderable `mastering`
+  op (`audiofx/mastering.py`) with 4-band feed-forward compression
+  (linear-phase FFT-domain complementary crossovers at 120 Hz /
+  1 kHz / 6 kHz — exact recombination at unity) plus 3-band dynamic
+  EQ (peaking gains at 300 Hz / 3 kHz / 6.5 kHz driven by band level
+  over threshold, clamped ±6 dB). Op params persist in full numeric
+  form (`bands` + `dyn_eq`); the preset name (gentle / punch /
+  broadcast) is metadata only, so redefining a preset never changes
+  an old render. This is the Multiband alternative to the Classic
+  mastering pair (`eq_balance` + `loudness`); Classic remains the
+  default. Tune Up does NOT offer `mastering` in v1. The op's
+  arrival bumped `DSP_VERSION` to "2" (`android_bridge.py` +
+  `LibraryDb.java`).
 
 ### Tonic and notation
 - **Notation** is per track: the Notation icon button sits in the
