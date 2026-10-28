@@ -281,6 +281,14 @@ public class MainActivity extends Activity {
     private Button diagTuneUpBtn;
     private TextView diagSummaryTv;
     private String diagFindingsJson;
+    /** Quality object JSON for the current diagnosis (diagnose_file
+     * object shape only), or null. Feeds the proxy summary payload
+     * and its cache key, and the Improve quality tool. */
+    private String currentDiagQualityJson;
+    /** Overall quality remembered when Improve quality is tapped;
+     * consumed (and cleared) by the immediate post-improve report,
+     * which renders the before -> after line once. */
+    private Double qualityOvrlBeforeImprove;
     /** Executive-summary cache, keyed by findings hash + profile. */
     private final java.util.HashMap<String, String> diagSummaryCache =
             new java.util.HashMap<>();
@@ -2226,6 +2234,11 @@ public class MainActivity extends Activity {
      * the current output as before. */
     private void onDiagnoseClicked() {
         Analytics.diagnoseClicked(this);
+        // A user-initiated diagnosis is not a post-Improve report:
+        // never let a remembered Overall leak its delta line into it.
+        // (The post-Improve re-diagnosis calls diagnoseSelectedTrack
+        // directly and keeps the remembered value.)
+        qualityOvrlBeforeImprove = null;
         final String entryId = currentEntryId;
         if (entryId != null) {
             diagnoseSelectedTrack(entryId);
@@ -2329,8 +2342,13 @@ public class MainActivity extends Activity {
                 // Warm the LLM summary alongside the diagnosis cache.
                 // The summary builder consumes the findings array, so
                 // hand it the array inside the object shape when the
-                // quality engine returned one.
-                warmDiagSummaryCache(diagFindingsArrayJson(findingsJson));
+                // quality engine returned one; the quality object
+                // itself travels separately (proxy payload + cache
+                // key), never inside the findings.
+                JSONObject warmQuality = diagQualityJson(findingsJson);
+                warmDiagSummaryCache(diagFindingsArrayJson(findingsJson),
+                        warmQuality == null ? null
+                                : warmQuality.toString());
                 runOnUiThread(() -> {
                     setBusy(false);
                     if (diagWave != null) {
@@ -2759,6 +2777,24 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** True when the quality object's "drivers" breakdown carries
+     * any penalty at or above quality.py's
+     * QUALITY_IMPROVE_MIN_PENALTY (0.3 points) -- i.e. the Improve
+     * quality tool would have something to act on. */
+    private static boolean qualityHasImprovableDriver(JSONObject quality) {
+        JSONObject drivers = quality.optJSONObject("drivers");
+        if (drivers == null) {
+            return false;
+        }
+        java.util.Iterator<String> keys = drivers.keys();
+        while (keys.hasNext()) {
+            if (drivers.optDouble(keys.next(), 0.0) >= 0.3) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** The mechanic's report card (Option A): score hero, grouped findings,
      * profile picker, sticky Tune Up bar. Accepts both diagnose_file
      * shapes: the findings array (quality off) renders exactly as
@@ -2815,6 +2851,7 @@ public class MainActivity extends Activity {
         // hidden entirely when neither a Groq key (debug) nor the summary
         // proxy (release) is configured.
         diagFindingsJson = findingsJson;
+        currentDiagQualityJson = quality == null ? null : quality.toString();
         final boolean summaryAvailable = !groqApiKey().isEmpty()
                 || !summaryProxyUrl().isEmpty();
         LinearLayout summaryCard = new LinearLayout(this);
@@ -2882,22 +2919,56 @@ public class MainActivity extends Activity {
         subTv.setTextSize(12.5f);
         subTv.setPadding(0, (int) (3 * dp), 0, 0);
         cap.addView(subTv);
+        // Score-vs-quality explainer: the /100 ring is the weighted
+        // count of the 12 technical checks, NOT the quality estimate
+        // below it; the two measure different things.
+        TextView scoreExplTv = new TextView(this);
+        scoreExplTv.setText("Score /100 \u2014 the 12 technical checks, "
+                + "weighted by severity.");
+        scoreExplTv.setTextColor(getColor(R.color.sl_mut));
+        scoreExplTv.setTextSize(11.5f);
+        scoreExplTv.setPadding(0, (int) (3 * dp), 0, 0);
+        cap.addView(scoreExplTv);
         // Quality score (DSP-5, object shape only): one line in the
-        // score hero. Omitted entirely when quality is null (silence)
-        // or absent (array shape) -- the array path renders exactly
-        // as before.
+        // score hero, in full words. Omitted entirely when quality
+        // is null (silence) or absent (array shape) -- the array
+        // path renders exactly as before.
         if (quality != null && quality.has("sig") && quality.has("bak")
                 && quality.has("ovrl")) {
             TextView qualityTv = new TextView(this);
             qualityTv.setText(String.format(Locale.US,
-                    "Quality score (estimate): SIG %.1f · BAK %.1f"
-                            + " · OVRL %.1f",
+                    "Quality (estimate) \u2014 Signal %.1f · Background %.1f"
+                            + " · Overall %.1f",
                     quality.optDouble("sig"), quality.optDouble("bak"),
                     quality.optDouble("ovrl")));
             qualityTv.setTextColor(getColor(R.color.sl_teal2));
             qualityTv.setTextSize(12.5f);
             qualityTv.setPadding(0, (int) (3 * dp), 0, 0);
             cap.addView(qualityTv);
+            // Post-Improve delta: shown once, in the immediate
+            // post-improve report only, with the honest re-diagnosed
+            // numbers even when Overall did not rise.
+            if (qualityOvrlBeforeImprove != null) {
+                TextView deltaTv = new TextView(this);
+                deltaTv.setText(String.format(Locale.US,
+                        "Quality after improving: Overall %.1f \u2192 %.1f",
+                        qualityOvrlBeforeImprove,
+                        quality.optDouble("ovrl")));
+                deltaTv.setTextColor(getColor(R.color.sl_teal2));
+                deltaTv.setTextSize(12.5f);
+                deltaTv.setPadding(0, (int) (3 * dp), 0, 0);
+                cap.addView(deltaTv);
+                qualityOvrlBeforeImprove = null;
+            }
+            TextView qualityExplTv = new TextView(this);
+            qualityExplTv.setText("Quality /5 \u2014 a perceptual estimate "
+                    + "of how it sounds: Signal = the voice itself, "
+                    + "Background = the noise behind it, "
+                    + "Overall = the two combined.");
+            qualityExplTv.setTextColor(getColor(R.color.sl_mut));
+            qualityExplTv.setTextSize(11.5f);
+            qualityExplTv.setPadding(0, (int) (3 * dp), 0, 0);
+            cap.addView(qualityExplTv);
         }
         hero.addView(cap);
         list.addView(hero);
@@ -3028,6 +3099,33 @@ public class MainActivity extends Activity {
             showMasterDialog(findingsJson);
         });
         bar.addView(masterBtn);
+        // Improve quality (DSP-5 follow-up): beside Master, only
+        // when a quality object is present and at least one driver
+        // penalty reaches quality.py's QUALITY_IMPROVE_MIN_PENALTY.
+        if (quality != null && quality.has("ovrl")
+                && qualityHasImprovableDriver(quality)) {
+            final String improveQualityJson = quality.toString();
+            final double improveOvrlBefore = quality.optDouble("ovrl");
+            Button improveBtn = new Button(this);
+            improveBtn.setText("Improve quality");
+            improveBtn.setBackgroundResource(R.drawable.bg_ghost);
+            improveBtn.setTextColor(getColor(R.color.sl_teal2));
+            improveBtn.setTextSize(15.5f);
+            improveBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+            improveBtn.setPadding(0, (int) (13 * dp), 0, (int) (13 * dp));
+            LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            ilp.setMargins((int) (6 * dp), 0, 0, 0);
+            improveBtn.setLayoutParams(ilp);
+            improveBtn.setOnClickListener(v -> {
+                if (diagDialog != null) {
+                    diagDialog.dismiss();
+                }
+                runImproveQuality(findingsJson, improveQualityJson,
+                        improveOvrlBefore);
+            });
+            bar.addView(improveBtn);
+        }
         root.addView(bar);
 
         diagDialog = new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
@@ -3041,6 +3139,7 @@ public class MainActivity extends Activity {
                     diagTuneUpBtn = null;
                     diagSummaryTv = null;
                     diagFindingsJson = null;
+                    currentDiagQualityJson = null;
                 })
                 .show();
         diagDialog.getButton(AlertDialog.BUTTON_NEGATIVE)
@@ -3283,8 +3382,13 @@ public class MainActivity extends Activity {
         }
     }
 
-    private static String summaryCacheKey(String findingsJson, String profile) {
-        return findingsJson.hashCode() + "|" + profile;
+    private static String summaryCacheKey(String findingsJson, String profile,
+            String qualityJson) {
+        // The quality values are part of the key: a changed or
+        // toggled quality estimate must never serve a summary that
+        // was generated without it (or with different values).
+        return findingsJson.hashCode() + "|" + profile + "|"
+                + (qualityJson == null ? "" : qualityJson.hashCode());
     }
 
     /** Async Groq summary; the callback runs on the UI thread with "" on
@@ -3294,8 +3398,8 @@ public class MainActivity extends Activity {
     }
 
     private void requestDiagSummary(final String findingsJson,
-            final String profile, final String apiKey,
-            final SummaryCallback cb) {
+            final String profile, final String qualityJson,
+            final String apiKey, final SummaryCallback cb) {
         new Thread(() -> {
             String summary = "";
             try {
@@ -3304,7 +3408,7 @@ public class MainActivity extends Activity {
                     // Release builds: the proxy calls Groq server-side; no
                     // API key or Authorization header leaves the device.
                     summary = postProxySummary(proxyUrl, findingsJson,
-                            profile);
+                            profile, qualityJson);
                 } else {
                     if (!Python.isStarted()) {
                         Python.start(new AndroidPlatform(this));
@@ -3335,22 +3439,27 @@ public class MainActivity extends Activity {
      * dialog finds it ready. Never delays the dialog: runs on its own
      * thread and fills the open dialog live if it is still on this
      * report and profile. */
-    private void warmDiagSummaryCache(final String findingsJson) {
+    private void warmDiagSummaryCache(final String findingsJson,
+            final String qualityJson) {
         final String apiKey = groqApiKey();
         if (apiKey.isEmpty() && summaryProxyUrl().isEmpty()) {
             return;
         }
         final String profile = currentTuneUpProfile();
-        final String cacheKey = summaryCacheKey(findingsJson, profile);
+        final String cacheKey =
+                summaryCacheKey(findingsJson, profile, qualityJson);
         if (diagSummaryCache.containsKey(cacheKey)) {
             return;
         }
-        requestDiagSummary(findingsJson, profile, apiKey, summary -> {
+        requestDiagSummary(findingsJson, profile, qualityJson, apiKey,
+                summary -> {
             if (summary == null || summary.isEmpty()) {
                 return;
             }
             diagSummaryCache.put(cacheKey, summary);
             if (diagSummaryTv != null && findingsJson.equals(diagFindingsJson)
+                    && (qualityJson == null ? currentDiagQualityJson == null
+                            : qualityJson.equals(currentDiagQualityJson))
                     && profile.equals(currentTuneUpProfile())) {
                 diagSummaryTv.setText(summary);
             }
@@ -3367,7 +3476,9 @@ public class MainActivity extends Activity {
             return;
         }
         final String profile = currentTuneUpProfile();
-        final String cacheKey = summaryCacheKey(diagFindingsJson, profile);
+        final String qualityJson = currentDiagQualityJson;
+        final String cacheKey =
+                summaryCacheKey(diagFindingsJson, profile, qualityJson);
         final String hit = diagSummaryCache.get(cacheKey);
         final TextView tv = diagSummaryTv;
         final String findingsJson = diagFindingsJson;
@@ -3376,7 +3487,8 @@ public class MainActivity extends Activity {
             return;
         }
         tv.setText("Summarizing your report…");
-        requestDiagSummary(findingsJson, profile, apiKey, summary -> {
+        requestDiagSummary(findingsJson, profile, qualityJson, apiKey,
+                summary -> {
             if (summary != null && !summary.isEmpty()) {
                 diagSummaryCache.put(cacheKey, summary);
             }
@@ -3437,7 +3549,7 @@ public class MainActivity extends Activity {
      * "summary" from {"summary"} or "". No Authorization header and no API
      * key: the proxy identifies the app by its App Check token. */
     private String postProxySummary(String proxyUrl, String findingsJson,
-            String profile) {
+            String profile, String qualityJson) {
         java.net.HttpURLConnection conn = null;
         try {
             java.net.URL url = new java.net.URL(proxyUrl);
@@ -3450,6 +3562,26 @@ public class MainActivity extends Activity {
             org.json.JSONObject payload = new org.json.JSONObject();
             payload.put("findings_json", findingsJson);
             payload.put("profile", profile);
+            // Quality estimate for the current diagnosis, when one
+            // exists: metadata only (the same three numbers the
+            // report shows), under full-word keys. Absent entirely
+            // when there is no quality object, so the payload is
+            // unchanged for quality-off diagnoses. A malformed
+            // quality object never costs the summary itself.
+            if (qualityJson != null) {
+                try {
+                    JSONObject q = new JSONObject(qualityJson);
+                    if (q.has("sig") && q.has("bak") && q.has("ovrl")) {
+                        org.json.JSONObject qualityPayload =
+                                new org.json.JSONObject();
+                        qualityPayload.put("signal", q.optDouble("sig"));
+                        qualityPayload.put("background", q.optDouble("bak"));
+                        qualityPayload.put("overall", q.optDouble("ovrl"));
+                        payload.put("quality", qualityPayload);
+                    }
+                } catch (Exception ignored) {
+                }
+            }
             payload.put("app_check_token", appCheckToken());
             byte[] body = payload.toString().getBytes(
                     java.nio.charset.StandardCharsets.UTF_8);
@@ -3775,6 +3907,80 @@ public class MainActivity extends Activity {
                         tuneWave.clearProgress();
                     }
                     setStatus("Tune-up failed: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    /** Improve quality (DSP-5 follow-up): build the driver-filtered
+     * composite via quality_improve_build and apply it through the
+     * SAME path Tune Up's single-pass fallback uses -- one tune_up
+     * op through applyLibraryOp, so it is a single history entry /
+     * single undo -- then re-diagnose the track. The report that
+     * follows renders the remembered Overall as a before -> after
+     * line, once. An empty selection (every penalized driver's fix
+     * absent for this profile) applies nothing. */
+    private void runImproveQuality(final String findingsJson,
+            final String qualityJson, final double ovrlBefore) {
+        final String entryId = currentEntryId;
+        final LibraryDb.Track track = getSelectedTrack();
+        if (entryId == null || track == null) {
+            setStatus("Open or record audio first.");
+            return;
+        }
+        if (!checkTrackUnlocked(track.id)) {
+            return;
+        }
+        if (!trackHasAudio(track)) {
+            setStatus("The selected track has no audio to improve.");
+            return;
+        }
+        final String trackId = track.id;
+        if (diagTrackId != null && !diagTrackId.equals(trackId)) {
+            setStatus("Track changed since diagnosis. Diagnose again first.");
+            return;
+        }
+        final String profile = currentTuneUpProfile();
+        setBusy(true);
+        setStatus("Improving quality...");
+        new Thread(() -> {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                final String improveJson = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("quality_improve_build", findingsJson,
+                                qualityJson, profile).toString();
+                final JSONObject params =
+                        new JSONObject(improveJson).getJSONObject("params");
+                final JSONArray fixes = params.optJSONArray("fixes");
+                if (fixes == null || fixes.length() == 0) {
+                    runOnUiThread(() -> {
+                        setBusy(false);
+                        setStatus("Improve quality: nothing to apply.");
+                    });
+                    return;
+                }
+                final String summary =
+                        params.optString("summary", "Improve quality");
+                runOnUiThread(() -> {
+                    // Remember the pre-improve Overall only once an
+                    // apply is actually happening; the post-improve
+                    // report consumes (and clears) it.
+                    qualityOvrlBeforeImprove = ovrlBefore;
+                    applyLibraryOp("tune_up", params.toString(), summary,
+                            "Improving quality...", "Quality improved.",
+                            () -> mainHandler.post(() -> {
+                                if (currentEntryId != null) {
+                                    diagnoseSelectedTrack(currentEntryId);
+                                }
+                            }));
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    setStatus("Improve quality failed: " + e.getMessage());
                 });
             }
         }).start();
