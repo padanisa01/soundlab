@@ -142,7 +142,7 @@ class TestDynamicEq(unittest.TestCase):
         amp = np.full(n, 0.03)
         b0, b1 = int(0.4 * SR), int(0.8 * SR)
         amp[b0:b1] = 0.7
-        ramp = int(0.010 * SR)
+        ramp = int(0.010 * SR) & ~1  # even, so the centered slice matches
         amp[b0 - ramp // 2: b0 + ramp // 2] = np.linspace(0.03, 0.7, ramp)
         amp[b1 - ramp // 2: b1 + ramp // 2] = np.linspace(0.7, 0.03, ramp)
         sig = amp * np.sin(2.0 * np.pi * 6500.0 * t) \
