@@ -1155,7 +1155,9 @@ public class MainActivity extends Activity {
     /** App settings: a tabbed dialog (tabs across the top, one page
      * per tab). The Soundcheck tab holds the cue combination: border
      * flash, burst beeps, headset routing, vibration. Each switch is
-     * stored live in prefs and defaults to on. */
+     * stored live in prefs and defaults to on. The DSP Lab tab holds
+     * the DSP-upgrade engine defaults (DSP-6): every row is stored
+     * live in prefs and defaults to the pre-upgrade behavior. */
     private void showSettingsDialog() {
         View view = getLayoutInflater()
                 .inflate(R.layout.dialog_settings, null);
@@ -1165,6 +1167,54 @@ public class MainActivity extends Activity {
         bindCueSwitch(view, R.id.sw_sc_beep, prefs, "sc_cue_beep");
         bindCueSwitch(view, R.id.sw_sc_headset, prefs, "sc_cue_headset");
         bindCueSwitch(view, R.id.sw_sc_vibrate, prefs, "sc_cue_vibrate");
+        // DSP Lab rows (all stored live, on change).
+        bindEngineSeg(view, R.id.seg_pitch_classic, R.id.seg_pitch_formant,
+                prefs, "dsp_pitch_engine", "wsola", "formant", true);
+        // Notation row (PRD amendment A2): Classic is selectable; the
+        // Neural segment is disabled (the neural engine is descoped
+        // in this build) and can never write the pref.
+        bindEngineSeg(view, R.id.seg_notation_classic,
+                R.id.seg_notation_neural,
+                prefs, "notation_engine", "classic", "neural", false);
+        bindEngineSeg(view, R.id.seg_quality_off, R.id.seg_quality_estimate,
+                prefs, "quality_engine", "off", "proxy", true);
+        bindEngineSeg(view, R.id.seg_master_classic,
+                R.id.seg_master_multiband,
+                prefs, "dsp_mastering_default", "classic", "multiband",
+                true);
+        // True-peak detection: a switch in the bindCueSwitch live
+        // style, but default OFF (PRD D3) -- bindCueSwitch defaults
+        // to on, so this row binds explicitly. Toggling applies to
+        // the capture objects immediately, exactly as the capture
+        // start sites do (see beginCapture / startLiveRecording).
+        Switch tp = view.findViewById(R.id.sw_truepeak);
+        tp.setChecked(prefs.getBoolean("mic_truepeak", false));
+        tp.setOnCheckedChangeListener((b, on) -> {
+            prefs.edit().putBoolean("mic_truepeak", on).apply();
+            recorder.setTruePeak(on);
+            liveMonitor.setTruePeak(on);
+        });
+        // Tab strip: Soundcheck | DSP Lab, painted like the
+        // Record|Soundcheck segmented control (paintSegment).
+        final TextView tabSc = view.findViewById(R.id.tab_soundcheck);
+        final TextView tabDsp = view.findViewById(R.id.tab_dsplab);
+        final View pageSc = view.findViewById(R.id.settings_tab_soundcheck);
+        final View pageDsp = view.findViewById(R.id.settings_tab_dsplab);
+        final Runnable showSc = () -> {
+            pageSc.setVisibility(View.VISIBLE);
+            pageDsp.setVisibility(View.GONE);
+            paintSegment(tabSc, true);
+            paintSegment(tabDsp, false);
+        };
+        final Runnable showDsp = () -> {
+            pageSc.setVisibility(View.GONE);
+            pageDsp.setVisibility(View.VISIBLE);
+            paintSegment(tabSc, false);
+            paintSegment(tabDsp, true);
+        };
+        tabSc.setOnClickListener(v -> showSc.run());
+        tabDsp.setOnClickListener(v -> showDsp.run());
+        showSc.run();
         new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
                 .setTitle("Settings")
                 .setView(view)
@@ -1178,6 +1228,72 @@ public class MainActivity extends Activity {
         sw.setChecked(prefs.getBoolean(key, true));
         sw.setOnCheckedChangeListener((b, on) ->
                 prefs.edit().putBoolean(key, on).apply());
+    }
+
+    /** Bind a two-segment engine row in the DSP Lab tab: segment A
+     * stores {@code valueA}, segment B stores {@code valueB}, both
+     * written to prefs live on tap (the bindCueSwitch pattern
+     * extended to segmented rows). Segments are painted with
+     * paintSegment, like the Record|Soundcheck control. When
+     * {@code secondEnabled} is false the B segment is disabled and
+     * dimmed, gets no click listener, and can never be painted
+     * selected -- the pref can only ever hold {@code valueA} from
+     * this row. */
+    private void bindEngineSeg(View root, int idA, int idB,
+            SharedPreferences prefs, String key,
+            String valueA, String valueB, boolean secondEnabled) {
+        final TextView segA = root.findViewById(idA);
+        final TextView segB = root.findViewById(idB);
+        final Runnable paint = () -> {
+            String cur = prefs.getString(key, valueA);
+            paintSegment(segA, valueA.equals(cur));
+            paintSegment(segB, secondEnabled && valueB.equals(cur));
+            if (!secondEnabled) {
+                segB.setEnabled(false);
+                segB.setAlpha(0.35f);
+            }
+        };
+        paint.run();
+        segA.setOnClickListener(v -> {
+            prefs.edit().putString(key, valueA).apply();
+            paint.run();
+        });
+        if (secondEnabled) {
+            segB.setOnClickListener(v -> {
+                prefs.edit().putString(key, valueB).apply();
+                paint.run();
+            });
+        }
+    }
+
+    /** The DSP Lab true-peak pref (default OFF, PRD D3). Read at the
+     * capture start sites alongside the mic_limiter choice. */
+    private boolean truePeakPref() {
+        return getSharedPreferences("soundlab", MODE_PRIVATE)
+                .getBoolean("mic_truepeak", false);
+    }
+
+    /** The DSP Lab quality-score pref (default "off"). Passed to
+     * diagnose_file as its quality_engine argument and folded into
+     * the diagnosis cache key, so switching engines never serves a
+     * stale report. */
+    private String qualityEnginePref() {
+        return getSharedPreferences("soundlab", MODE_PRIVATE)
+                .getString("quality_engine", "off");
+    }
+
+    /** One segment of a hand-rolled segmented control (the
+     * Record|Soundcheck strip's dimensions), painted by
+     * paintSegment. Used by dialogs that build their views in code
+     * (pitch, master). */
+    private TextView segmentTextView(String label) {
+        float dp = getResources().getDisplayMetrics().density;
+        TextView seg = new TextView(this);
+        seg.setText(label);
+        seg.setTextSize(13f);
+        seg.setPadding((int) (16 * dp), (int) (5 * dp),
+                (int) (16 * dp), (int) (5 * dp));
+        return seg;
     }
 
     /** Starts the one-time premium purchase flow. */
@@ -2128,7 +2244,8 @@ public class MainActivity extends Activity {
         final String diagPath = path;
         diagLastPath = diagPath;
         diagTrackId = null;
-        if (diagPath.equals(cachedDiagPath) && cachedDiagJson != null) {
+        if ((diagPath + "|" + qualityEnginePref()).equals(cachedDiagPath)
+                && cachedDiagJson != null) {
             showDiagnosisReport(cachedDiagJson);
             return;
         }
@@ -2154,7 +2271,8 @@ public class MainActivity extends Activity {
         final String trackId = track.id;
         final String diagPath =
                 libraryDb.trackRenderFile(trackId).getAbsolutePath();
-        if (diagPath.equals(cachedDiagPath) && cachedDiagJson != null
+        if ((diagPath + "|" + qualityEnginePref()).equals(cachedDiagPath)
+                && cachedDiagJson != null
                 && trackId.equals(diagTrackId)) {
             diagLastPath = diagPath;
             showDiagnosisReport(cachedDiagJson);
@@ -2200,20 +2318,27 @@ public class MainActivity extends Activity {
                 if (!Python.isStarted()) {
                     Python.start(new AndroidPlatform(this));
                 }
+                final String qualityEngine = qualityEnginePref();
                 final String findingsJson = Python.getInstance()
                         .getModule("audiofx.android_bridge")
-                        .callAttr("diagnose_file", diagPath).toString();
+                        .callAttr("diagnose_file", diagPath, qualityEngine)
+                        .toString();
                 cachedProfilesJson = Python.getInstance()
                         .getModule("audiofx.android_bridge")
                         .callAttr("list_tune_up_profiles").toString();
                 // Warm the LLM summary alongside the diagnosis cache.
-                warmDiagSummaryCache(findingsJson);
+                // The summary builder consumes the findings array, so
+                // hand it the array inside the object shape when the
+                // quality engine returned one.
+                warmDiagSummaryCache(diagFindingsArrayJson(findingsJson));
                 runOnUiThread(() -> {
                     setBusy(false);
                     if (diagWave != null) {
                         diagWave.finishProgressAnimation();
                     }
-                    cachedDiagPath = diagPath;
+                    // Cache key includes the quality engine (contracts):
+                    // switching engines never serves a stale report.
+                    cachedDiagPath = diagPath + "|" + qualityEngine;
                     cachedDiagJson = findingsJson;
                     showDiagnosisReport(findingsJson);
                 });
@@ -2403,6 +2528,52 @@ public class MainActivity extends Activity {
         cur.setTextSize(15f);
         root.addView(cur);
 
+        // Engine choice (DSP-1): Classic (WSOLA) | Formant, preselected
+        // from the DSP Lab pref; the chosen value is written into the
+        // op params at Convert time (renders stay reproducible after
+        // the pref changes).
+        TextView engineLbl = new TextView(this);
+        engineLbl.setText("Engine");
+        engineLbl.setTextColor(getColor(R.color.sl_mut));
+        engineLbl.setTextSize(12.5f);
+        LinearLayout.LayoutParams engineLblLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        engineLblLp.topMargin = (int) (12 * dp);
+        root.addView(engineLbl, engineLblLp);
+
+        LinearLayout engineRow = new LinearLayout(this);
+        engineRow.setOrientation(LinearLayout.HORIZONTAL);
+        engineRow.setBackgroundResource(R.drawable.bg_sel_chip_empty);
+        int segPad = (int) (3 * dp);
+        engineRow.setPadding(segPad, segPad, segPad, segPad);
+        LinearLayout.LayoutParams engineRowLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        engineRowLp.topMargin = (int) (6 * dp);
+        final TextView segClassic = segmentTextView("Classic");
+        final TextView segFormant = segmentTextView("Formant");
+        engineRow.addView(segClassic);
+        engineRow.addView(segFormant);
+        root.addView(engineRow, engineRowLp);
+        final String[] engineSel = {"formant".equals(
+                getSharedPreferences("soundlab", MODE_PRIVATE)
+                        .getString("dsp_pitch_engine", "wsola"))
+                ? "formant" : "wsola"};
+        final Runnable paintEngine = () -> {
+            paintSegment(segClassic, "wsola".equals(engineSel[0]));
+            paintSegment(segFormant, "formant".equals(engineSel[0]));
+        };
+        paintEngine.run();
+        segClassic.setOnClickListener(v -> {
+            engineSel[0] = "wsola";
+            paintEngine.run();
+        });
+        segFormant.setOnClickListener(v -> {
+            engineSel[0] = "formant";
+            paintEngine.run();
+        });
+
         TextView targetLbl = new TextView(this);
         targetLbl.setText("Shift to (target tonic):");
         targetLbl.setTextColor(getColor(R.color.sl_mut));
@@ -2531,7 +2702,8 @@ public class MainActivity extends Activity {
                     String params;
                     try {
                         params = new JSONObject()
-                                .put("semitones", rounded).toString();
+                                .put("semitones", rounded)
+                                .put("engine", engineSel[0]).toString();
                     } catch (Exception e) {
                         return;
                     }
@@ -2549,9 +2721,54 @@ public class MainActivity extends Activity {
                 });
     }
 
+    /** The findings-array JSON inside a diagnose_file result: the
+     * result itself when it is the array shape (quality engine off),
+     * or its "findings" member when it is the object shape (quality
+     * engine on). Returns the input unchanged when it parses as
+     * neither, so the array path stays byte-for-byte identical. */
+    private static String diagFindingsArrayJson(String diagJson) {
+        if (diagJson == null) {
+            return null;
+        }
+        if (diagJson.trim().startsWith("{")) {
+            try {
+                JSONArray arr = new JSONObject(diagJson.trim())
+                        .optJSONArray("findings");
+                if (arr != null) {
+                    return arr.toString();
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return diagJson;
+    }
+
+    /** The quality object inside a diagnose_file object-shape result,
+     * or null for the array shape, or when quality is null (silence
+     * scores null, never 1 or 5). */
+    private static JSONObject diagQualityJson(String diagJson) {
+        if (diagJson == null || !diagJson.trim().startsWith("{")) {
+            return null;
+        }
+        try {
+            JSONObject obj = new JSONObject(diagJson.trim());
+            return obj.isNull("quality") ? null
+                    : obj.optJSONObject("quality");
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     /** The mechanic's report card (Option A): score hero, grouped findings,
-     * profile picker, sticky Tune Up bar. */
-    private void showDiagnosisReport(final String findingsJson) {
+     * profile picker, sticky Tune Up bar. Accepts both diagnose_file
+     * shapes: the findings array (quality off) renders exactly as
+     * before; the object shape (quality on) additionally renders the
+     * quality line in the score hero from its "quality" member, and
+     * everything downstream (summary, Tune Up, Master) consumes the
+     * extracted findings array. */
+    private void showDiagnosisReport(final String diagJson) {
+        final String findingsJson = diagFindingsArrayJson(diagJson);
+        final JSONObject quality = diagQualityJson(diagJson);
         final float dp = getResources().getDisplayMetrics().density;
         JSONArray findings;
         try {
@@ -2665,6 +2882,23 @@ public class MainActivity extends Activity {
         subTv.setTextSize(12.5f);
         subTv.setPadding(0, (int) (3 * dp), 0, 0);
         cap.addView(subTv);
+        // Quality score (DSP-5, object shape only): one line in the
+        // score hero. Omitted entirely when quality is null (silence)
+        // or absent (array shape) -- the array path renders exactly
+        // as before.
+        if (quality != null && quality.has("sig") && quality.has("bak")
+                && quality.has("ovrl")) {
+            TextView qualityTv = new TextView(this);
+            qualityTv.setText(String.format(Locale.US,
+                    "Quality score (estimate): SIG %.1f · BAK %.1f"
+                            + " · OVRL %.1f",
+                    quality.optDouble("sig"), quality.optDouble("bak"),
+                    quality.optDouble("ovrl")));
+            qualityTv.setTextColor(getColor(R.color.sl_teal2));
+            qualityTv.setTextSize(12.5f);
+            qualityTv.setPadding(0, (int) (3 * dp), 0, 0);
+            cap.addView(qualityTv);
+        }
         hero.addView(cap);
         list.addView(hero);
 
@@ -2740,7 +2974,9 @@ public class MainActivity extends Activity {
             passedBody.addView(row);
         }
 
-        // Root: scrollable report with a sticky Tune Up bar.
+        // Root: scrollable report with a sticky action bar: Tune Up
+        // (when anything is fixable) beside Master (always offered;
+        // mastering is an action, not a fix).
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         android.widget.ScrollView scroll = new android.widget.ScrollView(this);
@@ -2748,18 +2984,20 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         scroll.addView(list);
         root.addView(scroll);
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setPadding(pad, (int) (8 * dp), pad, (int) (4 * dp));
         if (hasFixable) {
-            LinearLayout bar = new LinearLayout(this);
-            bar.setPadding(pad, (int) (8 * dp), pad, (int) (4 * dp));
             diagTuneUpBtn = new Button(this);
             diagTuneUpBtn.setBackgroundResource(R.drawable.bg_apply);
             diagTuneUpBtn.setTextColor(getColor(R.color.sl_txt));
             diagTuneUpBtn.setTextSize(15.5f);
             diagTuneUpBtn.setTypeface(null, android.graphics.Typeface.BOLD);
             diagTuneUpBtn.setPadding(0, (int) (13 * dp), 0, (int) (13 * dp));
-            diagTuneUpBtn.setLayoutParams(new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT));
+            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            tlp.setMargins(0, 0, (int) (6 * dp), 0);
+            diagTuneUpBtn.setLayoutParams(tlp);
             diagTuneUpBtn.setOnClickListener(v -> {
                 final String profile = currentTuneUpProfile();
                 if (!isProfileVisible(profile)) {
@@ -2771,10 +3009,26 @@ public class MainActivity extends Activity {
                 runTuneUp(findingsJson, profile);
             });
             bar.addView(diagTuneUpBtn);
-            root.addView(bar);
         } else {
             diagTuneUpBtn = null;
         }
+        Button masterBtn = new Button(this);
+        masterBtn.setText("Master");
+        masterBtn.setBackgroundResource(R.drawable.bg_ghost);
+        masterBtn.setTextColor(getColor(R.color.sl_teal2));
+        masterBtn.setTextSize(15.5f);
+        masterBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+        masterBtn.setPadding(0, (int) (13 * dp), 0, (int) (13 * dp));
+        masterBtn.setLayoutParams(new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        masterBtn.setOnClickListener(v -> {
+            if (diagDialog != null) {
+                diagDialog.dismiss();
+            }
+            showMasterDialog(findingsJson);
+        });
+        bar.addView(masterBtn);
+        root.addView(bar);
 
         diagDialog = new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
                 .setTitle("Diagnosis")
@@ -3521,6 +3775,259 @@ public class MainActivity extends Activity {
                         tuneWave.clearProgress();
                     }
                     setStatus("Tune-up failed: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    /** Master dialog (DSP-2): opened from the Diagnose report's
+     * Master button. Engine segmented control (Classic | Multiband,
+     * preselected from pref dsp_mastering_default) plus a preset
+     * spinner (gentle / punch / broadcast); the preset drives only
+     * the Multiband path. */
+    private void showMasterDialog(final String findingsJson) {
+        final float dp = getResources().getDisplayMetrics().density;
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (20 * dp);
+        root.setPadding(pad, pad, pad, 0);
+
+        TextView engineLbl = new TextView(this);
+        engineLbl.setText("Engine");
+        engineLbl.setTextColor(getColor(R.color.sl_mut));
+        engineLbl.setTextSize(12.5f);
+        root.addView(engineLbl);
+
+        LinearLayout engineRow = new LinearLayout(this);
+        engineRow.setOrientation(LinearLayout.HORIZONTAL);
+        engineRow.setBackgroundResource(R.drawable.bg_sel_chip_empty);
+        int segPad = (int) (3 * dp);
+        engineRow.setPadding(segPad, segPad, segPad, segPad);
+        LinearLayout.LayoutParams engineRowLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        engineRowLp.topMargin = (int) (6 * dp);
+        final TextView segClassic = segmentTextView("Classic");
+        final TextView segMultiband = segmentTextView("Multiband");
+        engineRow.addView(segClassic);
+        engineRow.addView(segMultiband);
+        root.addView(engineRow, engineRowLp);
+        final String[] engineSel = {"multiband".equals(
+                getSharedPreferences("soundlab", MODE_PRIVATE)
+                        .getString("dsp_mastering_default", "classic"))
+                ? "multiband" : "classic"};
+        final Runnable paintEngine = () -> {
+            paintSegment(segClassic, "classic".equals(engineSel[0]));
+            paintSegment(segMultiband, "multiband".equals(engineSel[0]));
+        };
+        paintEngine.run();
+        segClassic.setOnClickListener(v -> {
+            engineSel[0] = "classic";
+            paintEngine.run();
+        });
+        segMultiband.setOnClickListener(v -> {
+            engineSel[0] = "multiband";
+            paintEngine.run();
+        });
+
+        TextView presetLbl = new TextView(this);
+        presetLbl.setText("Preset (Multiband)");
+        presetLbl.setTextColor(getColor(R.color.sl_mut));
+        presetLbl.setTextSize(12.5f);
+        LinearLayout.LayoutParams presetLblLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        presetLblLp.topMargin = (int) (14 * dp);
+        root.addView(presetLbl, presetLblLp);
+
+        final Spinner presetSp = new Spinner(this);
+        final String[] presets = {"gentle", "punch", "broadcast"};
+        ArrayAdapter<String> presetAd = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, presets);
+        presetAd.setDropDownViewResource(
+                android.R.layout.simple_spinner_dropdown_item);
+        presetSp.setAdapter(presetAd);
+        presetSp.setMinimumHeight((int) (52 * dp));
+        root.addView(presetSp, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        final AlertDialog dialog = new AlertDialog.Builder(
+                this, R.style.Theme_SoundLab_Dialog)
+                .setTitle("Master")
+                .setView(root)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Apply", null)
+                .create();
+        dialog.show();
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    String preset =
+                            presets[presetSp.getSelectedItemPosition()];
+                    dialog.dismiss();
+                    if ("multiband".equals(engineSel[0])) {
+                        runMasterMultiband(preset);
+                    } else {
+                        runMasterClassic(findingsJson);
+                    }
+                });
+    }
+
+    /** Classic Master: apply the same eq_balance + loudness ops Tune
+     * Up applies for the current profile, with Tune Up's own params.
+     * The fixes are derived by the bridge's tune_up_build -- the exact
+     * reduction Tune Up runs (tune_up_fixes: detection-derived params
+     * merged with the profile's overrides, de-duplicated, in Tune Up
+     * order) -- filtered to the Classic mastering pair, then applied
+     * one op at a time through applyLibraryOp, eq_balance first (Tune
+     * Up order) with loudness chained from its onRendered. No params
+     * are invented here; when neither fix is in the Tune Up set, tone
+     * and loudness are already on target and nothing is applied. */
+    private void runMasterClassic(final String findingsJson) {
+        final String entryId = currentEntryId;
+        final LibraryDb.Track track = getSelectedTrack();
+        if (entryId == null || track == null) {
+            setStatus("Open or record audio first.");
+            return;
+        }
+        if (!checkTrackUnlocked(track.id)) {
+            return;
+        }
+        if (!trackHasAudio(track)) {
+            setStatus("The selected track has no audio to master.");
+            return;
+        }
+        final String trackId = track.id;
+        if (diagTrackId != null && !diagTrackId.equals(trackId)) {
+            setStatus("Track changed since diagnosis. Diagnose again first.");
+            return;
+        }
+        final String profile = currentTuneUpProfile();
+        setBusy(true);
+        setStatus("Mastering...");
+        new Thread(() -> {
+            JSONObject eqFix = null;
+            JSONObject loudFix = null;
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                String tuneUpJson = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("tune_up_build", findingsJson, profile)
+                        .toString();
+                JSONArray fixes = new JSONObject(tuneUpJson)
+                        .getJSONObject("params").getJSONArray("fixes");
+                for (int i = 0; i < fixes.length(); i++) {
+                    JSONObject fix = fixes.optJSONObject(i);
+                    if (fix == null) {
+                        continue;
+                    }
+                    if ("eq_balance".equals(fix.optString("op"))) {
+                        eqFix = fix;
+                    } else if ("loudness".equals(fix.optString("op"))) {
+                        loudFix = fix;
+                    }
+                }
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    setStatus("Master failed: " + e.getMessage());
+                });
+                return;
+            }
+            final JSONObject eq = eqFix;
+            final JSONObject loud = loudFix;
+            runOnUiThread(() -> {
+                setBusy(false);
+                if (eq == null && loud == null) {
+                    setStatus("Master (Classic): tone and loudness are "
+                            + "already on target -- nothing to apply.");
+                    return;
+                }
+                final JSONObject eqParams = eq != null
+                        ? eq.optJSONObject("params") : null;
+                final JSONObject loudParams = loud != null
+                        ? loud.optJSONObject("params") : null;
+                final String eqJson = eqParams != null
+                        ? eqParams.toString() : "{}";
+                final String loudJson = loudParams != null
+                        ? loudParams.toString() : "{}";
+                final String eqLabel = eq != null
+                        ? eq.optString("label", "Balance tone") : "";
+                final String loudLabel = loud != null
+                        ? loud.optString("label", "Normalize loudness") : "";
+                if (eq != null && loud != null) {
+                    applyLibraryOp("eq_balance", eqJson, eqLabel,
+                            "Mastering (Classic)...", "EQ applied.",
+                            () -> applyLibraryOp("loudness", loudJson,
+                                    loudLabel, "Mastering (Classic)...",
+                                    "Master applied (Classic).", null));
+                } else if (eq != null) {
+                    applyLibraryOp("eq_balance", eqJson, eqLabel,
+                            "Mastering (Classic)...",
+                            "Master applied (Classic).", null);
+                } else {
+                    applyLibraryOp("loudness", loudJson, loudLabel,
+                            "Mastering (Classic)...",
+                            "Master applied (Classic).", null);
+                }
+            });
+        }).start();
+    }
+
+    /** Multiband Master: expand the preset through the bridge
+     * (mastering_preset_params) and apply ONE mastering op whose
+     * params persist the full numeric lists, per the DSP-2 contract:
+     * {"preset": name, "bands": [...], "dyn_eq": [...]}. */
+    private void runMasterMultiband(final String preset) {
+        final String entryId = currentEntryId;
+        final LibraryDb.Track track = getSelectedTrack();
+        if (entryId == null || track == null) {
+            setStatus("Open or record audio first.");
+            return;
+        }
+        if (!checkTrackUnlocked(track.id)) {
+            return;
+        }
+        if (!trackHasAudio(track)) {
+            setStatus("The selected track has no audio to master.");
+            return;
+        }
+        final String trackId = track.id;
+        if (diagTrackId != null && !diagTrackId.equals(trackId)) {
+            setStatus("Track changed since diagnosis. Diagnose again first.");
+            return;
+        }
+        setBusy(true);
+        setStatus("Mastering...");
+        new Thread(() -> {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                String presetJson = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("mastering_preset_params", preset)
+                        .toString();
+                JSONObject expanded = new JSONObject(presetJson);
+                JSONObject params = new JSONObject();
+                params.put("preset", preset);
+                params.put("bands", expanded.getJSONArray("bands"));
+                params.put("dyn_eq", expanded.getJSONArray("dyn_eq"));
+                final String paramsJson = params.toString();
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    applyLibraryOp("mastering", paramsJson,
+                            "Master (Multiband, " + preset + ")",
+                            "Mastering (Multiband)...",
+                            "Master applied (Multiband, " + preset + ").",
+                            null);
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    setStatus("Master failed: " + e.getMessage());
                 });
             }
         }).start();
@@ -5087,6 +5594,7 @@ public class MainActivity extends Activity {
         }
         recorder.setPreprocessing(switchAgc.isChecked(), switchNs.isChecked(),
                 switchLimiter.isChecked());
+        recorder.setTruePeak(truePeakPref());
         File take = new File(getCacheDir(), "rec_take.wav");
         if (!recorder.start(take)) {
             pendingRecordTrackId = null;
@@ -5135,6 +5643,7 @@ public class MainActivity extends Activity {
         double warmth = seekWarmth.getProgress() / 100.0;
         double echo = seekEcho.getProgress() / 100.0;
         File take = new File(getCacheDir(), "rec_take.wav");
+        liveMonitor.setTruePeak(truePeakPref());
         if (!liveMonitor.start(take, warmth, reverbPreset, echo,
                 switchAgc.isChecked(), switchNs.isChecked(),
                 switchLimiter.isChecked())) {
