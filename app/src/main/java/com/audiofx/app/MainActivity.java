@@ -746,7 +746,8 @@ public class MainActivity extends Activity {
         if (BuildConfig.DEBUG) {
             // The debug secret's only SDK channel is logcat, which the
             // user's build terminal does not have: write it to a text
-            // file instead. Write IMMEDIATELY (the file's existence
+            // file and show it in a copyable dialog instead. Write
+            // IMMEDIATELY (the file's existence
             // proves this build is running; its content carries
             // diagnostics when the secret is not there yet), force the
             // secret's creation with a token request (it is persisted
@@ -3503,8 +3504,80 @@ public class MainActivity extends Activity {
                 text = diag.toString();
             }
             writeTokenTextFile(text);
+            if (found != null) {
+                showAppCheckDebugTokenDialog(found);
+            }
         } catch (Exception ignored) {
         }
+    }
+
+    private boolean appCheckTokenDialogShown = false;
+
+    /** Debug builds only: show the App Check debug secret in a
+     * dialog with a selectable text box and a Copy button, so the
+     * user can copy it straight into the Firebase Console without
+     * logcat or a file manager. Shown at most once per launch, the
+     * first time the secret is found (the writer runs repeatedly:
+     * at startup, on token completion, and on retries). */
+    private void showAppCheckDebugTokenDialog(final String token) {
+        mainHandler.post(() -> {
+            if (appCheckTokenDialogShown || isFinishing()
+                    || isDestroyed()) {
+                return;
+            }
+            appCheckTokenDialogShown = true;
+            try {
+                float dp = getResources().getDisplayMetrics().density;
+                LinearLayout root = new LinearLayout(this);
+                root.setOrientation(LinearLayout.VERTICAL);
+                root.setPadding((int) (20 * dp), (int) (8 * dp),
+                        (int) (20 * dp), 0);
+                TextView label = new TextView(this);
+                label.setText("Copy this into Firebase Console >"
+                        + " App Check > com.audiofx.app >"
+                        + " Manage debug tokens:");
+                label.setTextColor(getColor(R.color.sl_mut));
+                label.setTextSize(12.5f);
+                root.addView(label, new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT));
+                final EditText tokenEt = new EditText(this);
+                tokenEt.setText(token);
+                tokenEt.setTextSize(15f);
+                tokenEt.setTextIsSelectable(true);
+                tokenEt.setKeyListener(null);
+                tokenEt.setMinHeight((int) (52 * dp));
+                LinearLayout.LayoutParams etLp =
+                        new LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT);
+                etLp.topMargin = (int) (10 * dp);
+                root.addView(tokenEt, etLp);
+                tokenEt.selectAll();
+                new AlertDialog.Builder(this,
+                        R.style.Theme_SoundLab_Dialog)
+                        .setTitle("App Check debug token")
+                        .setView(root)
+                        .setNegativeButton("Close", null)
+                        .setPositiveButton("Copy", (d, w) -> {
+                            android.content.ClipboardManager cm =
+                                    (android.content.ClipboardManager)
+                                            getSystemService(
+                                                    CLIPBOARD_SERVICE);
+                            if (cm != null) {
+                                cm.setPrimaryClip(
+                                        android.content.ClipData
+                                                .newPlainText(
+                                                        "App Check debug token",
+                                                        token));
+                                Toast.makeText(this, "Token copied",
+                                        Toast.LENGTH_SHORT).show();
+                            }
+                        })
+                        .show();
+            } catch (Exception ignored) {
+            }
+        });
     }
 
     /** Write the debug-token text to BOTH the public Download folder
