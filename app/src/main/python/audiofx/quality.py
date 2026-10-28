@@ -4,9 +4,18 @@
 Diagnose already computes onto three sub-scores in [1, 5], in the
 P.835 shape::
 
-    {"ovrl": f, "sig": f, "bak": f, "engine": "proxy"}
+    {"ovrl": f, "sig": f, "bak": f, "engine": "proxy",
+     "drivers": {"clipping": f, "sibilance": f, "level_spread": f,
+                 "loudness": f, "noise": f, "hum": f}}
 
 or ``None`` for silence/empty input (never 1 or 5).
+
+``drivers`` carries the penalty POINTS each driver contributed, as
+computed BEFORE the [1, 5] clamp: the SIG drivers sum to
+``5 - sig`` whenever sig itself was not clamped, but when the raw
+penalties exceed what the clamp can express (e.g. every SIG driver
+maxed sums to 6.2 points against a floor of 1.0), the pre-clamp
+penalties are returned as-is and the sum exceeds ``5 - sig``.
 
 This is an *estimate* only: a deterministic mapping from measurements,
 not a learned model. The function does NOT re-measure the signal --
@@ -91,6 +100,10 @@ QUALITY_HUM_PENALTY_MAX = 0.8
 
 _SCORE_MIN = 1.0
 _SCORE_MAX = 5.0
+
+# Minimum driver penalty (points) for the Improve quality tool to
+# act on that driver (android_bridge.quality_improve_build).
+QUALITY_IMPROVE_MIN_PENALTY = 0.3
 
 
 def _clamp(v):
@@ -197,37 +210,48 @@ def score(samples, sample_rate, measurements):
         n_samples = 0
 
     # SIG: signal fidelity -- clipping, sibilance, level spread,
-    # loudness distance.
-    sig_penalty = (
-        _penalty(_clip_fraction(meas, n_samples),
-                 QUALITY_CLIP_FRACTION_CLEAN, QUALITY_CLIP_FRACTION_BAD,
-                 QUALITY_CLIP_PENALTY_MAX)
-        + _penalty(_get(meas, "sibilant_fraction", "sibilant_frac"),
-                   QUALITY_SIBILANT_FRACTION_CLEAN,
-                   QUALITY_SIBILANT_FRACTION_BAD,
-                   QUALITY_SIBILANT_PENALTY_MAX)
-        + _penalty(_get(meas, "level_spread_db", "level_range_db",
-                        "level_spread"),
-                   QUALITY_LEVEL_SPREAD_CLEAN_DB,
-                   QUALITY_LEVEL_SPREAD_BAD_DB,
-                   QUALITY_LEVEL_SPREAD_PENALTY_MAX)
-        + _penalty(_lufs_distance(meas),
-                   QUALITY_LUFS_DISTANCE_CLEAN_DB,
-                   QUALITY_LUFS_DISTANCE_BAD_DB,
-                   QUALITY_LUFS_PENALTY_MAX)
-    )
+    # loudness distance. Each penalty is kept separately for the
+    # "drivers" breakdown (pre-clamp points; see module docstring).
+    clipping_penalty = _penalty(
+        _clip_fraction(meas, n_samples),
+        QUALITY_CLIP_FRACTION_CLEAN, QUALITY_CLIP_FRACTION_BAD,
+        QUALITY_CLIP_PENALTY_MAX)
+    sibilance_penalty = _penalty(
+        _get(meas, "sibilant_fraction", "sibilant_frac"),
+        QUALITY_SIBILANT_FRACTION_CLEAN,
+        QUALITY_SIBILANT_FRACTION_BAD,
+        QUALITY_SIBILANT_PENALTY_MAX)
+    level_spread_penalty = _penalty(
+        _get(meas, "level_spread_db", "level_range_db", "level_spread"),
+        QUALITY_LEVEL_SPREAD_CLEAN_DB,
+        QUALITY_LEVEL_SPREAD_BAD_DB,
+        QUALITY_LEVEL_SPREAD_PENALTY_MAX)
+    loudness_penalty = _penalty(
+        _lufs_distance(meas),
+        QUALITY_LUFS_DISTANCE_CLEAN_DB,
+        QUALITY_LUFS_DISTANCE_BAD_DB,
+        QUALITY_LUFS_PENALTY_MAX)
+    sig_penalty = (clipping_penalty + sibilance_penalty
+                   + level_spread_penalty + loudness_penalty)
     sig = _clamp(_SCORE_MAX - sig_penalty)
 
     # BAK: background -- noise floor and hum.
-    bak_penalty = (
-        _penalty(_get(meas, "noise_floor_db", "noise_floor"),
-                 QUALITY_NOISE_FLOOR_CLEAN_DB, QUALITY_NOISE_FLOOR_BAD_DB,
-                 QUALITY_NOISE_PENALTY_MAX)
-        + _penalty(_get(meas, "hum_ratio"),
-                   QUALITY_HUM_RATIO_CLEAN, QUALITY_HUM_RATIO_BAD,
-                   QUALITY_HUM_PENALTY_MAX)
-    )
+    noise_penalty = _penalty(
+        _get(meas, "noise_floor_db", "noise_floor"),
+        QUALITY_NOISE_FLOOR_CLEAN_DB, QUALITY_NOISE_FLOOR_BAD_DB,
+        QUALITY_NOISE_PENALTY_MAX)
+    hum_penalty = _penalty(
+        _get(meas, "hum_ratio"),
+        QUALITY_HUM_RATIO_CLEAN, QUALITY_HUM_RATIO_BAD,
+        QUALITY_HUM_PENALTY_MAX)
+    bak_penalty = noise_penalty + hum_penalty
     bak = _clamp(_SCORE_MAX - bak_penalty)
 
     ovrl = _clamp(QUALITY_W_SIG * sig + QUALITY_W_BAK * bak)
-    return {"ovrl": ovrl, "sig": sig, "bak": bak, "engine": "proxy"}
+    return {"ovrl": ovrl, "sig": sig, "bak": bak, "engine": "proxy",
+            "drivers": {"clipping": clipping_penalty,
+                        "sibilance": sibilance_penalty,
+                        "level_spread": level_spread_penalty,
+                        "loudness": loudness_penalty,
+                        "noise": noise_penalty,
+                        "hum": hum_penalty}}

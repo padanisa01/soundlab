@@ -19,7 +19,7 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(__file__), "..", "app", "src", "main", "python")
 )
 
-from audiofx import diagnose, quality
+from audiofx import android_bridge, diagnose, quality
 
 
 SR = 48000
@@ -180,6 +180,178 @@ class DiagnoseQualityPlumbingTest(unittest.TestCase):
         self.assertIn("level_spread_db", meas)
         self.assertEqual(meas["total_samples"], SR)
         self.assertFalse(meas["ceiling_clip"]["is_clipped"])
+
+
+class QualityDriversTest(unittest.TestCase):
+    """score() also reports the per-driver penalty POINTS under
+    "drivers" (pre-clamp); the ovrl/sig/bak numbers are unchanged."""
+
+    def test_clean_drivers_all_zero(self):
+        result = quality.score(sine(440, 0.25), SR, clean_measurements())
+        self.assertEqual(result["drivers"], {
+            "clipping": 0.0, "sibilance": 0.0, "level_spread": 0.0,
+            "loudness": 0.0, "noise": 0.0, "hum": 0.0})
+        self.assertEqual(result["sig"], 5.0)
+        self.assertEqual(result["bak"], 5.0)
+        self.assertEqual(result["ovrl"], 5.0)
+
+    def test_clipped_drivers_clipping_dominant(self):
+        meas = clean_measurements()
+        meas["clip_fraction"] = 0.01  # exactly the bad anchor
+        result = quality.score(sine(440, 0.25), SR, meas)
+        d = result["drivers"]
+        self.assertAlmostEqual(d["clipping"],
+                               quality.QUALITY_CLIP_PENALTY_MAX)
+        for key in ("sibilance", "level_spread", "loudness",
+                    "noise", "hum"):
+            self.assertEqual(d[key], 0.0)
+        # SIG drivers sum to 5 - sig (no clamping in play here).
+        self.assertAlmostEqual(
+            d["clipping"] + d["sibilance"] + d["level_spread"]
+            + d["loudness"], 5.0 - result["sig"])
+        self.assertAlmostEqual(result["sig"], 1.5)
+
+    def test_noisy_drivers_noise_dominant_for_bak(self):
+        meas = clean_measurements()
+        meas["noise_floor_db"] = -40.0
+        result = quality.score(sine(440, 0.25), SR, meas)
+        d = result["drivers"]
+        # -40 dBFS is 30/40 of the way from the -70 clean anchor to
+        # the -30 bad anchor: 3.2 * 0.75 = 2.4 points.
+        self.assertAlmostEqual(d["noise"], 2.4)
+        self.assertEqual(d["hum"], 0.0)
+        self.assertGreater(d["noise"], d["hum"])
+        self.assertAlmostEqual(d["noise"] + d["hum"],
+                               5.0 - result["bak"])
+        self.assertAlmostEqual(result["bak"], 2.6)
+        self.assertAlmostEqual(result["ovrl"], 0.6 * 5.0 + 0.4 * 2.6)
+
+    def test_drivers_are_pre_clamp_penalties(self):
+        # Every SIG driver maxed: penalties sum to 6.2 points, past
+        # what the [1, 5] clamp can express; drivers still report
+        # the full pre-clamp penalties while sig clamps to 1.0.
+        meas = clean_measurements()
+        meas["clip_fraction"] = 1.0
+        meas["sibilant_fraction"] = 1.0
+        meas["level_spread_db"] = 100.0
+        meas["lufs_distance_db"] = 44.0
+        result = quality.score(sine(440, 0.25), SR, meas)
+        d = result["drivers"]
+        self.assertAlmostEqual(
+            d["clipping"] + d["sibilance"] + d["level_spread"]
+            + d["loudness"], 3.5 + 1.2 + 1.0 + 0.5)
+        self.assertEqual(result["sig"], 1.0)
+
+    def test_improve_min_penalty_constant(self):
+        self.assertEqual(quality.QUALITY_IMPROVE_MIN_PENALTY, 0.3)
+
+
+def _warn_fix(op, params=None):
+    return {"id": op, "severity": "warn", "title": op,
+            "fix": {"op": op, "params": params or {}, "label": op}}
+
+
+def _quality_json(drivers):
+    return json.dumps({"ovrl": 3.0, "sig": 3.0, "bak": 3.0,
+                       "engine": "proxy", "drivers": drivers})
+
+
+def _zero_drivers(**overrides):
+    d = {"clipping": 0.0, "sibilance": 0.0, "level_spread": 0.0,
+         "loudness": 0.0, "noise": 0.0, "hum": 0.0}
+    d.update(overrides)
+    return d
+
+
+class QualityImproveBuildTest(unittest.TestCase):
+    """quality_improve_build: tune_up_build's composite shape, but
+    only the fixes whose quality driver penalty is at/above
+    QUALITY_IMPROVE_MIN_PENALTY, in tune_up_fixes' canonical order."""
+
+    def test_filters_to_penalized_drivers(self):
+        findings = json.dumps([_warn_fix(op) for op in (
+            "declip", "deess", "level", "loudness", "denoise",
+            "hum_notch")])
+        q = _quality_json(_zero_drivers(clipping=1.0, hum=0.5,
+                                        noise=0.1))
+        out = json.loads(android_bridge.quality_improve_build(
+            findings, q, "podcast"))
+        self.assertEqual(out["op"], "tune_up")
+        ops = [f["op"] for f in out["params"]["fixes"]]
+        # noise (0.1) is below the 0.3 threshold: denoise excluded.
+        self.assertEqual(ops, ["declip", "hum_notch"])
+        self.assertEqual(out["params"]["profile"], "podcast")
+
+    def test_canonical_order_preserved(self):
+        # Findings deliberately scrambled; the composite must come
+        # out in tune_up_fixes' canonical order regardless.
+        findings = json.dumps([_warn_fix(op) for op in (
+            "denoise", "loudness", "level", "deess", "hum_notch",
+            "declip")])
+        q = _quality_json(_zero_drivers(
+            clipping=1.0, sibilance=1.0, level_spread=1.0,
+            loudness=0.5, noise=1.0, hum=0.5))
+        out = json.loads(android_bridge.quality_improve_build(
+            findings, q, "podcast"))
+        ops = [f["op"] for f in out["params"]["fixes"]]
+        self.assertEqual(ops, ["declip", "hum_notch", "deess",
+                               "level", "loudness", "denoise"])
+
+    def test_threshold_boundary(self):
+        findings = json.dumps([_warn_fix("declip"),
+                               _warn_fix("deess")])
+        q = _quality_json(_zero_drivers(clipping=0.3, sibilance=0.29))
+        out = json.loads(android_bridge.quality_improve_build(
+            findings, q, "podcast"))
+        ops = [f["op"] for f in out["params"]["fixes"]]
+        self.assertEqual(ops, ["declip"])
+
+    def test_empty_selection_mirrors_tune_up_build_shape(self):
+        findings = json.dumps([_warn_fix("declip")])
+        q = _quality_json(_zero_drivers())
+        out = json.loads(android_bridge.quality_improve_build(
+            findings, q, "podcast"))
+        empty = json.loads(android_bridge.tune_up_build("[]", "podcast"))
+        self.assertEqual(out["op"], empty["op"])
+        self.assertEqual(set(out["params"]), set(empty["params"]))
+        self.assertEqual(out["params"]["fixes"], [])
+        self.assertEqual(out["params"]["profile"], "podcast")
+        self.assertIn("nothing to fix", out["params"]["summary"])
+
+    def test_driver_without_matching_finding_contributes_nothing(self):
+        # Clipping is heavily penalized but the findings carry no
+        # declip fix (and the one fix present, denoise, has a clean
+        # driver): the selection is empty.
+        findings = json.dumps([_warn_fix("denoise")])
+        q = _quality_json(_zero_drivers(clipping=2.0))
+        out = json.loads(android_bridge.quality_improve_build(
+            findings, q, "podcast"))
+        self.assertEqual(out["params"]["fixes"], [])
+
+    def test_fix_outside_profile_contributes_nothing(self):
+        # The singing recipe has no "level" fix: a penalized
+        # level_spread driver selects nothing under that profile.
+        findings = json.dumps([_warn_fix("level")])
+        q = _quality_json(_zero_drivers(level_spread=1.0))
+        out = json.loads(android_bridge.quality_improve_build(
+            findings, q, "singing"))
+        self.assertEqual(out["params"]["fixes"], [])
+
+    def test_missing_drivers_is_empty(self):
+        findings = json.dumps([_warn_fix("declip")])
+        q = json.dumps({"ovrl": 3.0, "sig": 3.0, "bak": 3.0,
+                        "engine": "proxy"})
+        out = json.loads(android_bridge.quality_improve_build(
+            findings, q, "podcast"))
+        self.assertEqual(out["params"]["fixes"], [])
+
+    def test_bad_json_raises(self):
+        with self.assertRaises(ValueError):
+            android_bridge.quality_improve_build(
+                "not json", _quality_json(_zero_drivers()), "podcast")
+        with self.assertRaises(ValueError):
+            android_bridge.quality_improve_build(
+                "[]", "not json", "podcast")
 
 
 if __name__ == "__main__":
