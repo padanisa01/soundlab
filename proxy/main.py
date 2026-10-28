@@ -220,7 +220,11 @@ def summarize():
         if not _check_and_consume_quota(installation_id):
             return jsonify({"error": "daily quota exceeded"}), 429
     except Exception as e:
-        logger.error("quota check failed: %s", type(e).__name__)
+        # Message included: Firestore errors name the project,
+        # database and missing permission -- exactly what a quota
+        # failure diagnosis needs. No user data or secrets in them.
+        logger.error("quota check failed: %s: %s",
+                     type(e).__name__, str(e)[:300])
         return jsonify({"error": "upstream failed"}), 502
 
     groq_body = _build_request_body(findings_json, profile, quality)
@@ -240,8 +244,10 @@ def summarize():
             timeout=60,
         )
     except requests.RequestException as e:
-        # Log the exception type only: the key must never reach the logs.
-        logger.error("groq request failed: %s", type(e).__name__)
+        # Type + message: requests exceptions never contain the
+        # Authorization header, so the key cannot reach the logs.
+        logger.error("groq request failed: %s: %s",
+                     type(e).__name__, str(e)[:300])
         return jsonify({"error": "upstream failed"}), 502
 
     # Log HTTP status only, never bodies or the key.
