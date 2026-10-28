@@ -89,18 +89,21 @@ final class MicCapture {
         void onBlockPeak(float peak);
     }
 
-    /** Max |sample| of a little-endian PCM-16 block, mixed to mono. */
+    /**
+     * Peak of a little-endian PCM-16 block: the maximum |sample| over
+     * EVERY channel independently. (The old version averaged the
+     * channels frame-by-frame first, so one loud or clipped channel
+     * was diluted -- or partly cancelled by an out-of-phase partner --
+     * and the soundcheck clip watch could miss clipping that was
+     * plainly audible on that channel.)
+     */
     static float blockPeak(byte[] buf, int n, int channels) {
-        int frames = n / (2 * channels);
+        int samples = n / 2;
         float peak = 0f;
-        for (int f = 0; f < frames; f++) {
-            float sum = 0f;
-            for (int c = 0; c < channels; c++) {
-                int i = (f * channels + c) * 2;
-                int s = (buf[i] & 0xff) | (buf[i + 1] << 8);
-                sum += s / 32768f;
-            }
-            float m = Math.abs(sum / channels);
+        for (int k = 0; k < samples; k++) {
+            int i = k * 2;
+            int s = (buf[i] & 0xff) | (buf[i + 1] << 8);
+            float m = Math.abs(s / 32768f);
             if (m > peak) {
                 peak = m;
             }

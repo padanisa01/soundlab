@@ -27,6 +27,7 @@ public class AudioRecorder {
     private String activeLabel = "";
     private boolean wantAgc;
     private boolean wantNs;
+    private boolean wantLimiter;
     private volatile MicCapture.BlockListener blockListener;
     private final CaptureFx fx = new CaptureFx();
 
@@ -68,10 +69,12 @@ public class AudioRecorder {
         blockListener = listener;
     }
 
-    /** Set before start(): whether to enable AGC / noise suppression. */
-    public synchronized void setPreprocessing(boolean agcOn, boolean nsOn) {
+    /** Set before start(): whether to enable AGC / noise suppression / limiter. */
+    public synchronized void setPreprocessing(boolean agcOn, boolean nsOn,
+                                             boolean limiterOn) {
         wantAgc = agcOn;
         wantNs = nsOn;
+        wantLimiter = limiterOn;
     }
 
     /** True when the AGC effect actually attached to the capture session. */
@@ -140,12 +143,17 @@ public class AudioRecorder {
     private void spawnWorker() {
         final AudioRecord rec = cap.rec;
         final int channels = cap.channels;
+        final LiveLimiter limiter =
+                wantLimiter ? new LiveLimiter(cap.sampleRate, channels) : null;
         worker = new Thread(() -> {
             byte[] buf = new byte[8192];
             try (FileOutputStream fos = new FileOutputStream(outFile, true)) {
                 while (running && !paused) {
                     int n = rec.read(buf, 0, buf.length);
                     if (n > 0) {
+                        if (limiter != null) {
+                            limiter.processPcm16(buf, n);
+                        }
                         fos.write(buf, 0, n);
                         dataBytes += n;
                         MicCapture.BlockListener bl = blockListener;

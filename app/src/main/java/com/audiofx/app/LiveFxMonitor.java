@@ -34,6 +34,9 @@ public class LiveFxMonitor {
     private static final int BLOCK_SAMPLES = 2048;
 
     private MicCapture.Handle cap;
+    /** Limiter choice from start(); spawnWorker() reads it (it is
+     * also called from resume(), where no parameter is in scope). */
+    private boolean wantLimiter;
     private AudioTrack track;
     private AcousticEchoCanceler aec;
     private final CaptureFx fx = new CaptureFx();
@@ -100,7 +103,8 @@ public class LiveFxMonitor {
      * must have started Chaquopy Python first.
      */
     public synchronized boolean start(File outFile, double warmth, String reverbPreset,
-                                      double echo, boolean wantAgc, boolean wantNs) {
+                                      double echo, boolean wantAgc, boolean wantNs,
+                                      boolean wantLimiter) {
         if (running) {
             return true;
         }
@@ -207,6 +211,7 @@ public class LiveFxMonitor {
             return false;
         }
         cap = h;
+        this.wantLimiter = wantLimiter;
         track = newTrack;
         aec = newAec;
         chain = newChain;
@@ -235,6 +240,10 @@ public class LiveFxMonitor {
         final int channels = cap.channels;
         final int outCh = channels == 2 ? 2 : 1;
         final int blockBytes = BLOCK_SAMPLES * channels * 2;
+        // Safety limiter on the mic input, before the FX chain, so hot
+        // signals cannot clip the wet take.
+        final LiveLimiter limiter =
+                wantLimiter ? new LiveLimiter(cap.sampleRate, channels) : null;
         worker = new Thread(() -> {
             byte[] inBuf = new byte[blockBytes];
             int filled = 0;
@@ -253,6 +262,9 @@ public class LiveFxMonitor {
                         continue;
                     }
                     filled = 0;
+                    if (limiter != null) {
+                        limiter.processPcm16(inBuf, blockBytes);
+                    }
                     final byte[] wet;
                     try {
                         wet = c.callAttr("process_pcm_block", inBuf)

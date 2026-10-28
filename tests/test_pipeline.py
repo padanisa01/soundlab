@@ -190,9 +190,13 @@ class TestAndroidBridge(unittest.TestCase):
                     os.path.join(d, "nope.wav"), os.path.join(d, "o.wav")
                 )
 
-    def test_normalize_ignores_pops(self):
-        # A few loud pops (< 1% of samples) must not mislead the gain
-        # computation, and must be limited rather than boosted.
+    def test_normalize_pops_cap_the_gain(self):
+        # Safe-normalize semantics (changed 2026-10-27): the gain is
+        # capped by the absolute peak, so loud pops set the gain and
+        # the body is NOT boosted past them. The old behavior gained
+        # to the percentile and hard-clipped everything above it --
+        # on dynamic material that flattened ~1% of samples at the
+        # target (the soundcheck_1 regression).
         with tempfile.TemporaryDirectory() as d:
             src = os.path.join(d, "in.wav")
             body = sine(440, 0.3, self.SR, amplitude=0.07)
@@ -203,33 +207,44 @@ class TestAndroidBridge(unittest.TestCase):
             dst = os.path.join(d, "out.wav")
             res = android_bridge.normalize_file(src, dst)
             self.assertEqual(res["percentile"], 99.0)
-            # Reference is the body level, not the 0.9 pops.
-            self.assertAlmostEqual(res["ref_percentile_db"],
-                                   20 * math.log10(0.07), places=0)
-            self.assertGreater(res["applied_gain_db"], 20)
-            out, _ = read_wav_mono(dst)
+            self.assertTrue(res["gain_capped_by_peak"])
+            # Gain is set by the 0.9 peak, not the percentile body.
             target = 10.0 ** (-1.0 / 20.0)
-            # Nothing exceeds the target: pops are limited, not boosted.
+            self.assertAlmostEqual(
+                res["applied_gain_db"],
+                20 * math.log10(target / 0.9), places=1)
+            out, _ = read_wav_mono(dst)
+            # Nothing exceeds the target, and the peak lands on it.
             self.assertLessEqual(max(abs(s) for s in out), target + 2 / 32768)
-            # The body itself reaches the target.
             self.assertAlmostEqual(20 * math.log10(max(abs(s) for s in out)),
                                    -1.0, places=2)
+            # No flat tops were created: the pops stay isolated
+            # single samples at the ceiling.
+            from audiofx import diagnose
+            stats = diagnose.ceiling_clip_stats(out)
+            self.assertFalse(stats["is_clipped"])
+            self.assertEqual(stats["flat_samples"], 0)
 
     def test_normalize_percentile_param(self):
-        # percentile is a code-level parameter; p50 uses the median.
+        # percentile is a code-level parameter; p50 measures the
+        # median as the reported reference, but the applied gain is
+        # still capped by the absolute peak (safe normalize).
         with tempfile.TemporaryDirectory() as d:
             src = os.path.join(d, "in.wav")
             write_wav(src, sine(440, 0.3, self.SR, amplitude=0.07), self.SR)
             dst = os.path.join(d, "out.wav")
             res = android_bridge.normalize_file(src, dst, percentile=50.0)
             self.assertEqual(res["percentile"], 50.0)
-            # Median of |sine| ~ 0.707 * amplitude -> higher gain than p99.
+            # The reported reference is the median of |sine|.
             median_ref = 0.707 * 0.07
             self.assertAlmostEqual(
+                res["ref_percentile_db"],
+                20 * math.log10(median_ref), places=0)
+            # The applied gain is the peak gain, not the median gain.
+            self.assertAlmostEqual(
                 res["applied_gain_db"],
-                20 * math.log10(10.0 ** (-1.0 / 20.0) / median_ref), places=0)
+                20 * math.log10(10.0 ** (-1.0 / 20.0) / 0.07), places=0)
             out, _ = read_wav_mono(dst)
-            # Limiter holds the sine crests at the target.
             self.assertLessEqual(max(abs(s) for s in out),
                                  10.0 ** (-1.0 / 20.0) + 2 / 32768)
 
@@ -243,6 +258,52 @@ class TestAndroidBridge(unittest.TestCase):
             self.assertAlmostEqual(
                 res["applied_gain_db"],
                 20 * math.log10(10.0 ** (-1.0 / 20.0) / 0.07), places=1)
+
+    def test_normalize_never_creates_flat_tops(self):
+        # Regression (soundcheck_1, 2026-10-27): a dynamic signal
+        # whose top ~2% sits far above its p99 reference was gained
+        # to p99 and hard-held, flattening those samples at exactly
+        # -1 dBFS (11,009 samples / 448 runs in the QA file). Safe
+        # normalize must add zero flat-top samples.
+        from audiofx import diagnose
+        # 97% quiet body + one sustained loud passage (3%) ramping
+        # 0.4 -> 0.9: the p99 reference lands mid-passage (~0.73),
+        # so percentile gain would flatten the passage's top ~200
+        # consecutive samples at the target.
+        sig = [0.1 * math.sin(2.0 * math.pi * 440 * i / self.SR)
+               for i in range(19400)]
+        sig += [0.4 + 0.5 * j / 599.0 for j in range(600)]
+        self.assertFalse(diagnose.ceiling_clip_stats(sig)["is_clipped"])
+        out, info = android_bridge._apply_normalize(sig, self.SR)
+        self.assertTrue(info["gain_capped_by_peak"])
+        stats = diagnose.ceiling_clip_stats(list(out))
+        self.assertFalse(stats["is_clipped"])
+        self.assertEqual(stats["flat_samples"], 0)
+        self.assertAlmostEqual(max(abs(s) for s in out),
+                               10.0 ** (-1.0 / 20.0), places=6)
+
+    def test_scan_clipping_file_detects_below_full_scale_ceiling(self):
+        # A signal hard-held at -1 dBFS (peak 0.8912, never reaching
+        # the 0.999 full-scale test) must scan as clipped, with the
+        # exact at-ceiling population reported.
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.wav")
+            ceiling = 10.0 ** (-1.0 / 20.0)
+            loud = sine(110, 0.3, self.SR, amplitude=1.2)
+            clipped = [max(-ceiling, min(ceiling, v)) for v in loud]
+            write_wav(src, clipped, self.SR)
+            stats = json.loads(android_bridge.scan_clipping_file(src))
+            self.assertTrue(stats["is_clipped"])
+            self.assertAlmostEqual(stats["peak_db"], -1.0, places=1)
+            self.assertGreater(stats["flat_samples"], 100)
+            self.assertGreater(stats["flat_runs"], 10)
+            self.assertGreater(stats["longest_run"], 5)
+            # A clean sine at the same peak scans clean.
+            clean = os.path.join(d, "clean.wav")
+            write_wav(clean, sine(110, 0.3, self.SR, amplitude=ceiling),
+                      self.SR)
+            stats = json.loads(android_bridge.scan_clipping_file(clean))
+            self.assertFalse(stats["is_clipped"])
 
     def test_normalize_bad_percentile_raises(self):
         with tempfile.TemporaryDirectory() as d:

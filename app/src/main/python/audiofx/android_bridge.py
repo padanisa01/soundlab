@@ -263,16 +263,23 @@ def process_file(input_path, output_path, warmth=0.5, reverb_preset="studio", ec
 def _apply_normalize(samples, sample_rate, target_db=-1.0, percentile=99.0):
     """Float core of normalize_file: peak-normalize a sample list.
 
-    The reference level is the given percentile of |samples| (default the
-    99th), not the absolute max, so a few pops or bursts cannot mislead the
-    gain computation. Gain is a single whole-file constant (dynamics
-    preserved); samples that would exceed the target after gain are
-    hard-held at target_db dBFS, so loud transients are limited, never
-    boosted into clipping.
+    The percentile of |samples| (default the 99th) is measured and
+    reported, but the applied gain is CAPPED by the absolute peak:
+    ``gain = min(target / ref_percentile, target / peak)``. A single
+    whole-file constant gain can never push the loudest sample past
+    the target, so Normalize introduces ZERO new clipped samples --
+    no sample is ever hard-held at the target. (The previous version
+    gained to the percentile and clipped everything above it: on a
+    dynamic recording that flattened ~1% of all samples at exactly
+    -1 dBFS, which is audible hard clipping the app created itself --
+    the soundcheck_1 regression case.) Deliberate peak limiting, when
+    wanted, is a separate smooth/lookahead limiter, not a clip hidden
+    inside Normalize.
 
     Returns (out_samples, info) where info carries peak_before_db /
-    ref_percentile_db / applied_gain_db / percentile. Raises ValueError on
-    an out-of-range percentile or a silent input.
+    ref_percentile_db / applied_gain_db / percentile /
+    gain_capped_by_peak. Raises ValueError on an out-of-range
+    percentile or a silent input.
     """
     if not 0.0 < percentile <= 100.0:
         raise ValueError("percentile must be in (0, 100]: %r" % (percentile,))
@@ -290,8 +297,8 @@ def _apply_normalize(samples, sample_rate, target_db=-1.0, percentile=99.0):
         if ref <= 0:
             raise ValueError(
                 "input is silent below the percentile: nothing to normalize")
-        gain = target_peak / ref
-        out = _np.clip(x * gain, -target_peak, target_peak)
+        gain = min(target_peak / ref, target_peak / peak)
+        out = x * gain
     else:
         peak = max(abs(s) for s in samples)
         if peak <= 0:
@@ -302,35 +309,33 @@ def _apply_normalize(samples, sample_rate, target_db=-1.0, percentile=99.0):
         if ref <= 0:
             raise ValueError(
                 "input is silent below the percentile: nothing to normalize")
-        gain = target_peak / ref
-        out = [min(max(s * gain, -target_peak), target_peak) for s in samples]
+        gain = min(target_peak / ref, target_peak / peak)
+        out = [s * gain for s in samples]
     info = {
         "peak_before_db": round(20 * math.log10(peak), 2),
         "ref_percentile_db": round(20 * math.log10(ref), 2),
         "applied_gain_db": round(20 * math.log10(gain), 2),
         "percentile": percentile,
+        "gain_capped_by_peak": bool(gain < target_peak / ref),
     }
     return out, info
 
 
 def normalize_file(input_path, output_path, target_db=-1.0, percentile=99.0):
-    """Peak-normalize a WAV file so its ``percentile``-th percentile peak
-    reaches target_db dBFS.
+    """Peak-normalize a WAV file so its absolute peak reaches
+    target_db dBFS, introducing no new clipping.
 
-    The reference level is the given percentile of |samples| (default
-    the 99th), not the absolute max, so a few pops or bursts cannot
-    mislead the gain computation. Gain is a single whole-file constant
-    (dynamics preserved); samples that would exceed the target after
-    gain are hard-held at target_db dBFS, so loud transients are
-    limited, never boosted into clipping. (A literal "no gain above
-    the percentile" would put an amplitude discontinuity at the
-    percentile level and glitch any normal signal crossing it.)
+    The ``percentile`` of |samples| (default the 99th) is measured and
+    reported as the reference level, but the applied gain is capped
+    by the absolute peak (see _apply_normalize): the gain is a single
+    whole-file constant (dynamics preserved) and no sample is ever
+    hard-held at the target.
 
     Target defaults to -1 dBFS, leaving headroom for MP3 encoding.
     Returns a dict with ok/output_path/sample_rate/duration_s/
     peak_before_db/ref_percentile_db/peak_after_db/applied_gain_db/
-    percentile. Raises ValueError on a missing input, a silent input,
-    or an out-of-range percentile.
+    percentile/gain_capped_by_peak. Raises ValueError on a missing
+    input, a silent input, or an out-of-range percentile.
     """
     if not os.path.isfile(input_path):
         raise ValueError("input file not found: %s" % input_path)
@@ -348,7 +353,32 @@ def normalize_file(input_path, output_path, target_db=-1.0, percentile=99.0):
         "peak_after_db": round(target_db, 2),
         "applied_gain_db": info["applied_gain_db"],
         "percentile": info["percentile"],
+        "gain_capped_by_peak": info["gain_capped_by_peak"],
     }
+
+
+def scan_clipping_file(input_wav_path):
+    """Ceiling-clipping scan of a WAV file, as a JSON string.
+
+    Uses diagnose.ceiling_clip_stats: counts samples sitting exactly
+    at the file's own peak (full scale or below it, e.g. a -1 dBFS
+    hard hold), the runs they form, and whether the flat-top evidence
+    passes the clipping thresholds. This is the check the soundcheck
+    verdict runs on the FINAL rendered track, so clipping created by
+    processing (not just by capture) is reported. Raises ValueError
+    on a missing input.
+    """
+    if not os.path.isfile(input_wav_path):
+        raise ValueError("input file not found: %s" % input_wav_path)
+    samples, sample_rate = read_wav_mono(input_wav_path)
+    stats = _diagnose.ceiling_clip_stats(samples)
+    stats["sample_rate"] = sample_rate
+    stats["duration_s"] = round(len(samples) / sample_rate, 3) \
+        if sample_rate else 0.0
+    # -inf peak_db (silence) is not JSON-strict; report null instead.
+    if stats["peak_db"] == float("-inf"):
+        stats["peak_db"] = None
+    return json.dumps(stats)
 
 
 def _clamp_samples_window(samples, sample_rate, start_sec, end_sec):

@@ -32,6 +32,17 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 
 CLIP_THRESHOLD = 0.999          # |x| at or above this counts as clipped
+# Ceiling (flat-top) clipping: clipping held at a ceiling BELOW full
+# scale (e.g. a -1 dBFS hard hold at 0.8912) never reaches
+# CLIP_THRESHOLD, so it needs its own detector: repeated runs of
+# consecutive samples sitting exactly at the signal's own peak.
+# Isolated single samples at the peak are normal transients, not
+# flat-topping, so only runs of >= CEILING_RUN_MIN_LEN count.
+CEILING_RUN_MIN_LEN = 2         # consecutive at-peak samples = a flat top
+CEILING_MIN_SAMPLES = 8         # at-peak samples in flat-top runs to warn
+CEILING_MIN_RUNS = 3            # flat-top runs to warn (or one long run)
+CEILING_LONG_RUN = 8            # a single flat-top run this long warns
+CEILING_TOL = 0.5 / 32768.0     # half a 16-bit LSB around the peak
 QUIET_PEAK_DB = -12.0           # peak below this -> "too quiet"
 DC_THRESHOLD = 0.01             # |mean| above this -> DC offset
 SILENCE_DB = -45.0              # window RMS below this -> silent
@@ -86,6 +97,80 @@ def _fix(op, params, label):
 # shared full-signal spectrum for the spectral checks.
 # ---------------------------------------------------------------------------
 
+def ceiling_clip_stats(samples):
+    """Flat-top (ceiling) clipping statistics for a sample buffer.
+
+    Returns a dict with the absolute peak, how many samples sit
+    exactly at that peak (within CEILING_TOL), how many runs those
+    samples form, the longest run, how many samples/runs are in
+    flat-top runs (length >= CEILING_RUN_MIN_LEN), and
+    ``is_clipped``: True when the flat-top evidence passes the
+    CEILING_MIN_* thresholds. A clean signal whose loudest transient
+    touches its peak once or twice is not clipped; a signal that was
+    hard-held at a ceiling (full scale OR below it, e.g. -1 dBFS)
+    leaves hundreds of repeated at-peak runs.
+    """
+    stats = {"peak": 0.0, "peak_db": float("-inf"), "ceiling_samples": 0,
+             "ceiling_runs": 0, "longest_run": 0, "flat_samples": 0,
+             "flat_runs": 0, "is_clipped": False}
+    n = len(samples)
+    if n == 0:
+        return stats
+    if _HAVE_NUMPY:
+        x = _np.asarray(samples, dtype=_np.float64)
+        peak = float(_np.max(_np.abs(x)))
+        if peak <= 0:
+            return stats
+        mask = _np.abs(x) >= peak - CEILING_TOL
+        count = int(_np.sum(mask))
+        if count:
+            d = _np.diff(mask.astype(_np.int8))
+            starts = _np.where(d == 1)[0] + 1
+            ends = _np.where(d == -1)[0] + 1
+            if mask[0]:
+                starts = _np.concatenate((_np.array([0]), starts))
+            if mask[-1]:
+                ends = _np.concatenate((ends, _np.array([len(mask)])))
+            lens = ends - starts
+            flat = lens[lens >= CEILING_RUN_MIN_LEN]
+            stats["ceiling_runs"] = int(len(lens))
+            stats["longest_run"] = int(_np.max(lens))
+            stats["flat_samples"] = int(_np.sum(flat))
+            stats["flat_runs"] = int(len(flat))
+    else:
+        peak = max(abs(v) for v in samples)
+        if peak <= 0:
+            return stats
+        count = 0
+        cur = 0
+        for v in samples:
+            if abs(v) >= peak - CEILING_TOL:
+                count += 1
+                cur += 1
+            else:
+                if cur:
+                    stats["ceiling_runs"] += 1
+                    stats["longest_run"] = max(stats["longest_run"], cur)
+                    if cur >= CEILING_RUN_MIN_LEN:
+                        stats["flat_samples"] += cur
+                        stats["flat_runs"] += 1
+                cur = 0
+        if cur:
+            stats["ceiling_runs"] += 1
+            stats["longest_run"] = max(stats["longest_run"], cur)
+            if cur >= CEILING_RUN_MIN_LEN:
+                stats["flat_samples"] += cur
+                stats["flat_runs"] += 1
+    stats["peak"] = peak
+    stats["peak_db"] = _db(peak)
+    stats["ceiling_samples"] = count
+    stats["is_clipped"] = bool(
+        stats["flat_samples"] >= CEILING_MIN_SAMPLES
+        and (stats["flat_runs"] >= CEILING_MIN_RUNS
+             or stats["longest_run"] >= CEILING_LONG_RUN))
+    return stats
+
+
 def _check_clipping(s, sr, ctx):
     n = len(s)
     count = 0
@@ -118,9 +203,24 @@ def _check_clipping(s, sr, ctx):
                 longest = max(longest, cur)
             else:
                 i += 1
-    if count == 0:
+    ceil = ceiling_clip_stats(s)
+    if count == 0 and not ceil["is_clipped"]:
         return _finding("clipping", "ok", "No clipping",
-                        "No samples at full scale.", None, "")
+                        "No samples at full scale and no flat-topped "
+                        "ceiling.", None, "")
+    if count == 0:
+        # Flat-topped at a ceiling below full scale (e.g. held at
+        # -1 dBFS): the full-scale test above sees nothing.
+        return _finding(
+            "clipping", "warn", "Clipping detected",
+            "%d samples flat-topped at the %.1f dBFS ceiling across "
+            "%d spots (longest run %d samples). This distortion is "
+            "permanent, but its harshness can be reduced."
+            % (ceil["flat_samples"], ceil["peak_db"], ceil["flat_runs"],
+               ceil["longest_run"]),
+            _fix("declip", {}, "Reduce clipping"),
+            "Enable the Limiter before recording to make clipping "
+            "impossible.")
     return _finding(
         "clipping", "warn", "Clipping detected",
         "%d clipped samples across %d spots%s. This distortion is "

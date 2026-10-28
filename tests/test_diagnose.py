@@ -34,6 +34,22 @@ class DiagnoseTest(unittest.TestCase):
         self.assertIsNotNone(f["fix"])
         self.assertEqual(f["fix"]["op"], "declip")
 
+    def test_ceiling_clipping_below_full_scale_found(self):
+        # Hard-held at -1 dBFS (0.8912): no sample reaches the 0.999
+        # full-scale threshold, yet the flat tops must warn. This is
+        # the soundcheck_1 fingerprint (11,009 samples at exactly
+        # +-29204/32768 across 448 runs in the QA file).
+        ceiling = 10.0 ** (-1.0 / 20.0)
+        sig = [max(-ceiling, min(ceiling, v))
+               for v in sine(110, 1.0, amplitude=1.2)]
+        self.assertLess(max(abs(v) for v in sig), diagnose.CLIP_THRESHOLD)
+        f = by_id(diagnose.analyze(sig, SR))["clipping"]
+        self.assertEqual(f["severity"], "warn")
+        self.assertEqual(f["fix"]["op"], "declip")
+        stats = diagnose.ceiling_clip_stats(sig)
+        self.assertTrue(stats["is_clipped"])
+        self.assertGreater(stats["flat_samples"], 100)
+
     def test_clean_signal_no_clipping(self):
         f = by_id(diagnose.analyze(sine(440, 1.0, 0.5), SR))["clipping"]
         self.assertEqual(f["severity"], "ok")
