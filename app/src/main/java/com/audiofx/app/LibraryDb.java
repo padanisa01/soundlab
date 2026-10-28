@@ -44,7 +44,7 @@ import java.util.UUID;
  */
 public class LibraryDb extends SQLiteOpenHelper {
 
-    public static final String DSP_VERSION = "1";
+    public static final String DSP_VERSION = "2";
 
     private static final String DB_NAME = "soundlab_library.db";
     private static final int DB_VERSION = 4;

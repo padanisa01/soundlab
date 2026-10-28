@@ -10,6 +10,7 @@ import os
 import wave
 
 from . import diagnose as _diagnose
+from . import mastering as _mastering
 from . import pitch as _pitch
 from . import repair as _repair
 from . import tonic as _tonic
@@ -57,7 +58,7 @@ from .pipeline import (
 
 #: DSP engine version. Java stores this per library entry and refuses to
 #: silently re-render when the engine changes.
-DSP_VERSION = "1"
+DSP_VERSION = "2"
 
 
 def _cb(progress, name, *args):
@@ -92,6 +93,12 @@ def _apply_op(samples, sample_rate, op, params, index):
         samples = _pitch.pitch_shift(
             samples, sample_rate,
             float(params.get("semitones", 0.0)))
+    elif op == "mastering":
+        # Params persist in full numeric form; "preset" is metadata
+        # only and rendering uses only the numbers (DSP-2 contract).
+        samples = _mastering.master(
+            samples, sample_rate,
+            params.get("bands"), params.get("dyn_eq"))
     elif op == "normalize":
         samples, _ = _apply_normalize(
             samples, sample_rate,

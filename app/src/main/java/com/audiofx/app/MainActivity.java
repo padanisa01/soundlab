@@ -1813,6 +1813,7 @@ public class MainActivity extends Activity {
                 || "level".equals(opType) || "loudness".equals(opType)
                 || "eq_balance".equals(opType) || "tune_up".equals(opType)
                 || "pitch_shift".equals(opType)
+                || "mastering".equals(opType)
                 || "punch_in".equals(opType);
     }
 

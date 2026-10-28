@@ -611,7 +611,9 @@ class TestRenderChain(unittest.TestCase):
         return p
 
     def test_dsp_version(self):
-        self.assertEqual(android_bridge.DSP_VERSION, "1")
+        # Bumped "1" -> "2" by DSP-2 (the mastering op), in the same
+        # commit as LibraryDb.DSP_VERSION.
+        self.assertEqual(android_bridge.DSP_VERSION, "2")
 
     def test_empty_chain_reproduces_pristine(self):
         with tempfile.TemporaryDirectory() as d:
