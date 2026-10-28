@@ -3403,7 +3403,25 @@ public class MainActivity extends Activity {
      * ships in the APK (ticket AM-1). */
     private String summaryProxyUrl() {
         String u = BuildConfig.SUMMARY_PROXY_URL;
-        return u == null ? "" : u.trim();
+        u = u == null ? "" : u.trim();
+        // local.properties carries the BARE Cloud Run service URL
+        // (that is what deploy.sh prints and what proxy/README.md
+        // documents); the endpoint route is /summarize. Normalize
+        // here so every caller POSTs to the route: posting to the
+        // service root returns Flask's 404, which was the actual
+        // cause of "Summary unavailable" once App Check worked --
+        // found 2026-10-28 via the status dialog (Proxy HTTP 404,
+        // token present). The AM-1 smoke test missed it because it
+        // curled /summarize directly.
+        if (!u.isEmpty()) {
+            while (u.endsWith("/")) {
+                u = u.substring(0, u.length() - 1);
+            }
+            if (!u.endsWith("/summarize")) {
+                u = u + "/summarize";
+            }
+        }
+        return u;
     }
 
     /** Current App Check token for the summary proxy, or "" when Firebase

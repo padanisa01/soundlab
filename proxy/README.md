@@ -61,9 +61,10 @@ No em dashes in this service: colons and commas only.
    access is gated by App Check verification in the app, not by IAM.
 
 6. Point the app at the proxy: set `summary.proxy.url` in the app's
-   `local.properties` to the Cloud Run URL printed by the deploy, then
-   build a release APK. Verify end to end, then revoke the old Groq key
-   in the Groq console.
+   `local.properties` to the bare Cloud Run URL printed by the deploy
+   (no path -- the app appends the `/summarize` route itself in
+   `summaryProxyUrl()`), then build a release APK. Verify end to
+   end, then revoke the old Groq key in the Groq console.
 
 ## User todos
 
