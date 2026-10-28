@@ -811,6 +811,75 @@ def tune_up_build(findings_json, profile="podcast"):
     })
 
 
+#: Quality driver -> the tune_up_fixes op that addresses it. The
+#: loudness driver's fix is the op tune_up_fixes actually emits,
+#: "loudness" (repair.loudness_normalize under the hood).
+_QUALITY_DRIVER_OPS = {
+    "clipping": "declip",
+    "sibilance": "deess",
+    "level_spread": "level",
+    "loudness": "loudness",
+    "noise": "denoise",
+    "hum": "hum_notch",
+}
+
+
+def quality_improve_build(findings_json, quality_json, profile="podcast"):
+    """Build the Improve quality composite op: the same tune_up op
+    JSON shape tune_up_build returns, containing ONLY the fixes for
+    quality drivers whose penalty is at least
+    quality.QUALITY_IMPROVE_MIN_PENALTY.
+
+    ``quality_json`` is the quality object diagnose_file returned
+    (its "drivers" member carries the per-driver penalty points).
+    The candidate fixes come from diagnose.tune_up_fixes(findings,
+    profile), so the selection keeps Tune Up's canonical order and
+    profile gating; a penalized driver whose fix is absent from
+    tune_up_fixes (no matching finding, or the profile's recipe
+    excludes it) contributes nothing. An empty selection returns the
+    same "nothing to fix" shape tune_up_build uses for an empty fix
+    list. Raises ValueError on unusable JSON inputs.
+    """
+    try:
+        findings = json.loads(findings_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("findings_json is not valid JSON: %s" % exc)
+    if not isinstance(findings, list):
+        raise ValueError("findings_json must be a JSON array of findings")
+    try:
+        quality_obj = json.loads(quality_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("quality_json is not valid JSON: %s" % exc)
+    drivers = {}
+    if isinstance(quality_obj, dict):
+        inner = quality_obj.get("quality")
+        if not isinstance(inner, dict):
+            inner = quality_obj
+        raw = inner.get("drivers")
+        if isinstance(raw, dict):
+            drivers = raw
+    wanted = set()
+    for driver, op in _QUALITY_DRIVER_OPS.items():
+        try:
+            penalty = float(drivers.get(driver, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            penalty = 0.0
+        if penalty >= _quality.QUALITY_IMPROVE_MIN_PENALTY:
+            wanted.add(op)
+    fixes = [f for f in _diagnose.tune_up_fixes(findings, profile)
+             if f.get("op") in wanted]
+    prof = _diagnose.TUNE_UP_PROFILES.get(
+        profile, _diagnose.TUNE_UP_PROFILES[_diagnose.DEFAULT_PROFILE])
+    labels = [f.get("label", f.get("op", "?")) for f in fixes]
+    summary = ("Improve quality (%s): " % prof["label"]
+               + ", ".join(labels)) if labels else \
+        "Improve quality (%s): nothing to fix" % prof["label"]
+    return json.dumps({
+        "op": "tune_up",
+        "params": {"fixes": fixes, "summary": summary, "profile": profile},
+    })
+
+
 def live_chain_create(warmth, reverb_preset, echo, sample_rate,
                       block_size=2048, channels=2, stereo=False):
     """Create a stateful live chain for real-time block processing.
