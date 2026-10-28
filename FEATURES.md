@@ -269,6 +269,22 @@ or the plan changes.
   default. Tune Up does NOT offer `mastering` in v1. The op's
   arrival bumped `DSP_VERSION` to "2" (`android_bridge.py` +
   `LibraryDb.java`).
+- **Quality score (estimate)** (DSP-5, Tier 1 only): an optional
+  perceptual summary of the Diagnose measurements, in SIG / BAK /
+  OVRL sub-scores each in [1, 5] (`audiofx/quality.py`). SIG is driven
+  by clipping, sibilance, level spread and loudness distance; BAK by
+  the noise floor and hum; OVRL is a weighted combination (named
+  constants `QUALITY_W_SIG` / `QUALITY_W_BAK`). It is an *estimate*
+  mapped from measurements Diagnose already computes (noise floor,
+  ceiling-clip stats, LUFS, sibilant fraction, level spread) -- the
+  scorer does not re-measure the signal, and it is labeled
+  "estimate" wherever it is shown. Silence scores null, never 1 or
+  5. `diagnose_file(path, quality_engine="off")` keeps returning the
+  plain findings array, byte-identical to before; with
+  `quality_engine="proxy"` it returns
+  `{"findings": [...], "quality": {...}|null}` (findings inside
+  unchanged; `diagnose.analyze` findings are byte-identical in every
+  mode). The score is advisory only: Tune Up does not consume it.
 
 ### Tonic and notation
 - **Notation** is per track: the Notation icon button sits in the

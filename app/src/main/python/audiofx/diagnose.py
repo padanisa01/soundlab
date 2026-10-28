@@ -327,7 +327,11 @@ def _band_energy(spec, freqs, lo, hi):
     return float(_np.sum(spec[sel] ** 2)) if _np.any(sel) else 0.0
 
 
-def _check_hum(s, sr, ctx):
+def _hum_measurement(s, sr, ctx):
+    """Strongest 50/60 Hz hum as (freq_hz, ratio vs local floor), or
+    None when there is no spectrum or no measurable floor. Shared by
+    _check_hum and quality_measurements (single source, no duplicate
+    measurement code)."""
     spec, freqs = ctx.get("spectrum", (None, None))
     if spec is None:
         return None
@@ -339,8 +343,18 @@ def _check_hum(s, sr, ctx):
         if floor <= 0:
             continue
         ratio = band / (floor / 2 + 1e-18)
-        if ratio > HUM_RATIO and (best is None or ratio > best[1]):
+        if best is None or ratio > best[1]:
             best = (f0, ratio)
+    return best
+
+
+def _check_hum(s, sr, ctx):
+    spec, freqs = ctx.get("spectrum", (None, None))
+    if spec is None:
+        return None
+    best = _hum_measurement(s, sr, ctx)
+    if best is not None and best[1] <= HUM_RATIO:
+        best = None
     if best is None:
         return _finding("hum", "ok", "No mains hum",
                         "No 50/60 Hz tonal content found.", None, "")
@@ -354,7 +368,9 @@ def _check_hum(s, sr, ctx):
         "battery if you can.")
 
 
-def _check_noise_floor(s, sr, ctx):
+def _noise_floor_measurement(s, sr, ctx):
+    """(floor_db, overall_db) from the quietest windows, or None.
+    Shared by _check_noise_floor and quality_measurements."""
     flags, win = _window_flags(s, sr, 0.05, SILENCE_DB, ctx)
     if not flags or not _HAVE_NUMPY:
         return None
@@ -367,6 +383,14 @@ def _check_noise_floor(s, sr, ctx):
     quiet = _np.partition(rms, k)[:k]
     floor_db = _db(float(_np.mean(quiet)))
     overall_db = _db(float(_np.sqrt(_np.mean(x[:n] ** 2))))
+    return floor_db, overall_db
+
+
+def _check_noise_floor(s, sr, ctx):
+    measured = _noise_floor_measurement(s, sr, ctx)
+    if measured is None:
+        return None
+    floor_db, overall_db = measured
     # Gate: if the "quiet" parts are nearly as loud as the whole signal,
     # there is no quiet part to measure -- it is signal, not hiss. (Without
     # this, any consistently loud signal false-positives.)
@@ -414,7 +438,9 @@ def _check_plosive(s, sr, ctx):
                     "No low-frequency thumps found.", None, "")
 
 
-def _check_sibilance(s, sr, ctx):
+def _sibilant_fraction(s, sr, ctx):
+    """Fraction of frames with harsh sibilant energy, or None.
+    Shared by _check_sibilance and quality_measurements."""
     if not _HAVE_NUMPY:
         return None
     from . import repair
@@ -431,7 +457,13 @@ def _check_sibilance(s, sr, ctx):
                           axis=1))
     w = _np.sqrt(_np.mean(x[: nb * frame].reshape(nb, frame) ** 2, axis=1))
     sib = (b > 0.35 * w) & (b > 10.0 ** (-40.0 / 20.0))
-    frac = float(_np.mean(sib))
+    return float(_np.mean(sib))
+
+
+def _check_sibilance(s, sr, ctx):
+    frac = _sibilant_fraction(s, sr, ctx)
+    if frac is None:
+        return None
     if frac >= SIBILANT_FRAC:
         return _finding(
             "sibilance", "warn", "Harsh sibilance",
@@ -443,7 +475,9 @@ def _check_sibilance(s, sr, ctx):
                     "Sibilant energy is under control.", None, "")
 
 
-def _check_uneven_level(s, sr, ctx):
+def _level_spread_db(s, sr, ctx):
+    """Window-RMS spread in dB, or None. Shared by
+    _check_uneven_level and quality_measurements."""
     win = max(1, int(0.5 * sr))
     if _HAVE_NUMPY:
         x = _arr(s, ctx)
@@ -454,17 +488,22 @@ def _check_uneven_level(s, sr, ctx):
         rms = rms[rms > 10.0 ** (-50.0 / 20.0)]
         if rms.size < 4:
             return None
-        spread = _db(float(_np.max(rms))) - _db(float(_np.min(rms)))
-    else:
-        rms = []
-        for i in range(0, len(s), win):
-            seg = s[i : i + win]
-            r = math.sqrt(sum(v * v for v in seg) / max(1, len(seg)))
-            if r > 10.0 ** (-50.0 / 20.0):
-                rms.append(r)
-        if len(rms) < 4:
-            return None
-        spread = _db(max(rms)) - _db(min(rms))
+        return _db(float(_np.max(rms))) - _db(float(_np.min(rms)))
+    rms = []
+    for i in range(0, len(s), win):
+        seg = s[i : i + win]
+        r = math.sqrt(sum(v * v for v in seg) / max(1, len(seg)))
+        if r > 10.0 ** (-50.0 / 20.0):
+            rms.append(r)
+    if len(rms) < 4:
+        return None
+    return _db(max(rms)) - _db(min(rms))
+
+
+def _check_uneven_level(s, sr, ctx):
+    spread = _level_spread_db(s, sr, ctx)
+    if spread is None:
+        return None
     if spread > LEVEL_RANGE_DB:
         return _finding(
             "uneven_level", "warn", "Uneven level",
@@ -601,8 +640,79 @@ _CHECKS = (
 )
 
 
-def analyze(samples, sample_rate):
-    """Run all checks. Returns findings sorted warn-first."""
+#: Quality engines accepted by analyze()/android_bridge. "dnsmos"
+#: is reserved for a Tier 2 that does not exist in v1 (see contracts).
+QUALITY_ENGINES = ("off", "proxy", "dnsmos")
+
+
+def quality_measurements(samples, sample_rate):
+    """Build the measurements context quality.score() consumes, from
+    the helpers the checks above already use: ceiling_clip_stats,
+    the noise-floor / hum / sibilance / level-spread measurements
+    (shared with their checks), and repair.measure_lufs. No
+    measurement code is duplicated here. Each field is None when its
+    measurement cannot run (e.g. no NumPy); a broken measurement
+    yields None for that field, never an exception."""
+    s = list(samples)
+    ctx = {}
+    if _HAVE_NUMPY and len(s) > 0:
+        ctx["x"] = _np.asarray(s, dtype=_np.float64)
+        ctx["spectrum"] = _spectrum(s, sample_rate)
+
+    def _safe(fn, default=None):
+        try:
+            return fn()
+        except Exception:
+            return default
+
+    ceil = _safe(lambda: ceiling_clip_stats(s), default={})
+    noise = _safe(lambda: _noise_floor_measurement(s, sample_rate, ctx))
+    # Same gate as _check_noise_floor: if the "quiet" parts are
+    # nearly as loud as the whole signal there is no quiet part to
+    # measure -- that floor is signal, not hiss -- so the quality
+    # context carries no noise floor (None = no BAK penalty).
+    if noise is not None and (noise[1] - noise[0]) <= 6.0:
+        noise = None
+    hum = _safe(lambda: _hum_measurement(s, sample_rate, ctx))
+
+    def _lufs():
+        if not _HAVE_NUMPY:
+            return None
+        from . import repair
+        v = repair.measure_lufs(s, sample_rate)
+        return v if v != float("-inf") else None
+
+    lufs = _safe(_lufs)
+    total = len(s)
+    flat = ceil.get("flat_samples") if isinstance(ceil, dict) else None
+    return {
+        "noise_floor_db": noise[0] if noise else None,
+        "ceiling_clip": ceil,
+        "clip_fraction": (flat / total) if (flat is not None and total)
+                         else 0.0,
+        "total_samples": total,
+        "lufs": lufs,
+        "lufs_distance_db": abs(lufs - LOUDNESS_TARGET)
+                            if lufs is not None else None,
+        "sibilant_fraction": _safe(
+            lambda: _sibilant_fraction(s, sample_rate, ctx)),
+        "level_spread_db": _safe(
+            lambda: _level_spread_db(s, sample_rate, ctx)),
+        "hum_ratio": hum[1] if hum else None,
+        "hum_freq_hz": hum[0] if hum else None,
+    }
+
+
+def analyze(samples, sample_rate, quality_engine="off"):
+    """Run all checks. Returns findings sorted warn-first.
+
+    ``quality_engine`` is accepted per the DSP-5 contract but gains
+    the RETURN nothing in any mode: the findings stay byte-identical
+    and quality travels via android_bridge only (which builds its
+    context with quality_measurements()).
+    """
+    if quality_engine not in QUALITY_ENGINES:
+        raise ValueError("unknown quality_engine %r" % (quality_engine,))
     s = list(samples)
     ctx = {}
     if _HAVE_NUMPY and len(s) > 0:
