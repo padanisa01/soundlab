@@ -330,6 +330,20 @@ or the plan changes.
   ratio (waveform-similarity overlap-add, so attacks/onsets stay
   sharp and on time), then a resample back to the original length.
   (A phase-vocoder version smeared transients and was replaced.)
+- **Formant pitch engine (A/B alternative)**: the `pitch_shift` op
+  accepts an `engine` param — absent or `"wsola"` renders exactly
+  as above (the default); `"formant"` renders via
+  `pitch_shift_formant` (audiofx/pitch.py), which runs the WSOLA
+  shift, then divides the shifted spectrum by its per-frame
+  cepstral spectral envelope and re-imposes the original's
+  envelope (STFT 2048/512 via repair._stft/_istft), so a tonic
+  shift keeps the singer's vocal character instead of the
+  chipmunk/darkened shift of the formants. Buffers shorter than
+  the STFT window and silence fall back to WSOLA inside the
+  function; an unknown engine string fails the render with a
+  ValueError. Synthetic-vowel tests (tests/test_pitch.py) hold
+  formant peaks within +/-50 cents after +7/-5 semitone shifts
+  while the same measurement fails against plain WSOLA.
 
 ### Per-track volume
 
