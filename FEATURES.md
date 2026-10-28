@@ -266,11 +266,14 @@ or the plan changes.
   App Check debug provider (a `debugImplementation` artifact, absent
   from release builds), so a sideloaded debug build can use the proxy
   once its debug token is registered in the Firebase Console — the
-  key stays in Secret Manager either way. In debug builds the token
-  is surfaced in-app: a dialog with a selectable text box and a Copy
-  button appears once per launch when the secret is found, and the
-  secret is also written to `appcheck-debug-token.txt` in the public
-  Download folder (plus the app-specific external folder). Firebase
+  key stays in Secret Manager either way. In debug builds the
+  secret is written to `appcheck-debug-token.txt` in the public
+  Download folder (plus the app-specific external folder), since
+  the build terminal has no logcat. Debug builds also surface
+  summary-call failures in-app: when a Diagnose summary fetch
+  fails, a dialog shows the recorded status (stage reached, HTTP
+  code, proxy/Groq error body, elapsed ms; never the token or
+  key) in a selectable text box with a Copy button. Firebase
   initialization depends on the `com.google.gms.google-services`
   Gradle plugin (applied in `app/build.gradle`) processing the real
   `app/google-services.json`, which lives only on the build machine

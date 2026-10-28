@@ -746,8 +746,7 @@ public class MainActivity extends Activity {
         if (BuildConfig.DEBUG) {
             // The debug secret's only SDK channel is logcat, which the
             // user's build terminal does not have: write it to a text
-            // file and show it in a copyable dialog instead. Write
-            // IMMEDIATELY (the file's existence
+            // file instead. Write IMMEDIATELY (the file's existence
             // proves this build is running; its content carries
             // diagnostics when the secret is not there yet), force the
             // secret's creation with a token request (it is persisted
@@ -3410,6 +3409,38 @@ public class MainActivity extends Activity {
     /** Current App Check token for the summary proxy, or "" when Firebase
      * is unconfigured or the token fetch fails. Blocks up to 10 seconds:
      * call from a worker thread only. */
+    /** Status of the most recent LLM summary call (stage reached,
+     * HTTP code, proxy/Groq error body, elapsed time, exception).
+     * The summary path runs on background threads and its failures
+     * otherwise reach only logcat, which the user's build terminal
+     * does not have -- so the status is kept here and, in debug
+     * builds, shown in a copyable dialog when a summary fetch fails
+     * (see showSummaryStatusDialog). NEVER holds the App Check
+     * token or the API key themselves (AM-6): presence/length only. */
+    private volatile String lastSummaryStatus = null;
+
+    private void noteSummaryStatus(String status) {
+        lastSummaryStatus = status;
+    }
+
+    /** Read a failed response's body (bounded), for the status. */
+    private static String readErrorBody(
+            java.net.HttpURLConnection conn) {
+        try {
+            java.io.InputStream es = conn.getErrorStream();
+            if (es == null) {
+                return "";
+            }
+            try (java.util.Scanner s = new java.util.Scanner(es, "UTF-8")
+                    .useDelimiter("\\A")) {
+                String b = s.hasNext() ? s.next() : "";
+                return b.length() > 500 ? b.substring(0, 500) : b;
+            }
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
     private String appCheckToken() {
         try {
             com.google.android.gms.tasks.Task<
@@ -3420,8 +3451,17 @@ public class MainActivity extends Activity {
                     com.google.android.gms.tasks.Tasks.await(task, 10,
                             java.util.concurrent.TimeUnit.SECONDS);
             String t = token == null ? null : token.getToken();
+            if (t == null || t.isEmpty()) {
+                noteSummaryStatus("App Check token fetch returned"
+                        + " EMPTY (exchange failed or no provider"
+                        + " installed); the proxy will reject the"
+                        + " request.");
+            }
             return t == null ? "" : t;
         } catch (Exception e) {
+            noteSummaryStatus("App Check token fetch FAILED: "
+                    + e.getClass().getSimpleName() + ": "
+                    + e.getMessage());
             return "";
         }
     }
@@ -3508,80 +3548,8 @@ public class MainActivity extends Activity {
                 text = diag.toString();
             }
             writeTokenTextFile(text);
-            if (found != null) {
-                showAppCheckDebugTokenDialog(found);
-            }
         } catch (Exception ignored) {
         }
-    }
-
-    private boolean appCheckTokenDialogShown = false;
-
-    /** Debug builds only: show the App Check debug secret in a
-     * dialog with a selectable text box and a Copy button, so the
-     * user can copy it straight into the Firebase Console without
-     * logcat or a file manager. Shown at most once per launch, the
-     * first time the secret is found (the writer runs repeatedly:
-     * at startup, on token completion, and on retries). */
-    private void showAppCheckDebugTokenDialog(final String token) {
-        mainHandler.post(() -> {
-            if (appCheckTokenDialogShown || isFinishing()
-                    || isDestroyed()) {
-                return;
-            }
-            appCheckTokenDialogShown = true;
-            try {
-                float dp = getResources().getDisplayMetrics().density;
-                LinearLayout root = new LinearLayout(this);
-                root.setOrientation(LinearLayout.VERTICAL);
-                root.setPadding((int) (20 * dp), (int) (8 * dp),
-                        (int) (20 * dp), 0);
-                TextView label = new TextView(this);
-                label.setText("Copy this into Firebase Console >"
-                        + " App Check > com.audiofx.app >"
-                        + " Manage debug tokens:");
-                label.setTextColor(getColor(R.color.sl_mut));
-                label.setTextSize(12.5f);
-                root.addView(label, new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT));
-                final EditText tokenEt = new EditText(this);
-                tokenEt.setText(token);
-                tokenEt.setTextSize(15f);
-                tokenEt.setTextIsSelectable(true);
-                tokenEt.setKeyListener(null);
-                tokenEt.setMinHeight((int) (52 * dp));
-                LinearLayout.LayoutParams etLp =
-                        new LinearLayout.LayoutParams(
-                                LinearLayout.LayoutParams.MATCH_PARENT,
-                                LinearLayout.LayoutParams.WRAP_CONTENT);
-                etLp.topMargin = (int) (10 * dp);
-                root.addView(tokenEt, etLp);
-                tokenEt.selectAll();
-                new AlertDialog.Builder(this,
-                        R.style.Theme_SoundLab_Dialog)
-                        .setTitle("App Check debug token")
-                        .setView(root)
-                        .setNegativeButton("Close", null)
-                        .setPositiveButton("Copy", (d, w) -> {
-                            android.content.ClipboardManager cm =
-                                    (android.content.ClipboardManager)
-                                            getSystemService(
-                                                    CLIPBOARD_SERVICE);
-                            if (cm != null) {
-                                cm.setPrimaryClip(
-                                        android.content.ClipData
-                                                .newPlainText(
-                                                        "App Check debug token",
-                                                        token));
-                                Toast.makeText(this, "Token copied",
-                                        Toast.LENGTH_SHORT).show();
-                            }
-                        })
-                        .show();
-            } catch (Exception ignored) {
-            }
-        });
     }
 
     /** Write the debug-token text to BOTH the public Download folder
@@ -3671,18 +3639,32 @@ public class MainActivity extends Activity {
                             .getModule("audiofx.android_bridge")
                             .callAttr("summarize_request_body", findingsJson,
                                     profile).toString();
+                    if (body.isEmpty()) {
+                        noteSummaryStatus("summarize_request_body"
+                                + " returned EMPTY (findings JSON not"
+                                + " a non-empty list); no call was made.");
+                    }
                     if (!body.isEmpty()) {
                         String resp = postGroqSummary(body, apiKey);
                         if (!resp.isEmpty()) {
                             summary = Python.getInstance()
                                     .getModule("audiofx.android_bridge")
                                     .callAttr("summarize_parse", resp).toString();
+                            if (summary == null || summary.isEmpty()) {
+                                noteSummaryStatus("Groq (direct)"
+                                        + " responded but"
+                                        + " summarize_parse extracted"
+                                        + " no summary text.");
+                            }
                         }
                     }
                 }
             } catch (Exception e) {
                 android.util.Log.w("AudioMechanic",
                         "summarize: failed: " + e);
+                noteSummaryStatus("Summary flow FAILED before a call"
+                        + " completed: " + e.getClass().getSimpleName()
+                        + ": " + e.getMessage());
             }
             final String out = summary;
             runOnUiThread(() -> cb.onDone(out));
@@ -3751,8 +3733,88 @@ public class MainActivity extends Activity {
             if (!stale) {
                 tv.setText((summary != null && !summary.isEmpty()) ? summary
                         : "Summary unavailable.");
+                if ((summary == null || summary.isEmpty())
+                        && BuildConfig.DEBUG) {
+                    // Debug builds: surface WHY, in a copyable text
+                    // box -- the failure otherwise reaches only
+                    // logcat, which the user's terminal lacks.
+                    showSummaryStatusDialog();
+                }
             }
         });
+    }
+
+    private boolean summaryStatusDialogShowing = false;
+
+    /** Debug builds only: show the last summary call's recorded
+     * status (stage, HTTP code, error body, elapsed time) in a
+     * dialog with a selectable text box and a Copy button, so the
+     * user can read or paste the exact failure without logcat. */
+    private void showSummaryStatusDialog() {
+        if (summaryStatusDialogShowing || isFinishing()
+                || isDestroyed()) {
+            return;
+        }
+        String status = lastSummaryStatus;
+        if (status == null || status.isEmpty()) {
+            status = "No status was recorded for the last summary"
+                    + " call.";
+        }
+        summaryStatusDialogShowing = true;
+        try {
+            float dp = getResources().getDisplayMetrics().density;
+            LinearLayout root = new LinearLayout(this);
+            root.setOrientation(LinearLayout.VERTICAL);
+            root.setPadding((int) (20 * dp), (int) (8 * dp),
+                    (int) (20 * dp), 0);
+            TextView label = new TextView(this);
+            label.setText("The last LLM summary call reported:");
+            label.setTextColor(getColor(R.color.sl_mut));
+            label.setTextSize(12.5f);
+            root.addView(label, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT));
+            final EditText statusEt = new EditText(this);
+            statusEt.setText(status);
+            statusEt.setTextSize(13.5f);
+            statusEt.setTextIsSelectable(true);
+            statusEt.setKeyListener(null);
+            statusEt.setGravity(Gravity.TOP | Gravity.START);
+            statusEt.setMinHeight((int) (96 * dp));
+            LinearLayout.LayoutParams etLp =
+                    new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT);
+            etLp.topMargin = (int) (10 * dp);
+            root.addView(statusEt, etLp);
+            final String statusText = status;
+            AlertDialog dialog = new AlertDialog.Builder(this,
+                    R.style.Theme_SoundLab_Dialog)
+                    .setTitle("Summary call status")
+                    .setView(root)
+                    .setNegativeButton("Close", null)
+                    .setPositiveButton("Copy", (d, w) -> {
+                        android.content.ClipboardManager cm =
+                                (android.content.ClipboardManager)
+                                        getSystemService(
+                                                CLIPBOARD_SERVICE);
+                        if (cm != null) {
+                            cm.setPrimaryClip(
+                                    android.content.ClipData
+                                            .newPlainText(
+                                                    "Summary call status",
+                                                    statusText));
+                            Toast.makeText(this, "Status copied",
+                                    Toast.LENGTH_SHORT).show();
+                        }
+                    })
+                    .create();
+            dialog.setOnDismissListener(
+                    d -> summaryStatusDialogShowing = false);
+            dialog.show();
+        } catch (Exception ignored) {
+            summaryStatusDialogShowing = false;
+        }
     }
 
     /* Standing logging rule (AM-6): never concatenate secrets, tokens, or
@@ -3781,6 +3843,8 @@ public class MainActivity extends Activity {
             if (code != 200) {
                 android.util.Log.w("AudioMechanic",
                         "summarize: Groq HTTP " + code);
+                noteSummaryStatus("Groq (direct) HTTP " + code + ": "
+                        + readErrorBody(conn));
                 return "";
             }
             try (java.io.InputStream is = conn.getInputStream();
@@ -3791,6 +3855,9 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             android.util.Log.w("AudioMechanic",
                     "summarize: request failed: " + e);
+            noteSummaryStatus("Groq (direct) request FAILED: "
+                    + e.getClass().getSimpleName() + ": "
+                    + e.getMessage());
             return "";
         } finally {
             if (conn != null) {
@@ -3841,6 +3908,8 @@ public class MainActivity extends Activity {
      * key: the proxy identifies the app by its App Check token. */
     private String postProxySummary(String proxyUrl, String findingsJson,
             String profile, String qualityJson) {
+        final long t0 = System.currentTimeMillis();
+        String tokenNote = "token not fetched";
         java.net.HttpURLConnection conn = null;
         try {
             java.net.URL url = new java.net.URL(proxyUrl);
@@ -3879,7 +3948,10 @@ public class MainActivity extends Activity {
                 } catch (Exception ignored) {
                 }
             }
-            payload.put("app_check_token", appCheckToken());
+            String acToken = appCheckToken();
+            tokenNote = acToken.isEmpty() ? "token EMPTY"
+                    : "token present (" + acToken.length() + " chars)";
+            payload.put("app_check_token", acToken);
             byte[] body = payload.toString().getBytes(
                     java.nio.charset.StandardCharsets.UTF_8);
             conn.setFixedLengthStreamingMode(body.length);
@@ -3887,9 +3959,13 @@ public class MainActivity extends Activity {
                 os.write(body);
             }
             int code = conn.getResponseCode();
+            long elapsed = System.currentTimeMillis() - t0;
             if (code != 200) {
                 android.util.Log.w("AudioMechanic",
                         "summarize: proxy HTTP " + code);
+                noteSummaryStatus("Proxy HTTP " + code + " after "
+                        + elapsed + " ms [" + tokenNote + "]: "
+                        + readErrorBody(conn));
                 return "";
             }
             String resp;
@@ -3900,10 +3976,25 @@ public class MainActivity extends Activity {
             }
             String summary = new org.json.JSONObject(resp)
                     .optString("summary", "");
-            return summary == null ? "" : summary;
+            if (summary == null || summary.isEmpty()) {
+                noteSummaryStatus("Proxy HTTP 200 after " + elapsed
+                        + " ms [" + tokenNote + "] but no summary in"
+                        + " the response: " + (resp.length() > 300
+                        ? resp.substring(0, 300) : resp));
+                return "";
+            }
+            noteSummaryStatus("Proxy OK: HTTP 200 in " + elapsed
+                    + " ms [" + tokenNote + "], summary "
+                    + summary.length() + " chars.");
+            return summary;
         } catch (Exception e) {
             android.util.Log.w("AudioMechanic",
                     "summarize: proxy request failed: " + e);
+            noteSummaryStatus("Proxy request FAILED after "
+                    + (System.currentTimeMillis() - t0) + " ms ["
+                    + tokenNote + "]: "
+                    + e.getClass().getSimpleName() + ": "
+                    + e.getMessage());
             return "";
         } finally {
             if (conn != null) {
