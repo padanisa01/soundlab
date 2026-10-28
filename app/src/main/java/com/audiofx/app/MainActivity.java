@@ -743,6 +743,20 @@ public class MainActivity extends Activity {
             }
         } catch (Exception ignored) {
         }
+        if (BuildConfig.DEBUG) {
+            // The debug secret's only SDK channel is logcat, which the
+            // user's build terminal does not have: force its creation
+            // with a token request (the secret is persisted before the
+            // exchange, so this works even while it is unregistered)
+            // and write it to a text file instead.
+            try {
+                com.google.firebase.appcheck.FirebaseAppCheck.getInstance()
+                        .getAppCheckToken(false)
+                        .addOnCompleteListener(task -> new Thread(
+                                this::writeAppCheckDebugTokenFile).start());
+            } catch (Exception ignored) {
+            }
+        }
 
         tvProjectName = findViewById(R.id.tv_project_name);
         btnMenu = findViewById(R.id.btn_menu);
@@ -3394,6 +3408,85 @@ public class MainActivity extends Activity {
             return t == null ? "" : t;
         } catch (Exception e) {
             return "";
+        }
+    }
+
+    /** Debug builds only: write the App Check debug secret to
+     * appcheck-debug-token.txt in the app-specific external folder
+     * (Android/data/com.audiofx.app/files/), because the user's
+     * build terminal has no logcat -- the SDK's only channel for it.
+     * The secret is the UUID the debug provider persists in its own
+     * SharedPreferences store; find it by scanning the app's
+     * shared_prefs for that store / the DEBUG_SECRET key, falling
+     * back to a sole UUID-shaped candidate. Treat the file like a
+     * password: register the token in the Firebase Console, then
+     * delete the file. */
+    private void writeAppCheckDebugTokenFile() {
+        try {
+            java.io.File prefsDir = new java.io.File(
+                    getApplicationInfo().dataDir, "shared_prefs");
+            java.io.File[] prefFiles = prefsDir.listFiles();
+            if (prefFiles == null) {
+                return;
+            }
+            java.util.regex.Pattern uuid = java.util.regex.Pattern.compile(
+                    "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+                            + "-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+            String found = null;
+            StringBuilder candidates = new StringBuilder();
+            for (java.io.File f : prefFiles) {
+                if (!f.getName().endsWith(".xml")) {
+                    continue;
+                }
+                java.io.BufferedReader br = new java.io.BufferedReader(
+                        new java.io.FileReader(f));
+                StringBuilder sb = new StringBuilder();
+                String line;
+                while ((line = br.readLine()) != null) {
+                    sb.append(line);
+                }
+                br.close();
+                String content = sb.toString();
+                boolean isDebugStore =
+                        f.getName().contains("appcheck.debug")
+                                || content.contains("DEBUG_SECRET");
+                java.util.regex.Matcher m = uuid.matcher(content);
+                while (m.find()) {
+                    candidates.append(f.getName()).append(": ")
+                            .append(m.group()).append('\n');
+                    if (isDebugStore) {
+                        found = m.group();
+                    }
+                }
+            }
+            if (found == null) {
+                String[] lines = candidates.toString().split("\n");
+                if (lines.length == 1 && lines[0].contains(": ")) {
+                    found = lines[0].substring(
+                            lines[0].indexOf(": ") + 2);
+                }
+            }
+            java.io.File outDir = getExternalFilesDir(null);
+            if (outDir == null) {
+                outDir = getFilesDir();
+            }
+            java.io.File out = new java.io.File(
+                    outDir, "appcheck-debug-token.txt");
+            java.io.PrintWriter pw = new java.io.PrintWriter(
+                    new java.io.FileWriter(out, false));
+            if (found != null) {
+                pw.println("App Check debug token for Audio Mechanic"
+                        + " (register it in Firebase Console > App Check"
+                        + " > com.audiofx.app > Manage debug tokens,"
+                        + " then delete this file):");
+                pw.println(found);
+            } else {
+                pw.println("Debug token not identified yet."
+                        + " UUID-shaped candidates found:");
+                pw.print(candidates.toString());
+            }
+            pw.close();
+        } catch (Exception ignored) {
         }
     }
 
