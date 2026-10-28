@@ -150,6 +150,16 @@ or the plan changes.
   (`audiofx/limiter.py`, unit-tested incl. zero-overshoot guarantee)
   ported 1:1 to `LiveLimiter.java`; differential check passes
   bit-for-bit.
+- **True-peak detection** (opt-in, default OFF): when enabled, the
+  limiter's detector oversamples the capture 4x (32-tap windowed-sinc
+  interpolation FIR, one coefficient table shared by the Python
+  reference `audiofx/limiter.py` and `LiveLimiter.java`) and runs the
+  same envelope follower on the inter-sample peak stream, so peaks
+  that occur *between* samples — invisible to sample-peak detection —
+  are also held to the -1 dBFS ceiling. Delay (5 ms), stereo linking
+  and the Limiter master switch are unchanged; governed by the
+  `mic_truepeak` preference (default false, wired in
+  `AudioRecorder.setTruePeak` / `LiveFxMonitor.setTruePeak`).
 - **Auto-normalize takes** toggle (on by default): recordings are
   peak-normalized to -1 dBFS right after the take, as an undoable
   history step — the raw mic capture stays recoverable via Undo.
