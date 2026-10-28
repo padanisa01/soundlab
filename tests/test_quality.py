@@ -328,14 +328,20 @@ class QualityImproveBuildTest(unittest.TestCase):
             findings, q, "podcast"))
         self.assertEqual(out["params"]["fixes"], [])
 
-    def test_fix_outside_profile_contributes_nothing(self):
-        # The singing recipe has no "level" fix: a penalized
-        # level_spread driver selects nothing under that profile.
+    def test_driver_fix_applies_even_when_recipe_excludes_it(self):
+        # The singing recipe has no "level" fix ("no leveling"), but
+        # Improve quality is an explicit request to fix the penalized
+        # driver: the level fix applies anyway (the user's on-device
+        # case: Singing profile + uneven level -> "nothing to
+        # apply"). The profile still owns the summary label.
         findings = json.dumps([_warn_fix("level")])
         q = _quality_json(_zero_drivers(level_spread=1.0))
         out = json.loads(android_bridge.quality_improve_build(
             findings, q, "singing"))
-        self.assertEqual(out["params"]["fixes"], [])
+        ops = [f["op"] for f in out["params"]["fixes"]]
+        self.assertEqual(ops, ["level"])
+        self.assertEqual(out["params"]["profile"], "singing")
+        self.assertIn("Singing", out["params"]["summary"])
 
     def test_missing_drivers_is_empty(self):
         findings = json.dumps([_warn_fix("declip")])

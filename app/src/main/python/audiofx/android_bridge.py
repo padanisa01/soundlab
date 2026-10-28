@@ -832,13 +832,17 @@ def quality_improve_build(findings_json, quality_json, profile="podcast"):
 
     ``quality_json`` is the quality object diagnose_file returned
     (its "drivers" member carries the per-driver penalty points).
-    The candidate fixes come from diagnose.tune_up_fixes(findings,
-    profile), so the selection keeps Tune Up's canonical order and
-    profile gating; a penalized driver whose fix is absent from
-    tune_up_fixes (no matching finding, or the profile's recipe
-    excludes it) contributes nothing. An empty selection returns the
-    same "nothing to fix" shape tune_up_build uses for an empty fix
-    list. Raises ValueError on unusable JSON inputs.
+    Candidate fixes come from diagnose.tune_up_fixes in Tune Up's
+    canonical order. The profile supplies the fix PARAMETERS (e.g.
+    the loudness target) and the label, but its recipe exclusions do
+    NOT gate this tool: tapping "Improve quality" is an explicit
+    request to fix the penalized drivers, so a driver fix the recipe
+    leaves out (e.g. "level" under Singing's no-leveling recipe) is
+    taken from the default profile's reduction of the same findings.
+    A penalized driver with no matching finding still contributes
+    nothing. An empty selection returns the same "nothing to fix"
+    shape tune_up_build uses for an empty fix list. Raises
+    ValueError on unusable JSON inputs.
     """
     try:
         findings = json.loads(findings_json)
@@ -866,8 +870,18 @@ def quality_improve_build(findings_json, quality_json, profile="podcast"):
             penalty = 0.0
         if penalty >= _quality.QUALITY_IMPROVE_MIN_PENALTY:
             wanted.add(op)
-    fixes = [f for f in _diagnose.tune_up_fixes(findings, profile)
-             if f.get("op") in wanted]
+    full = _diagnose.tune_up_fixes(
+        findings, _diagnose.DEFAULT_PROFILE)
+    by_op = {f.get("op"): f for f in
+             _diagnose.tune_up_fixes(findings, profile)}
+    fixes = []
+    for f in full:
+        op = f.get("op")
+        if op in wanted:
+            # Prefer the requested profile's own version of the fix
+            # (its params); fall back to the default profile's when
+            # the recipe excludes the op.
+            fixes.append(by_op.get(op, f))
     prof = _diagnose.TUNE_UP_PROFILES.get(
         profile, _diagnose.TUNE_UP_PROFILES[_diagnose.DEFAULT_PROFILE])
     labels = [f.get("label", f.get("op", "?")) for f in fixes]
