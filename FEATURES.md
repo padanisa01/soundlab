@@ -312,7 +312,10 @@ or the plan changes.
   fixes for the penalized drivers — one `tune_up` composite in
   Tune Up's canonical order, a single history entry / single
   undo — then re-diagnoses and shows the Overall before → after
-  once, with the honest re-diagnosed numbers.
+  once, with the honest re-diagnosed numbers. The profile recipe
+  supplies fix parameters, but its exclusions do not gate this
+  tool (e.g. the level fix applies under Singing despite the
+  recipe's no-leveling rule — the tap is an explicit fix request).
 - **DSP Lab tab** (DSP-6): Settings is now a two-tab dialog
   (Soundcheck | DSP Lab); the Soundcheck tab's four cue switches are
   unchanged. The DSP Lab tab holds the five engine defaults, each
