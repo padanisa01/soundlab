@@ -1273,6 +1273,20 @@ public class MainActivity extends Activity {
                 .getBoolean("mic_truepeak", false);
     }
 
+    /** One segment of a hand-rolled segmented control (the
+     * Record|Soundcheck strip's dimensions), painted by
+     * paintSegment. Used by dialogs that build their views in code
+     * (pitch, master). */
+    private TextView segmentTextView(String label) {
+        float dp = getResources().getDisplayMetrics().density;
+        TextView seg = new TextView(this);
+        seg.setText(label);
+        seg.setTextSize(13f);
+        seg.setPadding((int) (16 * dp), (int) (5 * dp),
+                (int) (16 * dp), (int) (5 * dp));
+        return seg;
+    }
+
     /** Starts the one-time premium purchase flow. */
     private void buyPremium() {
         if (premiumBilling != null) {
@@ -2496,6 +2510,52 @@ public class MainActivity extends Activity {
         cur.setTextSize(15f);
         root.addView(cur);
 
+        // Engine choice (DSP-1): Classic (WSOLA) | Formant, preselected
+        // from the DSP Lab pref; the chosen value is written into the
+        // op params at Convert time (renders stay reproducible after
+        // the pref changes).
+        TextView engineLbl = new TextView(this);
+        engineLbl.setText("Engine");
+        engineLbl.setTextColor(getColor(R.color.sl_mut));
+        engineLbl.setTextSize(12.5f);
+        LinearLayout.LayoutParams engineLblLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        engineLblLp.topMargin = (int) (12 * dp);
+        root.addView(engineLbl, engineLblLp);
+
+        LinearLayout engineRow = new LinearLayout(this);
+        engineRow.setOrientation(LinearLayout.HORIZONTAL);
+        engineRow.setBackgroundResource(R.drawable.bg_sel_chip_empty);
+        int segPad = (int) (3 * dp);
+        engineRow.setPadding(segPad, segPad, segPad, segPad);
+        LinearLayout.LayoutParams engineRowLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        engineRowLp.topMargin = (int) (6 * dp);
+        final TextView segClassic = segmentTextView("Classic");
+        final TextView segFormant = segmentTextView("Formant");
+        engineRow.addView(segClassic);
+        engineRow.addView(segFormant);
+        root.addView(engineRow, engineRowLp);
+        final String[] engineSel = {"formant".equals(
+                getSharedPreferences("soundlab", MODE_PRIVATE)
+                        .getString("dsp_pitch_engine", "wsola"))
+                ? "formant" : "wsola"};
+        final Runnable paintEngine = () -> {
+            paintSegment(segClassic, "wsola".equals(engineSel[0]));
+            paintSegment(segFormant, "formant".equals(engineSel[0]));
+        };
+        paintEngine.run();
+        segClassic.setOnClickListener(v -> {
+            engineSel[0] = "wsola";
+            paintEngine.run();
+        });
+        segFormant.setOnClickListener(v -> {
+            engineSel[0] = "formant";
+            paintEngine.run();
+        });
+
         TextView targetLbl = new TextView(this);
         targetLbl.setText("Shift to (target tonic):");
         targetLbl.setTextColor(getColor(R.color.sl_mut));
@@ -2624,7 +2684,8 @@ public class MainActivity extends Activity {
                     String params;
                     try {
                         params = new JSONObject()
-                                .put("semitones", rounded).toString();
+                                .put("semitones", rounded)
+                                .put("engine", engineSel[0]).toString();
                     } catch (Exception e) {
                         return;
                     }
