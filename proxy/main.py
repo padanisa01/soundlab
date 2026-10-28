@@ -64,19 +64,62 @@ def _strip_thinking(text):
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
-def _build_prompt(findings, profile):
+# Quality metrics the app may attach to a summary request, as
+# (payload key, display name, one-phrase meaning). Metadata only --
+# the same diagnosis the findings already describe, never audio.
+_QUALITY_METRICS = (
+    ("signal", "Signal", "how clean the voice itself sounds"),
+    ("background", "Background", "how quiet the background noise is"),
+    ("overall", "Overall", "Signal and Background combined"),
+)
+
+# Below this estimate the weakest quality dimension is worth a
+# clause of the summary.
+_QUALITY_WEAK_THRESHOLD = 3.5
+
+
+def _quality_prompt_lines(quality):
+    """Plain prompt lines for a payload quality object, or [] when
+    the object is absent or malformed (the prompt then stays exactly
+    as it was before quality was carried)."""
+    if not isinstance(quality, dict):
+        return []
+    values = {}
+    for key, _name, _meaning in _QUALITY_METRICS:
+        v = quality.get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return []
+        values[key] = float(v)
+    lines = ["Perceptual quality estimate, out of 5:"]
+    for key, name, meaning in _QUALITY_METRICS:
+        lines.append("- %s %.1f: %s." % (name, values[key], meaning))
+    weakest_key = min(values, key=lambda k: values[k])
+    if values[weakest_key] < _QUALITY_WEAK_THRESHOLD:
+        weakest_name = dict(
+            (k, n) for k, n, _m in _QUALITY_METRICS)[weakest_key]
+        lines.append(
+            "The weakest dimension is %s; mention %s in one clause."
+            % (weakest_name, weakest_name))
+    return lines
+
+
+def _build_prompt(findings, profile, quality=None):
     frame = PROFILE_FRAMING.get(profile, PROFILE_FRAMING["podcast"])
     lines = []
     for f in findings:
         tag = _SEV_TAG.get(f.get("severity", "info"), "NOTE")
         lines.append("- %s: %s -- %s"
                      % (tag, f.get("title", ""), f.get("detail", "")))
-    return ("The user recorded %s. Here is the automated diagnosis:\n%s\n\n"
-            "Summarize this for them in plain language."
-            % (frame, "\n".join(lines)))
+    prompt = ("The user recorded %s. Here is the automated diagnosis:\n%s\n\n"
+              "Summarize this for them in plain language."
+              % (frame, "\n".join(lines)))
+    quality_lines = _quality_prompt_lines(quality)
+    if quality_lines:
+        prompt += "\n\n" + "\n".join(quality_lines)
+    return prompt
 
 
-def _build_request_body(findings_json, profile):
+def _build_request_body(findings_json, profile, quality=None):
     """Build the Groq request body, mirroring summarize.build_request_body."""
     try:
         findings = json.loads(findings_json)
@@ -88,7 +131,8 @@ def _build_request_body(findings_json, profile):
         "model": MODEL,
         "messages": [
             {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": _build_prompt(findings, profile)},
+            {"role": "user",
+             "content": _build_prompt(findings, profile, quality)},
         ],
         "temperature": 0.7,
         "max_tokens": 150,
@@ -147,6 +191,7 @@ def summarize():
     data = request.get_json(silent=True) or {}
     findings_json = data.get("findings_json")
     profile = data.get("profile", "podcast")
+    quality = data.get("quality")
     app_check_token = data.get("app_check_token")
 
     if not app_check_token:
@@ -166,7 +211,7 @@ def summarize():
         logger.error("quota check failed: %s", type(e).__name__)
         return jsonify({"error": "upstream failed"}), 502
 
-    groq_body = _build_request_body(findings_json, profile)
+    groq_body = _build_request_body(findings_json, profile, quality)
     if not groq_body:
         return jsonify({"error": "bad findings"}), 400
 
