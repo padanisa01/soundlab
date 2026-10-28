@@ -9,11 +9,18 @@ the PRD de-risking-spike section govern the gates below.
 
 Per the PRD rule — a 3-minute song projecting to > ~90 s of phone
 inference (dev-VM time × 5) ⇒ F4 is descoped from this branch
-(separate TFLite proposal) and F5 ships Tier 1 only. Every measured
-configuration projects well over 90 s; the most favourable single
-measurement taken during the spike projects to ~199 s, and a
-FLOP-count floor (below) shows ~156 s is unreachable-to-beat with a
-pure-NumPy matmul implementation on this VM. Details in §3.
+(separate TFLite proposal) and F5 ships Tier 1 only. The NO-GO
+rests on the empirical measurements only: no floor claim is made
+(see §3 — a floor argument was attempted, but its BLAS-peak input
+proved contention-dependent, with the reviewer measuring
+82.4–101.8 GFLOPS on the same VM/venv against the implementer's
+42.5 GFLOPS). Every measured configuration projects over the
+gate: the implementer's reproducible benchmark is 4.166 ms/frame
+⇒ 375 s phone for a 3-minute song, the best-ever observed rate is
+1.465 ms/frame (reviewer re-run) ⇒ ~132 s, and crossing the gate
+would require a sustained 1.000 ms/frame end-to-end. The
+reviewer's four end-to-end re-runs project (best-per-run) 131.8 s,
+153.2 s, 237.0 s and 407.9 s — all over ~90 s. Details in §3.
 
 The D5 size gate, by contrast, PASSES (§1). Parity against the
 reference TensorFlow implementation could NOT be run — no TF
@@ -91,7 +98,11 @@ limitation, not a pass (§2).
   This validates nn.py's wiring/math against an independent
   implementation; it does not validate against Keras itself
   (e.g. a padding-convention discrepancy shared by both spike
-  implementations would not be caught). If DSP-4 is ever revived,
+  implementations would not be caught). Clarification: the
+  independent cross-check shares the batch-norm, max-pool, and
+  padding helpers with nn.py's forward path; only convolution
+  and dense are independently implemented, so the check cannot
+  catch a shared bug in those helpers. If DSP-4 is ever revived,
   the TF check remains an open acceptance item.
 
 ## 3. S3 — Benchmark (NO-GO)
@@ -112,10 +123,12 @@ NumPy builds were measured (same hardware):
 
 Full venv batch sweep (ms/frame): batch 1: 5.996, 8: 6.410,
 16: 4.674, 32: 4.166, 64: 11.936 (batch 64 degrades — conv2's
-im2col matrix outgrows cache). The single most favourable
-measurement of the whole spike (an early mean-of-reps probe,
-batch 16, venv NumPy) was 2.21 ms/frame ⇒ 13.2 s/min VM ⇒
-**~199 s phone for 3 min** — still over the gate.
+im2col matrix outgrows cache). The implementer's single most
+favourable measurement (an early mean-of-reps probe, batch 16,
+venv NumPy) was 2.21 ms/frame ⇒ 13.2 s/min VM ⇒ **~199 s phone
+for 3 min** — still over the gate. Reviewer re-runs later
+observed a best-ever 1.465 ms/frame (see below), which also
+projects over the gate.
 
 Per-layer profile (venv, batch 16, ms/frame): conv1 0.469,
 conv2 3.444, conv3 0.046, conv4 0.020, conv5 0.014, conv6 0.020,
@@ -123,21 +136,38 @@ dense+sigmoid 0.006; ReLU+BN+pool ≤ 0.301 (conv1), ≤ 0.015 else.
 Conv2 dominates: its im2col form is (128 positions × batch) ×
 (64 taps × 128 in-channels) against only 16 output channels.
 
-FLOP floor (contention-independent): the topology costs
+On the FLOP count (no floor claim): the topology costs
 36,792,320 MACs ≈ 73.6 MFLOP per frame (conv1 and conv2 are
-16,777,216 MACs each). At this VM's best measured BLAS peak
-(42.5 GFLOPS), a hypothetical 100%-efficient implementation
-needs ≥ 1.73 ms/frame ⇒ ≥ 10.4 s/min VM ⇒ **≥ ~156 s phone for a
-3-minute song** — the ~90 s gate cannot be met by pure-NumPy
-matmul on this VM under the PRD's ×5 rule, regardless of tuning.
+16,777,216 MACs each). An earlier draft of this memo attempted
+to derive a floor from that count and the implementer's
+measured BLAS peak of 42.5 GFLOPS; that argument is withdrawn.
+The reviewer re-measured the BLAS peak on the same VM/venv at
+82.4 GFLOPS (2048³, best of 5), 84.1 GFLOPS (4096³) and
+101.8 GFLOPS (1024³), showing the 42.5 GFLOPS figure was taken
+under VM contention and is contention-dependent, and one of
+the reviewer's end-to-end benchmark re-runs measured
+1.465 ms/frame, below the earlier draft's claimed floor —
+disproving it. No floor claim is therefore made. The NO-GO
+rests on the empirical measurements alone: the implementer's
+reproducible 4.166 ms/frame ⇒ 375 s phone for a 3-minute song;
+the best-ever observed 1.465 ms/frame ⇒ ~132 s; the reviewer's
+four re-runs project (best-per-run) 131.8 s, 153.2 s, 237.0 s
+and 407.9 s; and crossing the ~90 s gate would require a
+sustained 1.000 ms/frame end-to-end. All observed
+configurations project over the gate.
 
 ### Go / No-Go
 
 - D5 size gate: **GO** (1,537,288 bytes ≤ 2 MB).
 - DSP-4 neural pitch (and with it DSP-5 Tier 2, which D4 ties to
-  the spike): **NO-GO** for this branch. Best phone projection
-  375.0 s (reproducible benchmark) / ~199 s (best single probe) /
-  ~156 s (theoretical floor) — all > ~90 s.
+  the spike): **NO-GO** for this branch. Phone projections:
+  375.0 s (implementer's reproducible benchmark,
+  4.166 ms/frame) / ~199 s (implementer's best single probe) /
+  ~132 s (best-ever observed, reviewer's 1.465 ms/frame re-run;
+  reviewer's four best-per-run projections 131.8 s, 153.2 s,
+  237.0 s, 407.9 s) — all > ~90 s, and the gate would require a
+  sustained 1.000 ms/frame end-to-end. No floor claim is made;
+  the verdict rests on these measurements.
 - Per the PRD, DSP-4 is descoped to a separate TFLite proposal
   and DSP-5 ships Tier 1 only. `nn.py` and `crepe_tiny.npz` land
   anyway: nn.py is unit-tested infrastructure the contracts
