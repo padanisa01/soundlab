@@ -261,7 +261,12 @@ or the plan changes.
   proxy URL comes from summary.proxy.url in local.properties. Without
   a key (debug) or proxy URL (release) the summary card is hidden and
   everything else works. Summaries are cached per findings+profile for the
-  session and re-fetched when the profile changes.
+  session and re-fetched when the profile changes. App Check: release
+  builds install the Play Integrity provider; debug builds install the
+  App Check debug provider (a `debugImplementation` artifact, absent
+  from release builds), so a sideloaded debug build can use the proxy
+  once its debug token is registered in the Firebase Console — the
+  key stays in Secret Manager either way.
 - Python: `audiofx/diagnose.py` (checks + `tune_up_fixes`), `audiofx/repair.py`
   (11 fix ops), wired into `render_chain` via a shared `_apply_op`
   dispatcher; `diagnose_file` / `tune_up_build` / `tune_up_converge`

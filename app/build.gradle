@@ -150,6 +150,10 @@ dependencies {
     implementation 'com.google.android.gms:play-services-ads:23.0.0'
     // Play Integrity App Check for the summary proxy (ticket AM-1).
     implementation 'com.google.firebase:firebase-appcheck-playintegrity:18.0.0'
+    // App Check debug provider, debug builds only: lets a sideloaded
+    // debug build pass proxy attestation with a console-registered
+    // debug token. Never packaged into release builds.
+    debugImplementation 'com.google.firebase:firebase-appcheck-debug:18.0.0'
     // Remote Config for ads + paid-feature gating.
     implementation 'com.google.firebase:firebase-config:21.6.0'
     // Analytics for product usage.

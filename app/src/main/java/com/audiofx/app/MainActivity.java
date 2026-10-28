@@ -718,13 +718,28 @@ public class MainActivity extends Activity {
 
         // App Check for the summary proxy (ticket AM-1): defensive, since
         // Firebase may not be configured on this build machine. Never crash.
+        // Debug builds use the App Check debug provider so a sideloaded
+        // build can pass attestation with a console-registered debug
+        // token (the Groq key stays server-side in Secret Manager);
+        // release builds always use Play Integrity. The debug artifact
+        // is a debugImplementation, so it is not in release APKs at all.
         try {
             if (com.google.firebase.FirebaseApp.initializeApp(this) != null) {
+                com.google.firebase.appcheck.AppCheckProviderFactory
+                        appCheckFactory;
+                if (BuildConfig.DEBUG) {
+                    appCheckFactory =
+                            com.google.firebase.appcheck.debug
+                                    .DebugAppCheckProviderFactory
+                                    .getInstance();
+                } else {
+                    appCheckFactory =
+                            com.google.firebase.appcheck.playintegrity
+                                    .PlayIntegrityAppCheckProviderFactory
+                                    .getInstance();
+                }
                 com.google.firebase.appcheck.FirebaseAppCheck.getInstance()
-                        .installAppCheckProviderFactory(
-                                com.google.firebase.appcheck.playintegrity
-                                        .PlayIntegrityAppCheckProviderFactory
-                                        .getInstance());
+                        .installAppCheckProviderFactory(appCheckFactory);
             }
         } catch (Exception ignored) {
         }
