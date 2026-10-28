@@ -972,5 +972,25 @@ class TestPitchShiftEngineDispatch(unittest.TestCase):
                     "chain.wav")
 
 
+class TestMasteringPresetParamsBridge(unittest.TestCase):
+    """mastering_preset_params bridge accessor (DSP-2/U3): the Java
+    Master dialog expands a preset through this accessor and persists
+    the full numbers in the mastering op params."""
+
+    def test_presets_match_mastering_preset_params(self):
+        from audiofx import mastering as mastering_mod
+        for name in ("gentle", "punch", "broadcast"):
+            parsed = json.loads(
+                android_bridge.mastering_preset_params(name))
+            bands, dyn_eq = mastering_mod.preset_params(name)
+            self.assertEqual(parsed, {"bands": bands, "dyn_eq": dyn_eq})
+            self.assertEqual(len(parsed["bands"]), 4)
+            self.assertEqual(len(parsed["dyn_eq"]), 3)
+
+    def test_unknown_preset_raises(self):
+        with self.assertRaises(ValueError):
+            android_bridge.mastering_preset_params("bogus")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2894,7 +2894,9 @@ public class MainActivity extends Activity {
             passedBody.addView(row);
         }
 
-        // Root: scrollable report with a sticky Tune Up bar.
+        // Root: scrollable report with a sticky action bar: Tune Up
+        // (when anything is fixable) beside Master (always offered;
+        // mastering is an action, not a fix).
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         android.widget.ScrollView scroll = new android.widget.ScrollView(this);
@@ -2902,18 +2904,20 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         scroll.addView(list);
         root.addView(scroll);
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setPadding(pad, (int) (8 * dp), pad, (int) (4 * dp));
         if (hasFixable) {
-            LinearLayout bar = new LinearLayout(this);
-            bar.setPadding(pad, (int) (8 * dp), pad, (int) (4 * dp));
             diagTuneUpBtn = new Button(this);
             diagTuneUpBtn.setBackgroundResource(R.drawable.bg_apply);
             diagTuneUpBtn.setTextColor(getColor(R.color.sl_txt));
             diagTuneUpBtn.setTextSize(15.5f);
             diagTuneUpBtn.setTypeface(null, android.graphics.Typeface.BOLD);
             diagTuneUpBtn.setPadding(0, (int) (13 * dp), 0, (int) (13 * dp));
-            diagTuneUpBtn.setLayoutParams(new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT));
+            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            tlp.setMargins(0, 0, (int) (6 * dp), 0);
+            diagTuneUpBtn.setLayoutParams(tlp);
             diagTuneUpBtn.setOnClickListener(v -> {
                 final String profile = currentTuneUpProfile();
                 if (!isProfileVisible(profile)) {
@@ -2925,10 +2929,26 @@ public class MainActivity extends Activity {
                 runTuneUp(findingsJson, profile);
             });
             bar.addView(diagTuneUpBtn);
-            root.addView(bar);
         } else {
             diagTuneUpBtn = null;
         }
+        Button masterBtn = new Button(this);
+        masterBtn.setText("Master");
+        masterBtn.setBackgroundResource(R.drawable.bg_ghost);
+        masterBtn.setTextColor(getColor(R.color.sl_teal2));
+        masterBtn.setTextSize(15.5f);
+        masterBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+        masterBtn.setPadding(0, (int) (13 * dp), 0, (int) (13 * dp));
+        masterBtn.setLayoutParams(new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        masterBtn.setOnClickListener(v -> {
+            if (diagDialog != null) {
+                diagDialog.dismiss();
+            }
+            showMasterDialog(findingsJson);
+        });
+        bar.addView(masterBtn);
+        root.addView(bar);
 
         diagDialog = new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
                 .setTitle("Diagnosis")
@@ -3675,6 +3695,259 @@ public class MainActivity extends Activity {
                         tuneWave.clearProgress();
                     }
                     setStatus("Tune-up failed: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    /** Master dialog (DSP-2): opened from the Diagnose report's
+     * Master button. Engine segmented control (Classic | Multiband,
+     * preselected from pref dsp_mastering_default) plus a preset
+     * spinner (gentle / punch / broadcast); the preset drives only
+     * the Multiband path. */
+    private void showMasterDialog(final String findingsJson) {
+        final float dp = getResources().getDisplayMetrics().density;
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (20 * dp);
+        root.setPadding(pad, pad, pad, 0);
+
+        TextView engineLbl = new TextView(this);
+        engineLbl.setText("Engine");
+        engineLbl.setTextColor(getColor(R.color.sl_mut));
+        engineLbl.setTextSize(12.5f);
+        root.addView(engineLbl);
+
+        LinearLayout engineRow = new LinearLayout(this);
+        engineRow.setOrientation(LinearLayout.HORIZONTAL);
+        engineRow.setBackgroundResource(R.drawable.bg_sel_chip_empty);
+        int segPad = (int) (3 * dp);
+        engineRow.setPadding(segPad, segPad, segPad, segPad);
+        LinearLayout.LayoutParams engineRowLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        engineRowLp.topMargin = (int) (6 * dp);
+        final TextView segClassic = segmentTextView("Classic");
+        final TextView segMultiband = segmentTextView("Multiband");
+        engineRow.addView(segClassic);
+        engineRow.addView(segMultiband);
+        root.addView(engineRow, engineRowLp);
+        final String[] engineSel = {"multiband".equals(
+                getSharedPreferences("soundlab", MODE_PRIVATE)
+                        .getString("dsp_mastering_default", "classic"))
+                ? "multiband" : "classic"};
+        final Runnable paintEngine = () -> {
+            paintSegment(segClassic, "classic".equals(engineSel[0]));
+            paintSegment(segMultiband, "multiband".equals(engineSel[0]));
+        };
+        paintEngine.run();
+        segClassic.setOnClickListener(v -> {
+            engineSel[0] = "classic";
+            paintEngine.run();
+        });
+        segMultiband.setOnClickListener(v -> {
+            engineSel[0] = "multiband";
+            paintEngine.run();
+        });
+
+        TextView presetLbl = new TextView(this);
+        presetLbl.setText("Preset (Multiband)");
+        presetLbl.setTextColor(getColor(R.color.sl_mut));
+        presetLbl.setTextSize(12.5f);
+        LinearLayout.LayoutParams presetLblLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        presetLblLp.topMargin = (int) (14 * dp);
+        root.addView(presetLbl, presetLblLp);
+
+        final Spinner presetSp = new Spinner(this);
+        final String[] presets = {"gentle", "punch", "broadcast"};
+        ArrayAdapter<String> presetAd = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, presets);
+        presetAd.setDropDownViewResource(
+                android.R.layout.simple_spinner_dropdown_item);
+        presetSp.setAdapter(presetAd);
+        presetSp.setMinimumHeight((int) (52 * dp));
+        root.addView(presetSp, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        final AlertDialog dialog = new AlertDialog.Builder(
+                this, R.style.Theme_SoundLab_Dialog)
+                .setTitle("Master")
+                .setView(root)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Apply", null)
+                .create();
+        dialog.show();
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    String preset =
+                            presets[presetSp.getSelectedItemPosition()];
+                    dialog.dismiss();
+                    if ("multiband".equals(engineSel[0])) {
+                        runMasterMultiband(preset);
+                    } else {
+                        runMasterClassic(findingsJson);
+                    }
+                });
+    }
+
+    /** Classic Master: apply the same eq_balance + loudness ops Tune
+     * Up applies for the current profile, with Tune Up's own params.
+     * The fixes are derived by the bridge's tune_up_build -- the exact
+     * reduction Tune Up runs (tune_up_fixes: detection-derived params
+     * merged with the profile's overrides, de-duplicated, in Tune Up
+     * order) -- filtered to the Classic mastering pair, then applied
+     * one op at a time through applyLibraryOp, eq_balance first (Tune
+     * Up order) with loudness chained from its onRendered. No params
+     * are invented here; when neither fix is in the Tune Up set, tone
+     * and loudness are already on target and nothing is applied. */
+    private void runMasterClassic(final String findingsJson) {
+        final String entryId = currentEntryId;
+        final LibraryDb.Track track = getSelectedTrack();
+        if (entryId == null || track == null) {
+            setStatus("Open or record audio first.");
+            return;
+        }
+        if (!checkTrackUnlocked(track.id)) {
+            return;
+        }
+        if (!trackHasAudio(track)) {
+            setStatus("The selected track has no audio to master.");
+            return;
+        }
+        final String trackId = track.id;
+        if (diagTrackId != null && !diagTrackId.equals(trackId)) {
+            setStatus("Track changed since diagnosis. Diagnose again first.");
+            return;
+        }
+        final String profile = currentTuneUpProfile();
+        setBusy(true);
+        setStatus("Mastering...");
+        new Thread(() -> {
+            JSONObject eqFix = null;
+            JSONObject loudFix = null;
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                String tuneUpJson = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("tune_up_build", findingsJson, profile)
+                        .toString();
+                JSONArray fixes = new JSONObject(tuneUpJson)
+                        .getJSONObject("params").getJSONArray("fixes");
+                for (int i = 0; i < fixes.length(); i++) {
+                    JSONObject fix = fixes.optJSONObject(i);
+                    if (fix == null) {
+                        continue;
+                    }
+                    if ("eq_balance".equals(fix.optString("op"))) {
+                        eqFix = fix;
+                    } else if ("loudness".equals(fix.optString("op"))) {
+                        loudFix = fix;
+                    }
+                }
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    setStatus("Master failed: " + e.getMessage());
+                });
+                return;
+            }
+            final JSONObject eq = eqFix;
+            final JSONObject loud = loudFix;
+            runOnUiThread(() -> {
+                setBusy(false);
+                if (eq == null && loud == null) {
+                    setStatus("Master (Classic): tone and loudness are "
+                            + "already on target -- nothing to apply.");
+                    return;
+                }
+                final JSONObject eqParams = eq != null
+                        ? eq.optJSONObject("params") : null;
+                final JSONObject loudParams = loud != null
+                        ? loud.optJSONObject("params") : null;
+                final String eqJson = eqParams != null
+                        ? eqParams.toString() : "{}";
+                final String loudJson = loudParams != null
+                        ? loudParams.toString() : "{}";
+                final String eqLabel = eq != null
+                        ? eq.optString("label", "Balance tone") : "";
+                final String loudLabel = loud != null
+                        ? loud.optString("label", "Normalize loudness") : "";
+                if (eq != null && loud != null) {
+                    applyLibraryOp("eq_balance", eqJson, eqLabel,
+                            "Mastering (Classic)...", "EQ applied.",
+                            () -> applyLibraryOp("loudness", loudJson,
+                                    loudLabel, "Mastering (Classic)...",
+                                    "Master applied (Classic).", null));
+                } else if (eq != null) {
+                    applyLibraryOp("eq_balance", eqJson, eqLabel,
+                            "Mastering (Classic)...",
+                            "Master applied (Classic).", null);
+                } else {
+                    applyLibraryOp("loudness", loudJson, loudLabel,
+                            "Mastering (Classic)...",
+                            "Master applied (Classic).", null);
+                }
+            });
+        }).start();
+    }
+
+    /** Multiband Master: expand the preset through the bridge
+     * (mastering_preset_params) and apply ONE mastering op whose
+     * params persist the full numeric lists, per the DSP-2 contract:
+     * {"preset": name, "bands": [...], "dyn_eq": [...]}. */
+    private void runMasterMultiband(final String preset) {
+        final String entryId = currentEntryId;
+        final LibraryDb.Track track = getSelectedTrack();
+        if (entryId == null || track == null) {
+            setStatus("Open or record audio first.");
+            return;
+        }
+        if (!checkTrackUnlocked(track.id)) {
+            return;
+        }
+        if (!trackHasAudio(track)) {
+            setStatus("The selected track has no audio to master.");
+            return;
+        }
+        final String trackId = track.id;
+        if (diagTrackId != null && !diagTrackId.equals(trackId)) {
+            setStatus("Track changed since diagnosis. Diagnose again first.");
+            return;
+        }
+        setBusy(true);
+        setStatus("Mastering...");
+        new Thread(() -> {
+            try {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(this));
+                }
+                String presetJson = Python.getInstance()
+                        .getModule("audiofx.android_bridge")
+                        .callAttr("mastering_preset_params", preset)
+                        .toString();
+                JSONObject expanded = new JSONObject(presetJson);
+                JSONObject params = new JSONObject();
+                params.put("preset", preset);
+                params.put("bands", expanded.getJSONArray("bands"));
+                params.put("dyn_eq", expanded.getJSONArray("dyn_eq"));
+                final String paramsJson = params.toString();
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    applyLibraryOp("mastering", paramsJson,
+                            "Master (Multiband, " + preset + ")",
+                            "Mastering (Multiband)...",
+                            "Master applied (Multiband, " + preset + ").",
+                            null);
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    setBusy(false);
+                    setStatus("Master failed: " + e.getMessage());
                 });
             }
         }).start();

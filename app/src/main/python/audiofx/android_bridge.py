@@ -661,6 +661,20 @@ def diagnose_file(input_wav_path, quality_engine="off"):
     return json.dumps({"findings": findings, "quality": quality})
 
 
+def mastering_preset_params(name):
+    """Explicit numeric params for a mastering preset, as a JSON
+    string: {"bands": [4 x {...}], "dyn_eq": [3 x {...}]}.
+
+    Thin accessor over mastering.preset_params for the Java Master
+    dialog (DSP-2): the dialog expands the preset at apply time and
+    persists the full numbers in the mastering op params, so
+    redefining a preset never changes an old render. Raises
+    ValueError on an unknown preset name.
+    """
+    bands, dyn_eq = _mastering.preset_params(name)
+    return json.dumps({"bands": bands, "dyn_eq": dyn_eq})
+
+
 def tonic_file(input_wav_path):
     """Tonic + swara notation for a WAV file. Returns JSON (see
     tonic.notate_song). Runs on a background thread from Java; a
