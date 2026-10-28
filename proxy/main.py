@@ -4,9 +4,9 @@ The Groq API key lives here, server-side, behind Firebase App Check, so it
 never ships inside the APK. The app POSTs its findings to /summarize and
 gets back plain-language text, nothing else.
 
-Request and response handling is a port of
-app/src/main/python/audiofx/summarize.py (build_request_body,
-parse_response): same model, same system prompt, same <think> stripping.
+Prompt building and response parsing live here, server-side: the
+model, the system prompt and the <think> stripping. The app carries
+no LLM client code at all.
 """
 
 import json

@@ -743,30 +743,6 @@ public class MainActivity extends Activity {
             }
         } catch (Exception ignored) {
         }
-        if (BuildConfig.DEBUG) {
-            // The debug secret's only SDK channel is logcat, which the
-            // user's build terminal does not have: write it to a text
-            // file instead. Write IMMEDIATELY (the file's existence
-            // proves this build is running; its content carries
-            // diagnostics when the secret is not there yet), force the
-            // secret's creation with a token request (it is persisted
-            // before the exchange, so this works while unregistered),
-            // and re-write on token completion and on a few retries.
-            new Thread(this::writeAppCheckDebugTokenFile).start();
-            try {
-                com.google.firebase.appcheck.FirebaseAppCheck.getInstance()
-                        .getAppCheckToken(false)
-                        .addOnCompleteListener(task -> new Thread(
-                                this::writeAppCheckDebugTokenFile).start());
-            } catch (Exception ignored) {
-            }
-            for (long delayMs : new long[]{5000L, 15000L, 45000L}) {
-                mainHandler.postDelayed(
-                        () -> new Thread(
-                                this::writeAppCheckDebugTokenFile).start(),
-                        delayMs);
-            }
-        }
         // Start the summary proxy's Cloud Run instance warming now,
         // so a Diagnose tap minutes later does not pay the ~14 s
         // cold start inside the summary request itself.
@@ -2890,13 +2866,12 @@ public class MainActivity extends Activity {
         int pad = (int) (16 * dp);
         list.setPadding(pad, pad, pad, (int) (8 * dp));
 
-        // LLM executive summary (Groq/Qwen). Fills in async; the card is
-        // hidden entirely when neither a Groq key (debug) nor the summary
-        // proxy (release) is configured.
+        // LLM executive summary (Groq/Qwen via the proxy). Fills in
+        // async; the card is hidden entirely when the summary proxy
+        // is not configured.
         diagFindingsJson = findingsJson;
         currentDiagQualityJson = quality == null ? null : quality.toString();
-        final boolean summaryAvailable = !groqApiKey().isEmpty()
-                || !summaryProxyUrl().isEmpty();
+        final boolean summaryAvailable = !summaryProxyUrl().isEmpty();
         LinearLayout summaryCard = new LinearLayout(this);
         summaryCard.setOrientation(LinearLayout.VERTICAL);
         summaryCard.setBackgroundResource(R.drawable.bg_card);
@@ -3389,30 +3364,14 @@ public class MainActivity extends Activity {
         fetchDiagSummary();
     }
 
-    /** Fill the executive summary, from cache or Groq/Qwen. The HTTP is
-     * done here with HttpsURLConnection (Android's system trust store);
-     * Python only builds the request body and parses the response. */
-    /** Trimmed Groq key, or "" when not configured. */
-    private String groqApiKey() {
-        String k = BuildConfig.GROQ_API_KEY;
-        return k == null ? "" : k.trim();
-    }
-
-    /** Summary proxy URL from BuildConfig (release builds), or "" when not
-     * configured. The proxy calls Groq server-side so the API key never
+    /** Summary proxy URL from BuildConfig, or "" when not
+     * configured. The proxy calls Groq server-side, so no API key
      * ships in the APK (ticket AM-1). */
     private String summaryProxyUrl() {
         String u = BuildConfig.SUMMARY_PROXY_URL;
         u = u == null ? "" : u.trim();
-        // local.properties carries the BARE Cloud Run service URL
-        // (that is what deploy.sh prints and what proxy/README.md
-        // documents); the endpoint route is /summarize. Normalize
-        // here so every caller POSTs to the route: posting to the
-        // service root returns Flask's 404, which was the actual
-        // cause of "Summary unavailable" once App Check worked --
-        // found 2026-10-28 via the status dialog (Proxy HTTP 404,
-        // token present). The AM-1 smoke test missed it because it
-        // curled /summarize directly.
+        // local.properties carries the bare Cloud Run service URL;
+        // the endpoint route is /summarize.
         if (!u.isEmpty()) {
             while (u.endsWith("/")) {
                 u = u.substring(0, u.length() - 1);
@@ -3424,41 +3383,9 @@ public class MainActivity extends Activity {
         return u;
     }
 
-    /** Current App Check token for the summary proxy, or "" when Firebase
-     * is unconfigured or the token fetch fails. Blocks up to 10 seconds:
-     * call from a worker thread only. */
-    /** Status of the most recent LLM summary call (stage reached,
-     * HTTP code, proxy/Groq error body, elapsed time, exception).
-     * The summary path runs on background threads and its failures
-     * otherwise reach only logcat, which the user's build terminal
-     * does not have -- so the status is kept here and, in debug
-     * builds, shown in a copyable dialog when a summary fetch fails
-     * (see showSummaryStatusDialog). NEVER holds the App Check
-     * token or the API key themselves (AM-6): presence/length only. */
-    private volatile String lastSummaryStatus = null;
-
-    private void noteSummaryStatus(String status) {
-        lastSummaryStatus = status;
-    }
-
-    /** Read a failed response's body (bounded), for the status. */
-    private static String readErrorBody(
-            java.net.HttpURLConnection conn) {
-        try {
-            java.io.InputStream es = conn.getErrorStream();
-            if (es == null) {
-                return "";
-            }
-            try (java.util.Scanner s = new java.util.Scanner(es, "UTF-8")
-                    .useDelimiter("\\A")) {
-                String b = s.hasNext() ? s.next() : "";
-                return b.length() > 500 ? b.substring(0, 500) : b;
-            }
-        } catch (Exception ignored) {
-            return "";
-        }
-    }
-
+    /** Current App Check token for the summary proxy, or "" when
+     * Firebase is unconfigured or the token fetch fails. Blocks up to
+     * 10 seconds: call from a worker thread only. */
     private String appCheckToken() {
         try {
             com.google.android.gms.tasks.Task<
@@ -3469,156 +3396,9 @@ public class MainActivity extends Activity {
                     com.google.android.gms.tasks.Tasks.await(task, 10,
                             java.util.concurrent.TimeUnit.SECONDS);
             String t = token == null ? null : token.getToken();
-            if (t == null || t.isEmpty()) {
-                noteSummaryStatus("App Check token fetch returned"
-                        + " EMPTY (exchange failed or no provider"
-                        + " installed); the proxy will reject the"
-                        + " request.");
-            }
             return t == null ? "" : t;
-        } catch (Exception e) {
-            noteSummaryStatus("App Check token fetch FAILED: "
-                    + e.getClass().getSimpleName() + ": "
-                    + e.getMessage());
+        } catch (Exception ignored) {
             return "";
-        }
-    }
-
-    /** Debug builds only: write the App Check debug secret to
-     * appcheck-debug-token.txt in the public Download folder,
-     * because the user's build terminal has no logcat -- the SDK's
-     * only channel for it.
-     * The secret is the UUID the debug provider persists in its own
-     * SharedPreferences store; find it by scanning the app's
-     * shared_prefs for that store / the DEBUG_SECRET key, falling
-     * back to a sole UUID-shaped candidate. Treat the file like a
-     * password: register the token in the Firebase Console, then
-     * delete the file. */
-    private void writeAppCheckDebugTokenFile() {
-        try {
-            java.io.File prefsDir = new java.io.File(
-                    getApplicationInfo().dataDir, "shared_prefs");
-            java.io.File[] prefFiles = prefsDir.listFiles();
-            if (prefFiles == null) {
-                return;
-            }
-            java.util.regex.Pattern uuid = java.util.regex.Pattern.compile(
-                    "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
-                            + "-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
-            String found = null;
-            StringBuilder candidates = new StringBuilder();
-            for (java.io.File f : prefFiles) {
-                if (!f.getName().endsWith(".xml")) {
-                    continue;
-                }
-                java.io.BufferedReader br = new java.io.BufferedReader(
-                        new java.io.FileReader(f));
-                StringBuilder sb = new StringBuilder();
-                String line;
-                while ((line = br.readLine()) != null) {
-                    sb.append(line);
-                }
-                br.close();
-                String content = sb.toString();
-                boolean isDebugStore =
-                        f.getName().contains("appcheck.debug")
-                                || content.contains("DEBUG_SECRET");
-                java.util.regex.Matcher m = uuid.matcher(content);
-                while (m.find()) {
-                    candidates.append(f.getName()).append(": ")
-                            .append(m.group()).append('\n');
-                    if (isDebugStore) {
-                        found = m.group();
-                    }
-                }
-            }
-            if (found == null) {
-                String[] lines = candidates.toString().split("\n");
-                if (lines.length == 1 && lines[0].contains(": ")) {
-                    found = lines[0].substring(
-                            lines[0].indexOf(": ") + 2);
-                }
-            }
-            String text;
-            if (found != null) {
-                text = "App Check debug token for Audio Mechanic"
-                        + " (register it in Firebase Console > App Check"
-                        + " > com.audiofx.app > Manage debug tokens,"
-                        + " then delete this file):\n" + found + "\n";
-            } else {
-                // No secret yet: make the file its own bug report.
-                StringBuilder diag = new StringBuilder();
-                diag.append("Debug token not identified yet.\n");
-                try {
-                    diag.append("Firebase apps initialized: ")
-                            .append(com.google.firebase.FirebaseApp
-                                    .getApps(this).size()).append('\n');
-                } catch (Exception e) {
-                    diag.append("FirebaseApp.getApps failed: ")
-                            .append(e).append('\n');
-                }
-                diag.append("shared_prefs files seen:");
-                for (java.io.File f : prefFiles) {
-                    diag.append("\n  ").append(f.getName());
-                }
-                diag.append("\nUUID-shaped candidates:\n")
-                        .append(candidates.toString());
-                text = diag.toString();
-            }
-            writeTokenTextFile(text);
-        } catch (Exception ignored) {
-        }
-    }
-
-    /** Write the debug-token text to BOTH the public Download folder
-     * (via MediaStore: no permission needed, API 29+; any previous
-     * copy is deleted first so re-launches replace rather than pile
-     * up "(1)" duplicates) AND the app-specific external folder, so
-     * there is always a copy to find. */
-    private void writeTokenTextFile(String text) {
-        final String name = "appcheck-debug-token.txt";
-        if (android.os.Build.VERSION.SDK_INT >= 29) {
-            try {
-                android.content.ContentResolver cr = getContentResolver();
-                android.net.Uri collection =
-                        android.provider.MediaStore.Downloads
-                                .EXTERNAL_CONTENT_URI;
-                cr.delete(collection,
-                        android.provider.MediaStore.Downloads.DISPLAY_NAME
-                                + "=?",
-                        new String[]{name});
-                android.content.ContentValues cv =
-                        new android.content.ContentValues();
-                cv.put(android.provider.MediaStore.Downloads.DISPLAY_NAME,
-                        name);
-                cv.put(android.provider.MediaStore.Downloads.MIME_TYPE,
-                        "text/plain");
-                cv.put(android.provider.MediaStore.Downloads.RELATIVE_PATH,
-                        android.os.Environment.DIRECTORY_DOWNLOADS);
-                android.net.Uri uri = cr.insert(collection, cv);
-                if (uri != null) {
-                    java.io.OutputStream os = cr.openOutputStream(
-                            uri, "wt");
-                    if (os != null) {
-                        os.write(text.getBytes(
-                                java.nio.charset.StandardCharsets.UTF_8));
-                        os.close();
-                    }
-                }
-            } catch (Exception ignored) {
-            }
-        }
-        try {
-            java.io.File outDir = getExternalFilesDir(null);
-            if (outDir == null) {
-                outDir = getFilesDir();
-            }
-            java.io.File out = new java.io.File(outDir, name);
-            java.io.PrintWriter pw = new java.io.PrintWriter(
-                    new java.io.FileWriter(out, false));
-            pw.print(text);
-            pw.close();
-        } catch (Exception ignored) {
         }
     }
 
@@ -3631,58 +3411,27 @@ public class MainActivity extends Activity {
                 + (qualityJson == null ? "" : qualityJson.hashCode());
     }
 
-    /** Async Groq summary; the callback runs on the UI thread with "" on
-     * any failure. Shared by the dialog fetch and the cache warmer. */
+    /** Async proxy summary; the callback runs on the UI thread with
+     * "" on any failure. Shared by the dialog fetch and the cache
+     * warmer. */
     private interface SummaryCallback {
         void onDone(String summary);
     }
 
     private void requestDiagSummary(final String findingsJson,
             final String profile, final String qualityJson,
-            final String apiKey, final SummaryCallback cb) {
+            final SummaryCallback cb) {
         new Thread(() -> {
             String summary = "";
             try {
                 String proxyUrl = summaryProxyUrl();
                 if (!proxyUrl.isEmpty()) {
-                    // Release builds: the proxy calls Groq server-side; no
-                    // API key or Authorization header leaves the device.
                     summary = postProxySummary(proxyUrl, findingsJson,
                             profile, qualityJson);
-                } else {
-                    if (!Python.isStarted()) {
-                        Python.start(new AndroidPlatform(this));
-                    }
-                    String body = Python.getInstance()
-                            .getModule("audiofx.android_bridge")
-                            .callAttr("summarize_request_body", findingsJson,
-                                    profile).toString();
-                    if (body.isEmpty()) {
-                        noteSummaryStatus("summarize_request_body"
-                                + " returned EMPTY (findings JSON not"
-                                + " a non-empty list); no call was made.");
-                    }
-                    if (!body.isEmpty()) {
-                        String resp = postGroqSummary(body, apiKey);
-                        if (!resp.isEmpty()) {
-                            summary = Python.getInstance()
-                                    .getModule("audiofx.android_bridge")
-                                    .callAttr("summarize_parse", resp).toString();
-                            if (summary == null || summary.isEmpty()) {
-                                noteSummaryStatus("Groq (direct)"
-                                        + " responded but"
-                                        + " summarize_parse extracted"
-                                        + " no summary text.");
-                            }
-                        }
-                    }
                 }
             } catch (Exception e) {
                 android.util.Log.w("AudioMechanic",
                         "summarize: failed: " + e);
-                noteSummaryStatus("Summary flow FAILED before a call"
-                        + " completed: " + e.getClass().getSimpleName()
-                        + ": " + e.getMessage());
             }
             final String out = summary;
             runOnUiThread(() -> cb.onDone(out));
@@ -3695,8 +3444,7 @@ public class MainActivity extends Activity {
      * report and profile. */
     private void warmDiagSummaryCache(final String findingsJson,
             final String qualityJson) {
-        final String apiKey = groqApiKey();
-        if (apiKey.isEmpty() && summaryProxyUrl().isEmpty()) {
+        if (summaryProxyUrl().isEmpty()) {
             return;
         }
         final String profile = currentTuneUpProfile();
@@ -3705,7 +3453,7 @@ public class MainActivity extends Activity {
         if (diagSummaryCache.containsKey(cacheKey)) {
             return;
         }
-        requestDiagSummary(findingsJson, profile, qualityJson, apiKey,
+        requestDiagSummary(findingsJson, profile, qualityJson,
                 summary -> {
             if (summary == null || summary.isEmpty()) {
                 return;
@@ -3720,13 +3468,12 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** Fill the executive summary, from cache or Groq/Qwen. */
+    /** Fill the executive summary, from cache or the proxy. */
     private void fetchDiagSummary() {
         if (diagSummaryTv == null || diagFindingsJson == null) {
             return;
         }
-        final String apiKey = groqApiKey();
-        if (apiKey.isEmpty() && summaryProxyUrl().isEmpty()) {
+        if (summaryProxyUrl().isEmpty()) {
             return;
         }
         final String profile = currentTuneUpProfile();
@@ -3740,8 +3487,8 @@ public class MainActivity extends Activity {
             tv.setText(hit);
             return;
         }
-        tv.setText("Summarizing your report…");
-        requestDiagSummary(findingsJson, profile, qualityJson, apiKey,
+        tv.setText("Summarizing your report\u2026");
+        requestDiagSummary(findingsJson, profile, qualityJson,
                 summary -> {
             if (summary != null && !summary.isEmpty()) {
                 diagSummaryCache.put(cacheKey, summary);
@@ -3751,139 +3498,13 @@ public class MainActivity extends Activity {
             if (!stale) {
                 tv.setText((summary != null && !summary.isEmpty()) ? summary
                         : "Summary unavailable.");
-                if ((summary == null || summary.isEmpty())
-                        && BuildConfig.DEBUG) {
-                    // Debug builds: surface WHY, in a copyable text
-                    // box -- the failure otherwise reaches only
-                    // logcat, which the user's terminal lacks.
-                    showSummaryStatusDialog();
-                }
             }
         });
-    }
-
-    private boolean summaryStatusDialogShowing = false;
-
-    /** Debug builds only: show the last summary call's recorded
-     * status (stage, HTTP code, error body, elapsed time) in a
-     * dialog with a selectable text box and a Copy button, so the
-     * user can read or paste the exact failure without logcat. */
-    private void showSummaryStatusDialog() {
-        if (summaryStatusDialogShowing || isFinishing()
-                || isDestroyed()) {
-            return;
-        }
-        String status = lastSummaryStatus;
-        if (status == null || status.isEmpty()) {
-            status = "No status was recorded for the last summary"
-                    + " call.";
-        }
-        summaryStatusDialogShowing = true;
-        try {
-            float dp = getResources().getDisplayMetrics().density;
-            LinearLayout root = new LinearLayout(this);
-            root.setOrientation(LinearLayout.VERTICAL);
-            root.setPadding((int) (20 * dp), (int) (8 * dp),
-                    (int) (20 * dp), 0);
-            TextView label = new TextView(this);
-            label.setText("The last LLM summary call reported:");
-            label.setTextColor(getColor(R.color.sl_mut));
-            label.setTextSize(12.5f);
-            root.addView(label, new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT));
-            final EditText statusEt = new EditText(this);
-            statusEt.setText(status);
-            statusEt.setTextSize(13.5f);
-            statusEt.setTextIsSelectable(true);
-            statusEt.setKeyListener(null);
-            statusEt.setGravity(Gravity.TOP | Gravity.START);
-            statusEt.setMinHeight((int) (96 * dp));
-            LinearLayout.LayoutParams etLp =
-                    new LinearLayout.LayoutParams(
-                            LinearLayout.LayoutParams.MATCH_PARENT,
-                            LinearLayout.LayoutParams.WRAP_CONTENT);
-            etLp.topMargin = (int) (10 * dp);
-            root.addView(statusEt, etLp);
-            final String statusText = status;
-            AlertDialog dialog = new AlertDialog.Builder(this,
-                    R.style.Theme_SoundLab_Dialog)
-                    .setTitle("Summary call status")
-                    .setView(root)
-                    .setNegativeButton("Close", null)
-                    .setPositiveButton("Copy", (d, w) -> {
-                        android.content.ClipboardManager cm =
-                                (android.content.ClipboardManager)
-                                        getSystemService(
-                                                CLIPBOARD_SERVICE);
-                        if (cm != null) {
-                            cm.setPrimaryClip(
-                                    android.content.ClipData
-                                            .newPlainText(
-                                                    "Summary call status",
-                                                    statusText));
-                            Toast.makeText(this, "Status copied",
-                                    Toast.LENGTH_SHORT).show();
-                        }
-                    })
-                    .create();
-            dialog.setOnDismissListener(
-                    d -> summaryStatusDialogShowing = false);
-            dialog.show();
-        } catch (Exception ignored) {
-            summaryStatusDialogShowing = false;
-        }
     }
 
     /* Standing logging rule (AM-6): never concatenate secrets, tokens, or
      * user identity into a log string. API keys may live in memory and
      * request headers only. HTTP failures are logged by status code alone. */
-    /** POST the summary request to Groq; returns the response body or "". */
-    private String postGroqSummary(String bodyJson, String apiKey) {
-        java.net.HttpURLConnection conn = null;
-        try {
-            java.net.URL url = new java.net.URL(
-                    "https://api.groq.com/openai/v1/chat/completions");
-            conn = (java.net.HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("POST");
-            conn.setRequestProperty("Content-Type", "application/json");
-            conn.setRequestProperty("Authorization", "Bearer " + apiKey);
-            conn.setDoOutput(true);
-            conn.setConnectTimeout(20000);
-            conn.setReadTimeout(20000);
-            byte[] body = bodyJson.getBytes(
-                    java.nio.charset.StandardCharsets.UTF_8);
-            conn.setFixedLengthStreamingMode(body.length);
-            try (java.io.OutputStream os = conn.getOutputStream()) {
-                os.write(body);
-            }
-            int code = conn.getResponseCode();
-            if (code != 200) {
-                android.util.Log.w("AudioMechanic",
-                        "summarize: Groq HTTP " + code);
-                noteSummaryStatus("Groq (direct) HTTP " + code + ": "
-                        + readErrorBody(conn));
-                return "";
-            }
-            try (java.io.InputStream is = conn.getInputStream();
-                 java.util.Scanner s = new java.util.Scanner(is, "UTF-8")
-                         .useDelimiter("\\A")) {
-                return s.hasNext() ? s.next() : "";
-            }
-        } catch (Exception e) {
-            android.util.Log.w("AudioMechanic",
-                    "summarize: request failed: " + e);
-            noteSummaryStatus("Groq (direct) request FAILED: "
-                    + e.getClass().getSimpleName() + ": "
-                    + e.getMessage());
-            return "";
-        } finally {
-            if (conn != null) {
-                conn.disconnect();
-            }
-        }
-    }
-
     /** Fire-and-forget POST with an empty token at startup: the
      * proxy rejects it (401, no quota consumed, no Groq call), but
      * the request spins up its Cloud Run instance, whose cold start
@@ -3921,13 +3542,12 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    /** POST the summary request to the proxy (ticket AM-1); returns the
-     * "summary" from {"summary"} or "". No Authorization header and no API
-     * key: the proxy identifies the app by its App Check token. */
+    /** POST the summary request to the proxy (ticket AM-1); returns
+     * the "summary" from {"summary"} or "". No Authorization header
+     * and no API key: the proxy identifies the app by its App Check
+     * token. */
     private String postProxySummary(String proxyUrl, String findingsJson,
             String profile, String qualityJson) {
-        final long t0 = System.currentTimeMillis();
-        String tokenNote = "token not fetched";
         java.net.HttpURLConnection conn = null;
         try {
             java.net.URL url = new java.net.URL(proxyUrl);
@@ -3937,11 +3557,9 @@ public class MainActivity extends Activity {
             conn.setDoOutput(true);
             conn.setConnectTimeout(20000);
             // 60 s read: a cold Cloud Run instance costs ~14 s before
-            // the handler even runs (measured 2026-10-28), then token
-            // verification, the Firestore quota transaction and the
-            // Groq generation still have to fit. At 20 s the first
-            // request after idle routinely timed out and the report
-            // showed "Summary unavailable".
+            // the handler even runs, then token verification, the
+            // Firestore quota transaction and the Groq generation
+            // still have to fit.
             conn.setReadTimeout(60000);
             org.json.JSONObject payload = new org.json.JSONObject();
             payload.put("findings_json", findingsJson);
@@ -3966,10 +3584,7 @@ public class MainActivity extends Activity {
                 } catch (Exception ignored) {
                 }
             }
-            String acToken = appCheckToken();
-            tokenNote = acToken.isEmpty() ? "token EMPTY"
-                    : "token present (" + acToken.length() + " chars)";
-            payload.put("app_check_token", acToken);
+            payload.put("app_check_token", appCheckToken());
             byte[] body = payload.toString().getBytes(
                     java.nio.charset.StandardCharsets.UTF_8);
             conn.setFixedLengthStreamingMode(body.length);
@@ -3977,42 +3592,22 @@ public class MainActivity extends Activity {
                 os.write(body);
             }
             int code = conn.getResponseCode();
-            long elapsed = System.currentTimeMillis() - t0;
             if (code != 200) {
                 android.util.Log.w("AudioMechanic",
                         "summarize: proxy HTTP " + code);
-                noteSummaryStatus("Proxy HTTP " + code + " after "
-                        + elapsed + " ms [" + tokenNote + "]: "
-                        + readErrorBody(conn));
                 return "";
             }
             String resp;
             try (java.io.InputStream is = conn.getInputStream();
-                 java.util.Scanner s = new java.util.Scanner(is, "UTF-8")
+                 java.util.Scanner sc = new java.util.Scanner(is, "UTF-8")
                          .useDelimiter("\\A")) {
-                resp = s.hasNext() ? s.next() : "";
+                resp = sc.hasNext() ? sc.next() : "";
             }
-            String summary = new org.json.JSONObject(resp)
+            return new org.json.JSONObject(resp)
                     .optString("summary", "");
-            if (summary == null || summary.isEmpty()) {
-                noteSummaryStatus("Proxy HTTP 200 after " + elapsed
-                        + " ms [" + tokenNote + "] but no summary in"
-                        + " the response: " + (resp.length() > 300
-                        ? resp.substring(0, 300) : resp));
-                return "";
-            }
-            noteSummaryStatus("Proxy OK: HTTP 200 in " + elapsed
-                    + " ms [" + tokenNote + "], summary "
-                    + summary.length() + " chars.");
-            return summary;
         } catch (Exception e) {
             android.util.Log.w("AudioMechanic",
                     "summarize: proxy request failed: " + e);
-            noteSummaryStatus("Proxy request FAILED after "
-                    + (System.currentTimeMillis() - t0) + " ms ["
-                    + tokenNote + "]: "
-                    + e.getClass().getSimpleName() + ": "
-                    + e.getMessage());
             return "";
         } finally {
             if (conn != null) {

@@ -691,19 +691,6 @@ def list_tune_up_profiles():
     return json.dumps(_diagnose.list_profiles())
 
 
-def summarize_request_body(findings_json, profile):
-    """Groq request-body JSON for the executive summary (HTTP is done in
-    Java). Returns "" when the findings are unusable."""
-    from audiofx import summarize as _summarize
-    return _summarize.build_request_body(findings_json, profile)
-
-
-def summarize_parse(response_json):
-    """Extract the summary text from a Groq response body, or ""."""
-    from audiofx import summarize as _summarize
-    return _summarize.parse_response(response_json)
-
-
 def tune_up_converge(input_path, findings_json, profile="podcast",
                      progress=None, max_passes=3, output_path=None,
                      cache_key=None):
