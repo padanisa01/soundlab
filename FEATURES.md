@@ -295,6 +295,40 @@ or the plan changes.
   `{"findings": [...], "quality": {...}|null}` (findings inside
   unchanged; `diagnose.analyze` findings are byte-identical in every
   mode). The score is advisory only: Tune Up does not consume it.
+- **DSP Lab tab** (DSP-6): Settings is now a two-tab dialog
+  (Soundcheck | DSP Lab); the Soundcheck tab's four cue switches are
+  unchanged. The DSP Lab tab holds the five engine defaults, each
+  stored live in prefs on change (segmented rows extend the
+  `bindCueSwitch` pattern) and each defaulting to the pre-upgrade
+  behavior: Pitch shift engine (Classic | Formant, pref
+  `dsp_pitch_engine`), Notation engine (Classic | Neural, pref
+  `notation_engine`), Quality score (Off | Estimate, pref
+  `quality_engine` — no DNSMOS segment in v1), Mastering default
+  (Classic | Multiband, pref `dsp_mastering_default`), and a
+  True-peak detection switch (pref `mic_truepeak`, default off).
+  The Notation row keeps its Neural segment visible but DISABLED —
+  dimmed and not tappable, with a note that the neural engine is not
+  included in this build (the DSP-0 spike projected 132–408 s of
+  phone inference per 3-minute song against the ~90 s gate, so the
+  neural engine was descoped; PRD amendment A2). In-context
+  controls complete the picture: the pitch dialog gains a
+  Classic | Formant segmented control preselected from
+  `dsp_pitch_engine`, written into the pitch op's params as
+  `"engine"` at Convert time; the Diagnose report gains a Master
+  button beside Tune Up, opening a dialog (engine preselected from
+  `dsp_mastering_default`, plus a gentle / punch / broadcast preset
+  spinner) whose Classic path applies the same `eq_balance` +
+  `loudness` ops Tune Up applies — same fixes, same params, via
+  `applyLibraryOp` — and whose Multiband path applies one
+  `mastering` op with the preset expanded to full numeric params
+  through the `mastering_preset_params` bridge accessor; the
+  true-peak switch is applied live to `AudioRecorder` /
+  `LiveFxMonitor` and re-applied at every capture start alongside
+  the Limiter choice; and when the Quality score is set to
+  Estimate, the Diagnose report's score hero shows a "Quality score
+  (estimate)" line with the SIG / BAK / OVRL values (the diagnose
+  cache key includes the quality engine, so switching engines never
+  serves a stale report).
 
 ### Tonic and notation
 - **Notation** is per track: the Notation icon button sits in the
