@@ -112,6 +112,25 @@ LANDING_MIN_SEC = 0.05
 #: tuned) and is what separates "touched and held" from
 #: "passed through".
 LANDING_MAX_SLOPE_CENTS_PER_SEC = 1400.0
+#: Drone profile: the tanpura is steady and the voice is not, so
+#: the per-bin median magnitude spectrum over windows of about
+#: this length is (mostly) the drone alone. track_melody can gate
+#: frames against it so the drone's Sa/Pa partials stop capturing
+#: the tracker during soft phrases.
+DRONE_PROFILE_WIN_SEC = 5.0
+#: Drone gate strength: a bin whose frame magnitude is at or below
+#: ALPHA x profile is fully explained by the steady profile.
+#: Tuned on the golden set (21-combo sweep, 2026-10-28): weaker
+#: settings barely moved the drone-capture metrics; stronger ones
+#: (4.0) inflated off-raga spill. 3.0 was the weakest setting that
+#: cut P<->S bigrams materially on both full-metric songs while
+#: holding sequence/Dice at or above the ungated baseline.
+DRONE_GATE_ALPHA = 3.0
+#: Drone gate floor: minimum per-bin gain. A genuinely held Sa/Pa
+#: NOTE is steady too and sits on the drone's own partials, so
+#: bins are attenuated, never erased (and a sung note is normally
+#: louder than the drone, so it clears the profile by far anyway).
+DRONE_GATE_FLOOR = 0.30
 
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A",
                "A#", "B"]
@@ -273,15 +292,80 @@ def detect_tonic(samples, sample_rate):
 # Melody tracking (salience) and notation
 # ---------------------------------------------------------------------------
 
-def track_melody(x, sample_rate):
-    """Per-frame salience f0 track. Returns (times, f0s, rms) with
-    NaN on unvoiced frames, median-smoothed across voiced runs."""
-    sr = sample_rate
+def _melody_fft_shape(sr):
+    """(n_win, hop, n_fft) for the melody tracker. Shared by
+    track_melody and drone_profile so both live in the same bin
+    space by construction."""
     n_win = int(MELODY_WIN_SEC * sr)
     hop = int(MELODY_HOP_SEC * sr)
     n_fft = 1
     while n_fft < 4 * n_win:
         n_fft *= 2
+    return n_win, hop, n_fft
+
+
+def drone_profile(samples, sample_rate):
+    """Median magnitude spectrum of the file's steady content.
+
+    The file is cut into DRONE_PROFILE_WIN_SEC windows; each
+    window's spectrum is the mean of its frame magnitude spectra
+    (same window/FFT as track_melody, strided -- ~50 spectra per
+    window is plenty for a mean), and the profile is the per-bin
+    MEDIAN across windows. A voice note occupies a minority of
+    windows, so the median at its bins stays low; the tanpura,
+    present in every window, sets the profile. Returns an array
+    of length n_fft//2 + 1, or None when the file holds fewer
+    than two full windows (no profile -> no gating), following
+    the denoise module's learn-from-the-file, floor-gated
+    discipline.
+    """
+    _need_numpy()
+    x = _np.asarray(samples, dtype=_np.float64)
+    sr = sample_rate
+    n_win, hop, n_fft = _melody_fft_shape(sr)
+    win_len = int(DRONE_PROFILE_WIN_SEC * sr)
+    n_chunks = len(x) // win_len
+    if n_chunks < 2:
+        return None
+    win = _np.hanning(n_win)
+    step = max(hop, win_len // 50)
+    specs = []
+    for c in range(n_chunks):
+        base = c * win_len
+        acc = None
+        cnt = 0
+        for s in range(base, base + win_len - n_win + 1, step):
+            mag = _np.abs(_np.fft.rfft(x[s:s + n_win] * win, n_fft))
+            acc = mag if acc is None else acc + mag
+            cnt += 1
+        if cnt:
+            specs.append(acc / cnt)
+    if len(specs) < 2:
+        return None
+    return _np.median(_np.stack(specs), axis=0)
+
+
+def _drone_gains(mag, profile):
+    """Per-bin gain of one frame against the drone profile:
+    1 - ALPHA * profile / mag, clipped to [FLOOR, 1]. Bins the
+    steady profile alone explains sink to the floor; bins the
+    voice drives well above the profile pass through ~untouched.
+    """
+    return _np.clip(
+        1.0 - DRONE_GATE_ALPHA * profile
+        / _np.maximum(mag, 1e-12),
+        DRONE_GATE_FLOOR, 1.0)
+
+
+def track_melody(x, sample_rate, profile=None):
+    """Per-frame salience f0 track. Returns (times, f0s, rms) with
+    NaN on unvoiced frames, median-smoothed across voiced runs.
+    When `profile` (see drone_profile) is given, each frame's
+    magnitude spectrum is gated against it before peak picking,
+    so the steady drone's partials are attenuated in every frame.
+    """
+    sr = sample_rate
+    n_win, hop, n_fft = _melody_fft_shape(sr)
     freqs = _np.fft.rfftfreq(n_fft, 1.0 / sr)
     n_frames = max(0, (len(x) - n_win) // hop)
     rms = _np.array([_np.sqrt(_np.mean(x[i * hop:i * hop + n_win] ** 2))
@@ -302,6 +386,8 @@ def track_melody(x, sample_rate):
             continue
         mag = _np.abs(_np.fft.rfft(x[n * hop:n * hop + n_win] * win,
                                    n_fft))
+        if profile is not None:
+            mag = mag * _drone_gains(mag, profile)
         mid = mag[1:-1]
         pk = _np.flatnonzero((mid > mag[:-2]) & (mid >= mag[2:])
                              & (mid > mag.max() * 0.02)) + 1
@@ -706,7 +792,8 @@ def notate_song(samples, sample_rate):
     if tonic is None:
         return None
     x = _np.asarray(samples, dtype=_np.float64)
-    times, f0s, rms = track_melody(x, sample_rate)
+    times, f0s, rms = track_melody(
+        x, sample_rate, profile=drone_profile(x, sample_rate))
     sa = tonic["sa_hz"]
     info = dict(tonic)
     info["swaras"] = _swara_stats(times, f0s, rms, sa)
