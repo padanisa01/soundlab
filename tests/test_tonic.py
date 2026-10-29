@@ -114,6 +114,49 @@ def test_missing_fundamental_sa_wins_over_pa():
     assert abs(res["sa_hz"] - sa) < sa * 0.015, res
 
 
+def test_subharmonic_phantom_challenged_up():
+    """x3 phantom (related-candidate challenge): the true stack
+    is at 294 Hz, but a 98 Hz phantom -- a whisper of a
+    fundamental plus two unshared partials -- borrows the 294
+    series and wins (measured pre-fix: detect returned 98.02).
+    The challenge must raise the tonic to the true 294."""
+    parts = [(294.0 * k, a) for k, a in
+             ((1, .50), (2, .30), (3, .20), (4, .12))]
+    parts += [(98.0, .06), (196.0, .16), (392.0, .12)]
+    res = tonic.detect_tonic(_render_parts(parts), SR)
+    assert res is not None
+    assert abs(res["sa_hz"] - 294.0) < 294.0 * 0.015, res
+    print("subharmonic challenge ok:", res)
+
+
+def test_hum_lock_range_check_raises_tonic():
+    """Range cross-check: a constant 73.3 Hz (Sa/3) hum stack wins
+    the LTAS vote over a 220 Hz song -- the Brovabarama geometry,
+    where detection is locked onto interference with a strong
+    fundamental of its own, so the challenge cannot fire. The
+    melody track never sings near 73 Hz, so notate_song must
+    raise the tonic by the x3 multiplier onto the sung Sa."""
+    melody = np.concatenate([_note(SA * 2 ** (s / 12), 0.45)
+                             for s in [0, 2, 4, 5, 7, 9, 11, 12]])
+    t = np.arange(len(melody)) / SR
+    hum = np.zeros(len(melody))
+    for k, a in ((1, .50), (2, .12), (3, .25), (4, .18)):
+        hum += a * np.sin(2 * np.pi * (SA / 3) * k * t)
+    x = melody + hum
+    det = tonic.detect_tonic(x, SR)
+    assert det is not None
+    # The hum stack wins detection itself (a strong fundamental:
+    # no challenge), at Sa/3.
+    assert abs(det["sa_hz"] - SA / 3) < 3.0, det
+    info = tonic.notate_song(x, SR)
+    assert info is not None
+    assert abs(info["sa_hz"] - SA) < 4.0, info
+    assert info["note"].startswith("A")  # coherent derived fields
+    names = {s["name"] for s in info["swaras"]}
+    assert {"R", "G", "m", "Pa", "D", "N"} <= names, names
+    print("range check ok:", det["sa_hz"], "->", info["sa_hz"])
+
+
 def test_true_sa_with_strong_pa_not_flipped():
     """A true Sa WITH its fundamental, plus a strong Pa partial,
     must stay Sa (the Durga configuration)."""
@@ -251,4 +294,6 @@ if __name__ == "__main__":
     test_missing_fundamental_sa_wins_over_pa()
     test_true_sa_with_strong_pa_not_flipped()
     test_lower_pa_winner_flips_up_to_sa()
+    test_subharmonic_phantom_challenged_up()
+    test_hum_lock_range_check_raises_tonic()
     print("ALL TONIC TESTS PASS")

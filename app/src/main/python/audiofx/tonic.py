@@ -71,6 +71,56 @@ TONIC_FIFTH_DOWN_INDEP = 0.70
 #: true Sa (Sa a fourth above it). Same two bars.
 TONIC_FOURTH_UP_RATIO = 0.75
 TONIC_FOURTH_UP_INDEP = 0.70
+#: Related-candidate challenge: after the traps, the winner W may
+#: still be a relative of the true Sa (a subharmonic phantom
+#: propped up by the true series, or a fifth-relative the
+#: fifth-down trap adjudicated wrongly). W is only challenged
+#: when its own fundamental is weak -- at most this fraction of
+#: its strongest partial -- the signature of a borrowed series. A
+#: winner with a real fundamental is never challenged (measured
+#: fundamental fractions: AmbaVani 0.38, the synthetic drone 1.00,
+#: Brovabarama's 60 Hz interference stack 1.00; the challenged
+#: winners: Anandanatana 0.07, the missing-fundamental cases 0.00).
+TONIC_CHALLENGE_FUND_FRAC = 0.25
+#: Octave / twelfth challengers (2W, 3W) and downward challengers
+#: (W/2, W/3, W/1.5): the challenger's full series must reach
+#: this fraction of the winner's. (Measured: Anandanatana x2 =
+#: 1.01 fires; Brovabarama x3 = 0.57, Anandanatana x3 = 0.65 and
+#: the drone's W/2 = 0.86 stay.)
+TONIC_CHALLENGE_MIN_RATIO = 0.95
+#: An octave / twelfth challenger must also OWN the winner's
+#: score: the winner's partials NOT shared with the challenger
+#: (its _indep score at that multiple) may be at most this
+#: fraction of its full series -- a phantom's score is mostly
+#: borrowed. (Anandanatana x2: 0.37; a synthetic x3 phantom:
+#: 0.22.)
+TONIC_CHALLENGE_INDEP_MAX = 0.45
+#: A downward challenger must have a fundamental of its own: at
+#: least this fraction of its strongest partial. Subharmonic
+#: phantoms fail it (Devi W/2: 0.01, W/1.5: 0.01, W/3: 0.02; the
+#: missing-fundamental fixture: 0.00).
+TONIC_CHALLENGE_FUND_PRESENCE = 0.25
+#: The fifth challenger (3W/2) re-litigates the pair the
+#: fifth-down trap just decided, so it must clear BOTH bars by a
+#: wide margin: full series >= TONIC_CHALLENGE_FIFTH_RATIO x the
+#: winner's, and independent partials (the challenger's odd
+#: partials vs the winner's non-Pa partials) >=
+#: TONIC_CHALLENGE_FIFTH_INDEP x. Measured: Anandanatana -- the
+#: trap's false positive -- clears both at 1.22 / 1.25 and flips
+#: back; Devi (1.17 / 1.11), the missing-fundamental fixture
+#: (1.19 / 1.15) and the lower-Pa fixture (1.21 / 1.13) each fail
+#: at least one bar and stay.
+TONIC_CHALLENGE_FIFTH_RATIO = 1.20
+TONIC_CHALLENGE_FIFTH_INDEP = 1.20
+#: Range cross-check (notate_song): Sa lives near the bottom of
+#: the sung range, so a detected tonic sitting more than this
+#: many semitones below the melody track's low percentile is
+#: implausible -- a subharmonic / interference lock, not a Sa
+#: (Brovabarama: Sa 60 Hz against a track bottom of 137 Hz). It
+#: is raised by the smallest related multiplier (x1.5, x2, x3)
+#: that brings it inside the band (x3 when none reaches).
+TONIC_RANGE_MAX_BELOW_SEMITONES = 7.0
+TONIC_RANGE_LOW_PCT = 5.0
 #: Melody tracker: window/hop and f0 search range.
 MELODY_WIN_SEC = 0.046
 MELODY_HOP_SEC = 0.010
@@ -174,6 +224,16 @@ def note_of(f):
             cents)
 
 
+def _tonic_dict(sa, score, runner_up_rel):
+    """The detect_tonic return dict for a chosen Sa. Shared with
+    notate_song's range cross-check, so an adjusted tonic reports
+    coherent derived fields (concert note name / cents)."""
+    note, cents = note_of(sa)
+    return {"sa_hz": round(float(sa), 2), "note": note,
+            "cents": cents, "score": round(float(score), 3),
+            "runner_up_rel": round(float(runner_up_rel), 3)}
+
+
 def detect_tonic(samples, sample_rate):
     """Tonic (Sa) of a performance. Returns a dict or None.
 
@@ -238,11 +298,60 @@ def detect_tonic(samples, sample_rate):
             wi4 = _indep_score(freqs, mag, w2, 4)
             if wi4 > 0 and ti4 >= TONIC_FOURTH_UP_INDEP * wi4:
                 best_f, best_s = t4, ts4
+    # Related-candidate challenge: with a weak fundamental (see
+    # TONIC_CHALLENGE_FUND_FRAC) the winner's series may be
+    # borrowed from a relative -- the true Sa above it at 2W / 3W
+    # / 3W/2, or a real fundamental below it at W/2, W/3, W/1.5
+    # that the walk-down could not reach (it only moves to listed
+    # candidates). Each challenger must clear the bars for its
+    # relation; among those that clear, the highest full-series
+    # score wins.
+    w3 = _refine_f0(freqs, mag, best_f)
+    ws3 = _series_score(freqs, mag, w3)
+    fund_w = _at(freqs, mag, w3)
+    max_partial_w = max(_at(freqs, mag, k * w3)
+                        for k in range(1, TONIC_N_HARM + 1))
+    if ws3 > 0 and max_partial_w > 0 \
+            and fund_w <= TONIC_CHALLENGE_FUND_FRAC * max_partial_w:
+        best_ch = None
+        for mult in (3.0, 2.0, 1.5, 2.0 / 3.0, 0.5, 1.0 / 3.0):
+            cand = w3 * mult
+            if not TONIC_F0_LO <= cand <= TONIC_F0_HI:
+                continue
+            cand = _refine_f0(freqs, mag, cand)
+            if not TONIC_F0_LO <= cand <= TONIC_F0_HI:
+                continue
+            cs = _series_score(freqs, mag, cand)
+            if mult == 1.5:
+                if cs < TONIC_CHALLENGE_FIFTH_RATIO * ws3:
+                    continue
+                if _indep_score(freqs, mag, cand, 2) \
+                        < TONIC_CHALLENGE_FIFTH_INDEP \
+                        * _indep_score(freqs, mag, w3, 3):
+                    continue
+            elif mult > 1.0:
+                if cs < TONIC_CHALLENGE_MIN_RATIO * ws3:
+                    continue
+                if _indep_score(freqs, mag, w3, int(mult)) \
+                        > TONIC_CHALLENGE_INDEP_MAX * ws3:
+                    continue
+            else:
+                if cs < TONIC_CHALLENGE_MIN_RATIO * ws3:
+                    continue
+                fund_c = _at(freqs, mag, cand)
+                max_partial_c = max(
+                    _at(freqs, mag, k * cand)
+                    for k in range(1, TONIC_N_HARM + 1))
+                if max_partial_c <= 0 or fund_c \
+                        < TONIC_CHALLENGE_FUND_PRESENCE \
+                        * max_partial_c:
+                    continue
+            if best_ch is None or cs > best_ch[0]:
+                best_ch = (cs, cand)
+        if best_ch is not None:
+            best_s, best_f = best_ch
     sa = _refine_f0(freqs, mag, best_f)
-    note, cents = note_of(sa)
-    return {"sa_hz": round(float(sa), 2), "note": note, "cents": cents,
-            "score": round(float(best_s), 3),
-            "runner_up_rel": round(float(runner_up), 3)}
+    return _tonic_dict(sa, best_s, runner_up)
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +713,35 @@ def notation_text(info):
     return "\n".join(lines)
 
 
+def _range_checked_tonic(tonic, f0s):
+    """Cross-check a detected tonic against the melody track's
+    range: Sa lives near the bottom of the sung range, so a tonic
+    sitting more than TONIC_RANGE_MAX_BELOW_SEMITONES below the
+    track's TONIC_RANGE_LOW_PCT-percentile voiced f0 is a
+    subharmonic / interference lock, not a Sa. Returns the tonic
+    dict unchanged when the tonic sits inside the band; otherwise
+    a rebuilt dict (via _tonic_dict, so the derived fields agree)
+    at the smallest related multiplier (x1.5, x2, x3) that brings
+    it inside the band -- x3 when no multiplier reaches."""
+    voiced = f0s[_np.isfinite(f0s)]
+    if voiced.size == 0:
+        return dict(tonic)
+    low = float(_np.percentile(voiced, TONIC_RANGE_LOW_PCT))
+    sa = float(tonic["sa_hz"])
+    if low <= 0 or sa <= 0:
+        return dict(tonic)
+    band = low / 2.0 ** (TONIC_RANGE_MAX_BELOW_SEMITONES / 12.0)
+    if sa >= band:
+        return dict(tonic)
+    raised = sa * 3.0
+    for mult in (1.5, 2.0, 3.0):
+        if sa * mult >= band:
+            raised = sa * mult
+            break
+    return _tonic_dict(raised, tonic["score"],
+                       tonic["runner_up_rel"])
+
+
 def notate_song(samples, sample_rate):
     """Tonic + predominant-melody notation for a performance.
 
@@ -617,8 +755,8 @@ def notate_song(samples, sample_rate):
         return None
     x = _np.asarray(samples, dtype=_np.float64)
     times, f0s, rms = track_melody(x, sample_rate)
-    sa = tonic["sa_hz"]
-    info = dict(tonic)
+    info = _range_checked_tonic(tonic, f0s)
+    sa = info["sa_hz"]
     info["swaras"] = _swara_stats(times, f0s, rms, sa)
     info["events"] = segment_plateaus(
         times, f0s, _np.isfinite(f0s), sa)
