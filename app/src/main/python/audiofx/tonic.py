@@ -91,6 +91,21 @@ PLATEAU_TOLERANCE_CENTS = 35.0
 #: External pitch tracks (neural engine): a frame counts as voiced
 #: when its tracker confidence is at least this.
 EXTERNAL_TRACK_MIN_CONF = 0.5
+#: Hysteresis voicing for external tracks: a run must reach
+#: EXTERNAL_TRACK_MIN_CONF to start, but only ends when the
+#: confidence falls below this exit level -- a phrase does not
+#: shatter because the tracker's confidence blinked mid-note.
+EXTERNAL_TRACK_CONF_LOW = 0.35
+#: Unvoiced gaps up to this long between voiced runs are bridged
+#: (freqs interpolated in the cents domain).
+EXTERNAL_TRACK_BRIDGE_SEC = 0.07
+#: Voiced runs shorter than this are tracker blips, not phrases.
+EXTERNAL_TRACK_MIN_RUN_SEC = 0.05
+#: Octave snap for external tracks: a voiced frame sitting within
+#: this many cents of exactly one octave away from its local
+#: median is the tracker's classic octave error and is folded
+#: onto the median's octave.
+EXTERNAL_TRACK_OCTAVE_TOL_CENTS = 60.0
 
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A",
                "A#", "B"]
@@ -629,6 +644,114 @@ def notate_song(samples, sample_rate):
     return info
 
 
+def _runs_of(mask):
+    """(start, end) index pairs of the True runs in a bool array."""
+    runs = []
+    i = 0
+    n = len(mask)
+    while i < n:
+        if not mask[i]:
+            i += 1
+            continue
+        j = i + 1
+        while j < n and mask[j]:
+            j += 1
+        runs.append((i, j))
+        i = j
+    return runs
+
+
+def _external_voiced(times, freqs, confs):
+    """Voicing for an external pitch track, with hysteresis.
+
+    A run starts only when the confidence reaches
+    EXTERNAL_TRACK_MIN_CONF, but continues until it falls below
+    EXTERNAL_TRACK_CONF_LOW. Unvoiced gaps of at most
+    EXTERNAL_TRACK_BRIDGE_SEC between runs are bridged (their
+    freqs are interpolated in the cents domain), and runs shorter
+    than EXTERNAL_TRACK_MIN_RUN_SEC are dropped as blips. Returns
+    (voiced, freqs) with freqs defined wherever voiced is True.
+    """
+    n = len(freqs)
+    valid = _np.isfinite(freqs) & (freqs > 0)
+    voiced = _np.zeros(n, bool)
+    if n == 0 or not valid.any():
+        return voiced, freqs
+    diffs = _np.diff(times)
+    diffs = diffs[diffs > 0]
+    hop = float(_np.median(diffs)) if len(diffs) else MELODY_HOP_SEC
+    cents = _np.full(n, _np.nan)
+    cents[valid] = 1200.0 * _np.log2(freqs[valid])
+    on = False
+    for i in range(n):
+        if not valid[i]:
+            on = False
+        elif on:
+            if confs[i] < EXTERNAL_TRACK_CONF_LOW:
+                on = False
+        elif confs[i] >= EXTERNAL_TRACK_MIN_CONF:
+            on = True
+        voiced[i] = on and valid[i]
+    runs = _runs_of(voiced)
+    for (s0, e0), (s1, _e1) in zip(runs, runs[1:]):
+        if (s1 - e0) * hop <= EXTERNAL_TRACK_BRIDGE_SEC + 1e-9:
+            c0 = cents[e0 - 1]
+            c1 = cents[s1]
+            for k in range(e0, s1):
+                frac = (k - (e0 - 1)) / float(s1 - (e0 - 1))
+                cents[k] = c0 + (c1 - c0) * frac
+            voiced[e0:s1] = True
+    for s, e in _runs_of(voiced):
+        if times[e - 1] - times[s] + hop < \
+                EXTERNAL_TRACK_MIN_RUN_SEC - 1e-9:
+            voiced[s:e] = False
+    out = freqs.copy()
+    conv = voiced & _np.isfinite(cents)
+    out[conv] = 2.0 ** (cents[conv] / 1200.0)
+    return voiced, out
+
+
+def _octave_snap(freqs, voiced):
+    """Fold isolated octave errors in an external track.
+
+    Each voiced frame is compared with the median cents of its
+    voiced neighbours (up to two either side, centre excluded). A
+    frame within EXTERNAL_TRACK_OCTAVE_TOL_CENTS of exactly one
+    octave away from that median is folded onto the median's
+    octave. Genuine octave leaps move together with their
+    neighbours and are untouched (the median of a straddling
+    window lands between the octaves, far from either fold bar).
+    """
+    out = freqs.copy()
+    ok = voiced & _np.isfinite(freqs) & (freqs > 0)
+    if ok.sum() < 3:
+        return out
+    cents = _np.full(len(freqs), _np.nan)
+    cents[ok] = 1200.0 * _np.log2(freqs[ok])
+    padded = _np.pad(cents, (2, 2), mode="constant",
+                     constant_values=_np.nan)
+    wins = _np.stack([padded[i:i + len(cents)] for i in range(5)])
+    wins[2] = _np.nan  # neighbours only, never the frame itself
+    enough = _np.isfinite(wins).sum(axis=0) >= 2
+    med = _np.full(len(cents), _np.nan)
+    if enough.any():
+        import warnings as _warnings
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore")
+            med[enough] = _np.nanmedian(wins[:, enough], axis=0)
+    d = cents - med
+    folded = cents.copy()
+    down = ok & _np.isfinite(d) & (
+        _np.abs(d - 1200.0) <= EXTERNAL_TRACK_OCTAVE_TOL_CENTS)
+    up = ok & _np.isfinite(d) & (
+        _np.abs(d + 1200.0) <= EXTERNAL_TRACK_OCTAVE_TOL_CENTS)
+    folded[down] -= 1200.0
+    folded[up] += 1200.0
+    conv = ok & _np.isfinite(folded)
+    out[conv] = 2.0 ** (folded[conv] / 1200.0)
+    return out
+
+
 def notate_from_track(samples, sample_rate, times, freqs_hz, confs):
     """Tonic + notation from an EXTERNAL f0 track (the neural
     engine's decoded CREPE track) instead of the built-in salience
@@ -637,11 +760,13 @@ def notate_from_track(samples, sample_rate, times, freqs_hz, confs):
     The tonic still comes from the audio (detect_tonic), and the
     segmentation, swara stats and text rendering are exactly
     notate_song's -- only the melody front end differs, which is
-    what makes the Classic-vs-neural comparison clean. A frame is
-    voiced when its confidence is >= EXTERNAL_TRACK_MIN_CONF;
-    unvoiced frames are masked to NaN. Returns the same info dict
-    as notate_song plus "engine": "external", or None when no
-    tonic is found.
+    what makes the Classic-vs-neural comparison clean. The track
+    itself gets the hygiene an external tracker needs: hysteresis
+    voicing with gap bridging and blip dropping
+    (_external_voiced), then an octave snap for the tracker's
+    isolated octave errors (_octave_snap); unvoiced frames are
+    masked to NaN. Returns the same info dict as notate_song plus
+    "engine": "external", or None when no tonic is found.
     """
     _need_numpy()
     tonic = detect_tonic(samples, sample_rate)
@@ -654,8 +779,8 @@ def notate_from_track(samples, sample_rate, times, freqs_hz, confs):
     if n == 0:
         return None
     times, freqs, confs = times[:n], freqs[:n], confs[:n]
-    voiced = ((confs >= EXTERNAL_TRACK_MIN_CONF)
-              & _np.isfinite(freqs) & (freqs > 0))
+    voiced, freqs = _external_voiced(times, freqs, confs)
+    freqs = _octave_snap(freqs, voiced)
     f0s = _np.where(voiced, freqs, _np.nan)
     # Per-frame RMS at each frame time (MELODY_WIN_SEC window): the
     # energy weights _swara_stats expects, the same quantity

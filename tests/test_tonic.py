@@ -97,6 +97,79 @@ def test_notate_from_track_confidence_gates_frames():
     print("confidence gate ok")
 
 
+def _external_from_classic(song):
+    """(times, freqs, confs) for the classic track of _song(),
+    voiced frames at confidence 1.0 -- the clean external track
+    the hygiene tests corrupt in controlled ways."""
+    times, f0s, _rms = tonic.track_melody(song, SR)
+    confs = np.where(np.isfinite(f0s), 1.0, 0.0)
+    freqs = np.where(np.isfinite(f0s), f0s, 0.0)
+    return times, freqs, confs
+
+
+def _syms(info):
+    return [e["sym"] for e in info["events"]]
+
+
+def test_notate_from_track_octave_snap():
+    """Two-frame octave blips in the external track (the CREPE
+    tracker's classic error, up and down) are folded back: the
+    events match the uncorrupted track's events exactly."""
+    song = _song()
+    times, freqs, confs = _external_from_classic(song)
+    clean = tonic.notate_from_track(song, SR, times, freqs, confs)
+    voiced_idx = np.where(confs >= 1.0)[0]
+    mid = voiced_idx[len(voiced_idx) // 2]
+    for factor in (2.0, 0.5):
+        bad = freqs.copy()
+        bad[mid:mid + 2] *= factor
+        fixed = tonic.notate_from_track(song, SR, times, bad, confs)
+        assert _syms(fixed) == _syms(clean), (
+            factor, _syms(fixed), _syms(clean))
+    print("octave snap ok")
+
+
+def test_notate_from_track_hysteresis():
+    """A mid-phrase confidence dip that stays above the exit
+    level (0.4) does not split the phrase, and a short below-exit
+    gap (0.05 s) is bridged -- events match the clean track. A
+    long below-exit gap (0.30 s) is a real break and introduces
+    a rest the clean track does not have."""
+    song = _song()
+    times, freqs, confs = _external_from_classic(song)
+    clean = tonic.notate_from_track(song, SR, times, freqs, confs)
+    assert "-" not in _syms(clean)
+    voiced_idx = np.where(confs >= 1.0)[0]
+    mid = voiced_idx[len(voiced_idx) // 2]
+    dip = confs.copy()
+    dip[mid:mid + 4] = 0.4
+    assert _syms(tonic.notate_from_track(
+        song, SR, times, freqs, dip)) == _syms(clean)
+    gap = confs.copy()
+    gap[mid:mid + 5] = 0.0
+    assert _syms(tonic.notate_from_track(
+        song, SR, times, freqs, gap)) == _syms(clean)
+    brk = confs.copy()
+    brk[mid:mid + 30] = 0.0
+    broken = tonic.notate_from_track(song, SR, times, freqs, brk)
+    assert "-" in _syms(broken), _syms(broken)
+    print("hysteresis ok")
+
+
+def test_notate_from_track_blip_run_dropped():
+    """A lone 3-frame voiced island (0.03 s, below
+    EXTERNAL_TRACK_MIN_RUN_SEC) produces no note events."""
+    song = _song()
+    times, freqs, _confs = _external_from_classic(song)
+    confs = np.full(len(times), 0.1)
+    confs[50:53] = 1.0
+    ext = tonic.notate_from_track(song, SR, times, freqs, confs)
+    assert ext is not None
+    notes = [e for e in ext["events"] if e["sym"] != "-"]
+    assert notes == [], notes
+    print("blip drop ok")
+
+
 def test_lower_pa_winner_flips_up_to_sa():
     """Fourth-up trap (measured on pitch-shifted content): the
     lower Pa (F#3) has a real fundamental + strong 2nd partial and
