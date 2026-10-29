@@ -56,3 +56,25 @@ then the accuracy A/B against Classic on the gamaka fixtures, where
 Classic collapses to ~48% note accuracy and neural has to earn the
 switch. The DSP Lab Notation row's Neural segment stays disabled
 until both pass.
+
+## On-device addendum (2026-10-28, user-run)
+
+The deciding benchmark ran on the user's phone via the debug
+harness (branch dsp/tflite-spike @ 99cc4db):
+
+- Device: motorola moto g stylus 5G - 2024 (Android 35)
+- File: "Durga Lakshmi Saraswati 1", 112.7 s, 11,264 frames
+  (decode+resample 228 ms)
+- Interpreter: 4 threads, float32 model
+- Inference: 44.6 s for 11,164 frames = 3.991 ms/frame
+- Voiced frames (max activation >= 0.5): 90%
+- Projected 3-minute song: 71.8 s vs the 90 s gate: **PASS**
+
+The real phone factor vs this VM is ~4.8x, so the standard x5
+projection (75.3 s) was accurate. The speed condition on the GO
+verdict is satisfied on a mid-range device. Remaining condition:
+the accuracy A/B against Classic on gamaka-heavy material. The
+benchmark harness discards activations; producing neural notation
+needs the pitch-track decode + segmenter handoff, which is the
+next build step. The Neural segment stays disabled until the A/B
+passes.
