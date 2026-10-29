@@ -1203,33 +1203,6 @@ public class MainActivity extends Activity {
         bindEngineSeg(view, R.id.seg_notation_classic,
                 R.id.seg_notation_neural,
                 prefs, "notation_engine", "classic", "neural", false);
-        if (BuildConfig.DEBUG) {
-            // Neural benchmark harness (TFLite spike): the harness
-            // class, the model and the TFLite runtime live in the
-            // debug source set / debugImplementation; this button is
-            // the only trace in the main source set, and release
-            // builds contain none of it.
-            Button benchBtn = new Button(this);
-            benchBtn.setText("Benchmark neural engine (debug)");
-            // Explicit size and colours: a bare default Button in
-            // this theme renders dark-on-dark and is effectively
-            // invisible in the dialog (verified on device -- the
-            // hook code was in the APK but no button could be
-            // seen). Every other programmatic view in this app
-            // sets its colours explicitly for the same reason.
-            float bd = getResources().getDisplayMetrics().density;
-            LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    Math.round(52 * bd));
-            blp.topMargin = Math.round(14 * bd);
-            benchBtn.setLayoutParams(blp);
-            benchBtn.setBackgroundColor(getColor(R.color.sl_teal));
-            benchBtn.setTextColor(getColor(R.color.sl_bg));
-            benchBtn.setTextSize(15);
-            benchBtn.setOnClickListener(v -> startNeuralBenchmark());
-            ((LinearLayout) view.findViewById(
-                    R.id.settings_tab_dsplab)).addView(benchBtn);
-        }
         bindEngineSeg(view, R.id.seg_quality_off, R.id.seg_quality_estimate,
                 prefs, "quality_engine", "off", "proxy", true);
         bindEngineSeg(view, R.id.seg_master_classic,
@@ -1269,11 +1242,28 @@ public class MainActivity extends Activity {
         tabSc.setOnClickListener(v -> showSc.run());
         tabDsp.setOnClickListener(v -> showDsp.run());
         showSc.run();
-        new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
-                .setTitle("Settings")
-                .setView(view)
-                .setPositiveButton("Close", null)
-                .show();
+        AlertDialog.Builder settingsBuilder =
+                new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+                        .setTitle("Settings")
+                        .setView(view)
+                        .setPositiveButton("Close", null);
+        if (BuildConfig.DEBUG) {
+            // Neural benchmark harness (TFLite spike): a neutral
+            // dialog button, NOT a row in the DSP Lab page -- the
+            // page already fills the dialog's content area, and a
+            // row appended there is squashed/clipped at the fold
+            // (verified on device: it rendered as a textless teal
+            // strip). Dialog buttons live outside the content area
+            // and are always reachable. The harness class, model
+            // and TFLite runtime live in the debug source set /
+            // debugImplementation; release builds contain none of
+            // it. Tapping dismisses Settings, then the benchmark
+            // runs (it resolves the current track from activity
+            // state, not from this dialog).
+            settingsBuilder.setNeutralButton("Benchmark neural engine",
+                    (d, w) -> startNeuralBenchmark());
+        }
+        settingsBuilder.show();
     }
 
     private void bindCueSwitch(View root, int id,

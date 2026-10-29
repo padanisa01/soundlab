@@ -353,10 +353,11 @@ or the plan changes.
   neural engine was descoped; PRD amendment A2). A follow-up TFLite
   spike (branch dsp/tflite-spike; memo in tools/spike/) converted
   CREPE-tiny to float32 TFLite with exact parity and a 75 s
-  projection, so debug builds on that branch carry a "Benchmark
-  neural engine (debug)" button in this tab: it times the TFLite
-  interpreter on the current track to settle the on-device number
-  before any engine wiring. The harness, model and TFLite runtime
+  projection, so debug builds on that branch add a "Benchmark
+  neural engine" button to the Settings dialog's button row (a
+  page row gets clipped -- the DSP Lab page fills the dialog): it
+  times the TFLite interpreter on the current track to settle the
+  on-device number before any engine wiring. The harness, model and TFLite runtime
   are debug-only (src/debug + debugImplementation). In-context
   controls complete the picture: the pitch dialog gains a
   Classic | Formant segmented control preselected from
