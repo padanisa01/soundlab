@@ -686,6 +686,38 @@ def tonic_file(input_wav_path):
     return json.dumps(info if info is not None else {})
 
 
+def tonic_track_file(input_wav_path, track_csv_path):
+    """Tonic + swara notation from an EXTERNAL pitch track (the
+    neural engine's decoded CREPE track) for a WAV file. The CSV
+    carries one "t_sec,freq_hz,confidence" row per frame, written
+    by the Java side; tonic.notate_from_track does the rest with
+    the same segmenter, stats and text rendering as tonic_file.
+    Returns JSON (see tonic.notate_song)."""
+    if not os.path.isfile(input_wav_path):
+        raise ValueError("input file not found: %s" % input_wav_path)
+    if not os.path.isfile(track_csv_path):
+        raise ValueError("track file not found: %s" % track_csv_path)
+    times, freqs, confs = [], [], []
+    with open(track_csv_path) as fh:
+        for line in fh:
+            parts = line.strip().split(",")
+            if len(parts) != 3:
+                continue
+            try:
+                t = float(parts[0])
+                f = float(parts[1])
+                c = float(parts[2])
+            except ValueError:
+                continue
+            times.append(t)
+            freqs.append(f)
+            confs.append(c)
+    samples, sample_rate = read_wav_mono(input_wav_path)
+    info = _tonic.notate_from_track(
+        samples, sample_rate, times, freqs, confs)
+    return json.dumps(info if info is not None else {})
+
+
 def list_tune_up_profiles():
     """Profile metadata for the Tune Up recipe picker UI."""
     return json.dumps(_diagnose.list_profiles())

@@ -88,6 +88,9 @@ NOTATE_MIN_REST_SEC = 0.15
 #: Plateau-vs-transit segmenter (PRD F4): a frame sits on a plateau
 #: when it is within this many cents of a swara centre.
 PLATEAU_TOLERANCE_CENTS = 35.0
+#: External pitch tracks (neural engine): a frame counts as voiced
+#: when its tracker confidence is at least this.
+EXTERNAL_TRACK_MIN_CONF = 0.5
 
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A",
                "A#", "B"]
@@ -623,4 +626,54 @@ def notate_song(samples, sample_rate):
     info["events"] = segment_plateaus(
         times, f0s, _np.isfinite(f0s), sa)
     info["text"] = notation_text(info)
+    return info
+
+
+def notate_from_track(samples, sample_rate, times, freqs_hz, confs):
+    """Tonic + notation from an EXTERNAL f0 track (the neural
+    engine's decoded CREPE track) instead of the built-in salience
+    tracker.
+
+    The tonic still comes from the audio (detect_tonic), and the
+    segmentation, swara stats and text rendering are exactly
+    notate_song's -- only the melody front end differs, which is
+    what makes the Classic-vs-neural comparison clean. A frame is
+    voiced when its confidence is >= EXTERNAL_TRACK_MIN_CONF;
+    unvoiced frames are masked to NaN. Returns the same info dict
+    as notate_song plus "engine": "external", or None when no
+    tonic is found.
+    """
+    _need_numpy()
+    tonic = detect_tonic(samples, sample_rate)
+    if tonic is None:
+        return None
+    times = _np.asarray(times, dtype=_np.float64)
+    freqs = _np.asarray(freqs_hz, dtype=_np.float64)
+    confs = _np.asarray(confs, dtype=_np.float64)
+    n = min(len(times), len(freqs), len(confs))
+    if n == 0:
+        return None
+    times, freqs, confs = times[:n], freqs[:n], confs[:n]
+    voiced = ((confs >= EXTERNAL_TRACK_MIN_CONF)
+              & _np.isfinite(freqs) & (freqs > 0))
+    f0s = _np.where(voiced, freqs, _np.nan)
+    # Per-frame RMS at each frame time (MELODY_WIN_SEC window): the
+    # energy weights _swara_stats expects, the same quantity
+    # track_melody reports for the classic front end.
+    x = _np.asarray(samples, dtype=_np.float64)
+    sr = float(sample_rate)
+    half = max(1, int(MELODY_WIN_SEC * sr / 2))
+    rms = _np.zeros(n)
+    for i in range(n):
+        c = int(round(times[i] * sr))
+        a = max(0, c - half)
+        b = min(len(x), c + half)
+        if b > a:
+            rms[i] = float(_np.sqrt(_np.mean(x[a:b] ** 2)))
+    sa = tonic["sa_hz"]
+    info = dict(tonic)
+    info["swaras"] = _swara_stats(times, f0s, rms, sa)
+    info["events"] = segment_plateaus(times, f0s, voiced, sa)
+    info["text"] = notation_text(info)
+    info["engine"] = "external"
     return info

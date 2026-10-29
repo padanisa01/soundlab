@@ -61,6 +61,42 @@ def test_notate_song_events():
           % (len(info["events"]), sorted(names)))
 
 
+def test_notate_from_track_matches_classic_events():
+    """The external-track entry, fed the classic tracker's own
+    track (confidence 1.0 on voiced frames, 0.0 elsewhere), must
+    produce the same events as notate_song -- only the melody
+    front end differs between the two paths."""
+    song = _song()
+    times, f0s, _rms = tonic.track_melody(song, SR)
+    confs = np.where(np.isfinite(f0s), 1.0, 0.0)
+    freqs = np.where(np.isfinite(f0s), f0s, 0.0)
+    ext = tonic.notate_from_track(song, SR, times, freqs, confs)
+    ref = tonic.notate_song(song, SR)
+    assert ext is not None and ref is not None
+    assert ext["engine"] == "external"
+    assert abs(ext["sa_hz"] - ref["sa_hz"]) < 0.01
+    assert ([e["sym"] for e in ext["events"]]
+            == [e["sym"] for e in ref["events"]])
+    names = {s["name"] for s in ext["swaras"]}
+    assert {"R", "G", "m", "Pa", "D", "N"} <= names, names
+    print("external track ok: %d events" % len(ext["events"]))
+
+
+def test_notate_from_track_confidence_gates_frames():
+    """Frames below EXTERNAL_TRACK_MIN_CONF are unvoiced: an
+    all-low-confidence track yields no note events (the tonic is
+    still detected from the audio itself)."""
+    song = _song()
+    times, f0s, _rms = tonic.track_melody(song, SR)
+    freqs = np.where(np.isfinite(f0s), f0s, 0.0)
+    confs = np.full(len(times), 0.1)
+    ext = tonic.notate_from_track(song, SR, times, freqs, confs)
+    assert ext is not None
+    notes = [e for e in ext["events"] if e["sym"] != "-"]
+    assert notes == [], notes
+    print("confidence gate ok")
+
+
 def test_lower_pa_winner_flips_up_to_sa():
     """Fourth-up trap (measured on pitch-shifted content): the
     lower Pa (F#3) has a real fundamental + strong 2nd partial and
