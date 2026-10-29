@@ -88,6 +88,30 @@ NOTATE_MIN_REST_SEC = 0.15
 #: Plateau-vs-transit segmenter (PRD F4): a frame sits on a plateau
 #: when it is within this many cents of a swara centre.
 PLATEAU_TOLERANCE_CENTS = 35.0
+#: Landing notes: a transit gap between two plateaus can still
+#: carry a note the voice dwells on briefly -- the landing notes
+#: of a fast glide-connected descent (Sa' -> Ni -> Dha), which
+#: human notation writes but which never sustain long enough to
+#: plateau. A landing is a run of transit frames within this many
+#: cents of a swara centre (wider than the plateau band: a brief
+#: touch is less centred than a sustained note) ...
+LANDING_TOLERANCE_CENTS = 50.0
+#: ... sustained at least this long (a plateau needs
+#: NOTATE_MIN_NOTE_SEC; a landing is by definition briefer).
+#: Tuned on the golden set: under ~50 ms a "dwell" is
+#: indistinguishable from a slow crossing and the emitter floods
+#: (Devi letters +107% at 30 ms); at 60 ms the genuine 50-60 ms
+#: dwells of the Sa' -> Ni -> Dha figure die with the noise.
+LANDING_MIN_SEC = 0.05
+#: ... whose mean frame-to-frame slope stays under this cap
+#: (cents per second). A dwell's pitch is near-stationary apart
+#: from tracker noise and kampita wobble (mean steps of order
+#: 10 cents/frame); a glide crosses a 100-cent window in
+#: ~30-60 ms, i.e. mean steps of ~20-35 cents/frame. The cap
+#: sits between the two populations (~14 cents/frame; golden-set
+#: tuned) and is what separates "touched and held" from
+#: "passed through".
+LANDING_MAX_SLOPE_CENTS_PER_SEC = 1400.0
 
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A",
                "A#", "B"]
@@ -425,6 +449,57 @@ def _note_events(times, f0s, sa, hop_sec):
              "sym": s} for st, en, s in events]
 
 
+def _find_landings(cents, gs, ge, left_centre, right_centre,
+                   times, hop_sec):
+    """Landing notes inside the transit gap cents[gs:ge] between
+    two plateau anchors centred at left_centre / right_centre, as
+    (start_idx, end_idx, centre_cents) triples in time order.
+
+    A landing is a maximal run of gap frames within
+    LANDING_TOLERANCE_CENTS of one swara centre lying STRICTLY
+    BETWEEN the two bounding centres, sustained >=
+    LANDING_MIN_SEC, whose mean frame-to-frame slope stays under
+    LANDING_MAX_SLOPE_CENTS_PER_SEC. The slope gate is the
+    discriminant within a through-transit: a glide crosses the
+    centre's window at speed, a landing dwells in it. The
+    betweenness rule is the discriminant against everything else:
+    a landing is a step of the transit from the left plateau
+    toward the right one, so between two plateaus of the SAME
+    centre (a kampita phrase's anchors) nothing can land -- an
+    oscillation poking into a neighbouring band and falling back
+    is not a step anywhere. (A run hugging a bounding centre is
+    that plateau's tail, not a landing, and is excluded by the
+    same rule.)
+    """
+    out = []
+    seg = cents[gs:ge]
+    if len(seg) < 2:
+        return out
+    lo = min(left_centre, right_centre)
+    hi = max(left_centre, right_centre)
+    nearest = _np.floor(seg / 100.0 + 0.5) * 100.0
+    near = _np.abs(seg - nearest) <= LANDING_TOLERANCE_CENTS
+    i = 0
+    while i < len(seg):
+        if not near[i]:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(seg) and near[j] and nearest[j] == nearest[i]:
+            j += 1
+        centre = float(nearest[i])
+        if lo < centre < hi \
+                and times[gs + j - 1] - times[gs + i] + hop_sec \
+                >= LANDING_MIN_SEC - 1e-9:
+            steps = _np.abs(_np.diff(seg[i:j]))
+            slope = float(steps.mean()) / hop_sec if len(steps) \
+                else 0.0
+            if slope <= LANDING_MAX_SLOPE_CENTS_PER_SEC:
+                out.append((gs + i, gs + j, centre))
+        i = j
+    return out
+
+
 def _phrase_note_segments(times, cents, ps, pe, hop_sec):
     """Note segments inside one voiced phrase [ps, pe), as
     (start_idx, end_idx, centre_cents) triples covering [ps, pe).
@@ -437,12 +512,16 @@ def _phrase_note_segments(times, cents, ps, pe, hop_sec):
     to the plateau it runs into / out of, and short off-centre or
     other-centre runs between plateaus of one centre are absorbed
     into that centre (so vibrato / kampita around one centre does
-    not fragment). A phrase with no plateau at all is emitted as a
-    single note only when it is a sustained oscillation around one
-    centre (its median sits on the centre, it crosses the centre
-    repeatedly, and it swings beyond plateau tolerance on both
-    sides); anything else (glides alone, short blips) yields no
-    segment.
+    not fragment) -- with one exception: a transit gap between two
+    plateaus can carry LANDING notes, brief low-slope dwells on a
+    third centre (_find_landings), which are emitted as note
+    segments of their own in time order, splitting the transit
+    around them the same midpoint way. A phrase with no plateau
+    at all is emitted as a single note only when it is a sustained
+    oscillation around one centre (its median sits on the centre,
+    it crosses the centre repeatedly, and it swings beyond plateau
+    tolerance on both sides); anything else (glides alone, short
+    blips) yields no segment.
     """
     seg_cents = cents[ps:pe]
     centres = _np.floor(seg_cents / 100.0 + 0.5) * 100.0
@@ -481,20 +560,30 @@ def _phrase_note_segments(times, cents, ps, pe, hop_sec):
                 and crossings >= 2:
             return [(ps, pe, centre)]
         return []
-    groups = []
-    for s, e, c in anchors:
-        if groups and groups[-1][2] == c:
-            groups[-1][1] = e
+    # Note cores in time order: the plateau anchors, merged where
+    # consecutive anchors share a centre, plus any landing notes
+    # found in the transit gaps between consecutive anchors. A
+    # landing between two same-centre anchors breaks their merge:
+    # the phrase really does leave the centre and come back.
+    items = []  # (start_idx, end_idx, centre, is_landing)
+    for ai, (s, e, c) in enumerate(anchors):
+        if ai:
+            pa = anchors[ai - 1]
+            for ls, le, lc in _find_landings(
+                    cents, pa[1], s, pa[2], c, times, hop_sec):
+                items.append((ls, le, lc, True))
+        if items and not items[-1][3] and items[-1][2] == c:
+            items[-1] = (items[-1][0], e, c, False)
         else:
-            groups.append([s, e, c])
+            items.append((s, e, c, False))
     out = []
     start = ps
-    for gi, (gs, ge, c) in enumerate(groups):
-        if gi + 1 < len(groups):
-            end = (ge + groups[gi + 1][0]) // 2
+    for ii, (s0, e0, c0, _landing) in enumerate(items):
+        if ii + 1 < len(items):
+            end = (e0 + items[ii + 1][0]) // 2
         else:
             end = pe
-        out.append((start, end, c))
+        out.append((start, end, c0))
         start = end
     return out
 
@@ -515,8 +604,9 @@ def segment_plateaus(times, freqs_hz, voiced, tonic_hz):
     around its centre exceeds SWARA_FIXED_STD (a sustained
     oscillation, kampita) carries "fixed": False, the existing
     oscillation flag; fixed notes keep the legacy shape exactly.
-    Unvoiced gaps split events; transit frames never become
-    events of their own.
+    Unvoiced gaps split events; plain transit frames never become
+    events of their own, but a transit gap's low-slope dwell on a
+    third centre does -- a landing note (_find_landings).
     """
     _need_numpy()
     times = _np.asarray(times, dtype=_np.float64)

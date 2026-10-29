@@ -202,6 +202,40 @@ class TestSegmentPlateaus(unittest.TestCase):
         self.assertAlmostEqual(notes[0]["start"], 0.0, delta=0.02)
         self.assertAlmostEqual(notes[0]["dur"], 1.2, delta=0.02)
 
+    def test_landing_note_in_descent(self):
+        # Sa' held, a glide down that DWELLS 50 ms on Ni, then
+        # glides on through ni to Dha held: the dwell is a landing
+        # note (human notation writes it), while ni -- crossed at
+        # the same 20 cents/frame glide slope, no dwell -- is not.
+        cents = np.concatenate([
+            np.full(50, 1200.0),
+            np.array([1180.0, 1160.0, 1140.0, 1120.0]),
+            np.full(5, 1100.0),
+            np.array([1080.0, 1060.0, 1040.0, 1020.0, 1000.0,
+                      980.0, 960.0, 940.0, 920.0]),
+            np.full(50, 900.0),
+        ])
+        times, freqs, voiced = _track_from_cents(cents)
+        events = tonic.segment_plateaus(times, freqs, voiced, SA)
+        notes = _notes(events)
+        self.assertEqual([ev["sym"] for ev in notes],
+                         ["S'", "N", "D"], events)
+        self.assertGreaterEqual(notes[1]["dur"], 0.05)
+
+    def test_pure_glide_descent_no_landing(self):
+        # The same Sa' -> Dha descent as one continuous glide
+        # (20 cents/frame, no dwell anywhere): the slope gate
+        # rejects every crossed centre -- endpoints only.
+        cents = np.concatenate([
+            np.full(50, 1200.0),
+            np.arange(1180.0, 900.0, -20.0),
+            np.full(50, 900.0),
+        ])
+        times, freqs, voiced = _track_from_cents(cents)
+        events = tonic.segment_plateaus(times, freqs, voiced, SA)
+        self.assertEqual([ev["sym"] for ev in _notes(events)],
+                         ["S'", "D"], events)
+
     def test_short_blip_no_event(self):
         # 50 ms at R: below NOTATE_MIN_NOTE_SEC, so no event.
         self.assertLess(0.05, tonic.NOTATE_MIN_NOTE_SEC)
