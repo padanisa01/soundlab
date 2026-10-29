@@ -244,6 +244,62 @@ class TestNotateSongUsesSegmenter(unittest.TestCase):
         self.assertGreater(len(info["events"]), 0)
 
 
+def test_drone_gate_suppresses_steady_partial():
+    """Drone profile + gate: a steady drone partial is attenuated
+    to ~the gate floor, while a bin a loud transient note drives
+    well above the profile passes through. The profile peaks at
+    the drone's fundamental. Files too short for two profile
+    windows get no profile (no gating)."""
+    t = np.arange(12 * SR) / SR
+    drone = 0.3 * (np.sin(2 * np.pi * SA * t)
+                   + 0.6 * np.sin(2 * np.pi * 2 * SA * t)
+                   + 0.5 * np.sin(2 * np.pi * 3 * SA * t))
+    prof = tonic.drone_profile(drone, SR)
+    assert prof is not None
+    n_win, _hop, n_fft = tonic._melody_fft_shape(SR)
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / SR)
+    sa_bin = int(np.argmin(np.abs(freqs - SA)))
+    assert abs(freqs[int(np.argmax(prof))] - SA) < freqs[1] * 2
+    win = np.hanning(n_win)
+    # A drone-only frame: the Sa bin is fully explained by the
+    # profile, so its gain sinks to ~the floor.
+    mag_steady = np.abs(np.fft.rfft(
+        drone[SR:SR + n_win] * win, n_fft))
+    g_steady = tonic._drone_gains(mag_steady, prof)
+    assert g_steady[sa_bin] <= tonic.DRONE_GATE_FLOOR + 0.05, \
+        g_steady[sa_bin]
+    # The same frame plus a loud note a fifth above Sa: the note's
+    # fundamental is NOT in the steady profile, so it passes.
+    note = drone[SR:SR + n_win] + 1.2 * np.sin(
+        2 * np.pi * SA * 1.5 * np.arange(n_win) / SR)
+    mag_note = np.abs(np.fft.rfft(note * win, n_fft))
+    g_note = tonic._drone_gains(mag_note, prof)
+    pa_bin = int(np.argmin(np.abs(freqs - SA * 1.5)))
+    assert g_note[pa_bin] >= 0.7, g_note[pa_bin]
+    # Too short for two 5 s windows -> no profile, no gating.
+    assert tonic.drone_profile(drone[:4 * SR], SR) is None
+    print("drone gate ok: steady gain %.2f, note gain %.2f"
+          % (g_steady[sa_bin], g_note[pa_bin]))
+    # End to end with the gate LIVE: a >= 10 s drone + scale song
+    # (long enough for a profile) still notates fully -- the gate
+    # must not eat the melody's own held Sa/Pa notes.
+    semis = [0, 2, 4, 5, 7, 9, 11, 12]
+    long_melody = np.concatenate(
+        [_note(SA * 2 ** (s / 12), 0.7) for s in semis] * 2)
+    tt = np.arange(len(long_melody)) / SR
+    long_drone = 0.16 * (np.sin(2 * np.pi * SA * tt)
+                         + 0.6 * np.sin(2 * np.pi * 2 * SA * tt)
+                         + 0.5 * np.sin(2 * np.pi * 3 * SA * tt)
+                         + 0.4 * np.sin(2 * np.pi * 4 * SA * tt))
+    info = tonic.notate_song(long_melody + long_drone, SR)
+    assert info is not None
+    assert abs(info["sa_hz"] - SA) < 3.0, info["sa_hz"]
+    names = {s["name"] for s in info["swaras"]}
+    assert {"R", "G", "m", "Pa", "D", "N"} <= names, names
+    print("drone gate live notation ok: %d events"
+          % len(info["events"]))
+
+
 if __name__ == "__main__":
     test_detect_tonic_finds_drone()
     test_detect_tonic_silence()
@@ -251,4 +307,5 @@ if __name__ == "__main__":
     test_missing_fundamental_sa_wins_over_pa()
     test_true_sa_with_strong_pa_not_flipped()
     test_lower_pa_winner_flips_up_to_sa()
+    test_drone_gate_suppresses_steady_partial()
     print("ALL TONIC TESTS PASS")
