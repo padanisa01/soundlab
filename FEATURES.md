@@ -397,7 +397,16 @@ or the plan changes.
   subharmonic errors, peak-snapped f0), median-smoothed, quantized to
   the nearest swara relative to Sa and segmented into note events.
   Each histogram peak also gets a width: narrow = fixed note,
-  wide = kampita/gamaka oscillation.
+  wide = kampita/gamaka oscillation. Since 2026-10-29 the tracker
+  first gates each frame's spectrum against a DRONE PROFILE -- the
+  per-bin median magnitude spectrum over ~5 s windows
+  (`drone_profile` in `audiofx/tonic.py`; gains
+  `clip(1 - DRONE_GATE_ALPHA * profile/mag, DRONE_GATE_FLOOR, 1)`
+  with ALPHA 3.0, FLOOR 0.30) -- so the steady tanpura's Sa/Pa
+  partials stop capturing the tracker during soft phrases
+  (golden-set effect: AmbaVani Pa share 14.1% -> 10.2%, reference
+  9.6%; P<->S bigrams down on both full-metric songs). Files too
+  short for two profile windows are not gated.
 - Notation event extraction (DSP-4 segmenter, 2026-10-28): note
   events now come from the plateau-vs-transit segmenter
   (`segment_plateaus` in `audiofx/tonic.py`) on the classic
@@ -410,6 +419,22 @@ or the plan changes.
   (kampita) flag. The segmenter is shared, so the later neural
   engine will feed it the same way; `detect_tonic`, the swara
   stats and the event dict shape are unchanged.
+- Landing notes (2026-10-29): a transit gap between two plateaus
+  can still carry a note the voice dwells on briefly -- the
+  landing notes of fast glide-connected descents (e.g.
+  Sa' -> Ni -> Dha), which human notation writes but which never
+  sustain long enough to plateau. `_find_landings` emits a
+  landing when a run of transit frames stays within
+  `LANDING_TOLERANCE_CENTS` (50) of a centre lying STRICTLY
+  BETWEEN the two bounding plateau centres (betweenness is what
+  keeps kampita pokes into neighbouring bands from reading as
+  dwells) for at least `LANDING_MIN_SEC` (0.05 s) with mean slope
+  under `LANDING_MAX_SLOPE_CENTS_PER_SEC` (1400). Golden-set
+  effect: the Sa'->Ni->Dha motif goes from 0 to 6 occurrences on
+  Devi (reference 19) and 0 to 10 on AmbaVani (reference 37);
+  bigram Dice 60.5 -> 71.2 / 58.0 -> 69.2 for the two songs.
+  Known cost: more note events overall (AmbaVani +31% vs the
+  one-pass reference) and a few points of variant spill.
 - Python: `audiofx/tonic.py` (`detect_tonic`, `notate_song`),
   `tonic_file` in `android_bridge.py`.
 
