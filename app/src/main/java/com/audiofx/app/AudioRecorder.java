@@ -1,5 +1,6 @@
 package com.audiofx.app;
 
+import android.media.AudioDeviceInfo;
 import android.media.AudioRecord;
 
 import java.io.File;
@@ -29,6 +30,7 @@ public class AudioRecorder {
     private boolean wantNs;
     private boolean wantLimiter;
     private boolean wantTruePeak;
+    private AudioDeviceInfo phoneMicDevice;
     private volatile MicCapture.BlockListener blockListener;
     private final CaptureFx fx = new CaptureFx();
 
@@ -88,6 +90,17 @@ public class AudioRecorder {
         wantTruePeak = truePeakOn;
     }
 
+    /**
+     * Set before start(): the built-in phone microphone to prefer
+     * for capture (the mic_phone_mic setting), or null for the
+     * system default input. Stored as a field; start() hands it to
+     * MicCapture, which applies it as the AudioRecord's preferred
+     * input device.
+     */
+    public synchronized void setPhoneMicDevice(AudioDeviceInfo device) {
+        phoneMicDevice = device;
+    }
+
     /** True when the AGC effect actually attached to the capture session. */
     public synchronized boolean agcActive() {
         return fx.agcActive();
@@ -106,7 +119,7 @@ public class AudioRecorder {
         if (running) {
             return true;
         }
-        MicCapture.Handle h = MicCapture.open();
+        MicCapture.Handle h = MicCapture.open(phoneMicDevice);
         if (h == null) {
             return false;
         }
@@ -139,7 +152,7 @@ public class AudioRecorder {
         startMs = System.currentTimeMillis();
         elapsedBaseMs = 0;
         paused = false;
-        activeLabel = h.label;
+        activeLabel = h.label + h.micRouteSuffix();
         running = true;
         spawnWorker();
         return true;

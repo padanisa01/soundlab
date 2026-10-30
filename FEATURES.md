@@ -160,6 +160,17 @@ or the plan changes.
   and the Limiter master switch are unchanged; governed by the
   `mic_truepeak` preference (default false, wired in
   `AudioRecorder.setTruePeak` / `LiveFxMonitor.setTruePeak`).
+- **Phone microphone** (on by default): when earphones with an
+  integrated mic are plugged in, capture still uses the phone's
+  built-in microphone, so the earphones act purely as the overdub
+  monitor. Governed by the `mic_phone_mic` preference (Advanced mic
+  settings); the built-in mic is passed to `MicCapture` as the
+  AudioRecord's preferred input device
+  (`AudioRecorder.setPhoneMicDevice` / `LiveFxMonitor.setPhoneMicDevice`,
+  API 28+). It is a preference, not a guarantee — Android can still
+  route elsewhere (notably Bluetooth SCO) — so the recording status
+  line names the mic actually used ("· phone mic", "· earphone mic",
+  "· Bluetooth mic", ...) from the routed device.
 - **Auto-normalize takes** toggle (on by default): recordings are
   peak-normalized to -1 dBFS right after the take, as an undoable
   history step — the raw mic capture stays recoverable via Undo.

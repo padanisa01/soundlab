@@ -177,6 +177,7 @@ public class MainActivity extends Activity {
     private Switch switchAgc;
     private Switch switchNs;
     private Switch switchLimiter;
+    private Switch switchPhoneMic;
     private Switch switchLiveFx;
     private Switch switchAutoNorm;
     private LinearLayout advMicPanel;
@@ -775,12 +776,14 @@ public class MainActivity extends Activity {
         switchAgc = findViewById(R.id.switch_agc);
         switchNs = findViewById(R.id.switch_ns);
         switchLimiter = findViewById(R.id.switch_limiter);
+        switchPhoneMic = findViewById(R.id.switch_phone_mic);
         switchLiveFx = findViewById(R.id.switch_livefx);
         switchAutoNorm = findViewById(R.id.switch_autonorm);
         SharedPreferences prefs = getSharedPreferences("soundlab", MODE_PRIVATE);
         switchAgc.setChecked(prefs.getBoolean("mic_agc", false));
         switchNs.setChecked(prefs.getBoolean("mic_ns", true));
         switchLimiter.setChecked(prefs.getBoolean("mic_limiter", true));
+        switchPhoneMic.setChecked(prefs.getBoolean("mic_phone_mic", true));
         switchLiveFx.setChecked(prefs.getBoolean("mic_livefx", false));
         switchAutoNorm.setChecked(prefs.getBoolean("mic_autonorm", true));
         // First use: offer the guided tour once (menu > Tutorial
@@ -798,6 +801,8 @@ public class MainActivity extends Activity {
                 prefs.edit().putBoolean("mic_ns", on).apply());
         switchLimiter.setOnCheckedChangeListener((b, on) ->
                 prefs.edit().putBoolean("mic_limiter", on).apply());
+        switchPhoneMic.setOnCheckedChangeListener((b, on) ->
+                prefs.edit().putBoolean("mic_phone_mic", on).apply());
         switchLiveFx.setOnCheckedChangeListener((b, on) ->
                 prefs.edit().putBoolean("mic_livefx", on).apply());
         switchAutoNorm.setOnCheckedChangeListener((b, on) ->
@@ -1298,6 +1303,43 @@ public class MainActivity extends Activity {
     private boolean truePeakPref() {
         return getSharedPreferences("soundlab", MODE_PRIVATE)
                 .getBoolean("mic_truepeak", false);
+    }
+
+    /** The phone-microphone pref (default ON): record from the
+     * phone's built-in mic even when earphones with a mic are
+     * plugged in, so the earphones act purely as the overdub
+     * monitor. Read at the capture start sites alongside
+     * mic_truepeak. */
+    private boolean phoneMicPref() {
+        return getSharedPreferences("soundlab", MODE_PRIVATE)
+                .getBoolean("mic_phone_mic", true);
+    }
+
+    /** The built-in microphone as a preferred input device, or
+     * null when this device does not expose one. */
+    private AudioDeviceInfo builtinMicDevice() {
+        try {
+            AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+            if (am == null) {
+                return null;
+            }
+            for (AudioDeviceInfo d
+                    : am.getDevices(AudioManager.GET_DEVICES_INPUTS)) {
+                if (d.getType() == AudioDeviceInfo.TYPE_BUILTIN_MIC) {
+                    return d;
+                }
+            }
+        } catch (Exception e) {
+            // Fall through: no preference is a safe default.
+        }
+        return null;
+    }
+
+    /** The preferred capture input for the next take: the built-in
+     * mic when the phone-mic setting is on, else null (the system
+     * default route). */
+    private AudioDeviceInfo captureInputDevice() {
+        return phoneMicPref() ? builtinMicDevice() : null;
     }
 
     /** The DSP Lab quality-score pref (default "off"). Passed to
@@ -5821,6 +5863,7 @@ public class MainActivity extends Activity {
         recorder.setPreprocessing(switchAgc.isChecked(), switchNs.isChecked(),
                 switchLimiter.isChecked());
         recorder.setTruePeak(truePeakPref());
+        recorder.setPhoneMicDevice(captureInputDevice());
         File take = new File(getCacheDir(), "rec_take.wav");
         if (!recorder.start(take)) {
             pendingRecordTrackId = null;
@@ -5870,6 +5913,7 @@ public class MainActivity extends Activity {
         double echo = seekEcho.getProgress() / 100.0;
         File take = new File(getCacheDir(), "rec_take.wav");
         liveMonitor.setTruePeak(truePeakPref());
+        liveMonitor.setPhoneMicDevice(captureInputDevice());
         if (!liveMonitor.start(take, warmth, reverbPreset, echo,
                 switchAgc.isChecked(), switchNs.isChecked(),
                 switchLimiter.isChecked())) {

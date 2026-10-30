@@ -1,6 +1,7 @@
 package com.audiofx.app;
 
 import android.media.AudioAttributes;
+import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
@@ -40,6 +41,7 @@ public class LiveFxMonitor {
     /** True-peak choice from setTruePeak(); spawnWorker() reads the
      * FIELD, same pattern as wantLimiter. */
     private boolean wantTruePeak;
+    private AudioDeviceInfo phoneMicDevice;
     private AudioTrack track;
     private AcousticEchoCanceler aec;
     private final CaptureFx fx = new CaptureFx();
@@ -110,6 +112,17 @@ public class LiveFxMonitor {
     }
 
     /**
+     * Set before start(): the built-in phone microphone to prefer
+     * for capture (the mic_phone_mic setting), or null for the
+     * system default input. Stored as a field; start() hands it to
+     * MicCapture, which applies it as the AudioRecord's preferred
+     * input device.
+     */
+    public synchronized void setPhoneMicDevice(AudioDeviceInfo device) {
+        phoneMicDevice = device;
+    }
+
+    /**
      * Start live-FX capture. Returns false when capture, the Python
      * chain, or monitor output cannot start on this device. The caller
      * must have started Chaquopy Python first.
@@ -120,7 +133,7 @@ public class LiveFxMonitor {
         if (running) {
             return true;
         }
-        MicCapture.Handle h = MicCapture.open();
+        MicCapture.Handle h = MicCapture.open(phoneMicDevice);
         if (h == null) {
             return false;
         }
@@ -233,7 +246,7 @@ public class LiveFxMonitor {
         startMs = System.currentTimeMillis();
         elapsedBaseMs = 0;
         paused = false;
-        activeLabel = h.label + " live FX";
+        activeLabel = h.label + h.micRouteSuffix() + " live FX";
         running = true;
         spawnWorker();
         return true;

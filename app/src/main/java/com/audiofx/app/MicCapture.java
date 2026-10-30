@@ -1,8 +1,10 @@
 package com.audiofx.app;
 
+import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
+import android.os.Build;
 
 /**
  * Shared microphone capture setup. Tries configs highest-fidelity first:
@@ -33,10 +35,62 @@ final class MicCapture {
             this.channels = channels;
             this.label = label;
         }
+
+        /**
+         * Human-readable suffix naming the input device Android
+         * actually routed to this capture, e.g. " · phone mic" or
+         * " · earphone mic" -- appended to the capture label in the
+         * recording status line, so a preferred-device request that
+         * the system overruled is visible instead of silent. Empty
+         * when the route cannot be read (pre-API 28, or no routed
+         * device reported). Read after recording has started.
+         */
+        String micRouteSuffix() {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+                return "";
+            }
+            try {
+                AudioDeviceInfo d = rec.getRoutedDevice();
+                if (d == null) {
+                    return "";
+                }
+                switch (d.getType()) {
+                    case AudioDeviceInfo.TYPE_BUILTIN_MIC:
+                        return " · phone mic";
+                    case AudioDeviceInfo.TYPE_WIRED_HEADSET:
+                        return " · earphone mic";
+                    case AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+                        return " · Bluetooth mic";
+                    case AudioDeviceInfo.TYPE_USB_HEADSET:
+                    case AudioDeviceInfo.TYPE_USB_DEVICE:
+                        return " · USB mic";
+                    default:
+                        return " · external mic";
+                }
+            } catch (Exception e) {
+                return "";
+            }
+        }
     }
 
     /** Open the best working capture config, or null when none works. */
     static Handle open() {
+        return open(null);
+    }
+
+    /**
+     * As {@link #open()}, but when {@code preferredInput} is non-null
+     * (the built-in phone microphone, from the mic_phone_mic setting)
+     * it is set as the AudioRecord's preferred input device before
+     * capture starts, so a plugged-in earphone/headset mic does not
+     * become the recording source. This is a preference, not a
+     * guarantee: Android may still route elsewhere (notably Bluetooth
+     * SCO), so callers surface the actual route via
+     * {@link Handle#micRouteSuffix()} once recording has started.
+     * Preferred-device routing needs API 28+; on older devices, or if
+     * setting it throws, capture proceeds with the system default.
+     */
+    static Handle open(AudioDeviceInfo preferredInput) {
         for (int[] c : CONFIGS) {
             int source = c[0];
             int sampleRate = c[1];
@@ -61,6 +115,15 @@ final class MicCapture {
             if (rec.getState() != AudioRecord.STATE_INITIALIZED) {
                 rec.release();
                 continue;
+            }
+            if (preferredInput != null
+                    && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                try {
+                    rec.setPreferredDevice(preferredInput);
+                } catch (Exception ignored) {
+                    // A failed preference must never fail capture;
+                    // the routed-device label reports what was used.
+                }
             }
             int channels = channelConfig == AudioFormat.CHANNEL_IN_STEREO ? 2 : 1;
             String label = (channels == 2 ? "stereo" : "mono") + " "
