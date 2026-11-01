@@ -14,10 +14,10 @@ import java.io.File;
  * Deviation from the design doc 4.2 sketch, documented here: the
  * sketch names a NotationResult type for the notation field, but
  * the app's real notation payload is a JSONArray of notation
- * events (the values of MainActivity's notationByTrack map), so
- * the field is a JSONArray. {@link #tonic} and {@link #notation}
- * are null in this slice (OO-4): the tonic/notation state still
- * lives in MainActivity's maps and moves onto TrackModel in OO-5.
+ * events, so the field is a JSONArray. {@link #tonic} and
+ * {@link #notation} hold the track's session state as of OO-5
+ * (moved here from MainActivity's former per-track maps; null
+ * until estimated/notated, and not yet persisted — OO-7).
  *
  * File paths are resolved through LibraryDb (the repository owns
  * the library file layout); this class never builds paths itself.
@@ -26,9 +26,9 @@ public final class TrackModel {
 
     /** Identity + persisted fields (LibraryDb.Track row). */
     public final LibraryDb.Track row;
-    /** The track's tonic; null in this slice (state moves in OO-5). */
+    /** The track's tonic; null until estimated/notated (OO-5). */
     public TonicInfo tonic;
-    /** The track's notation events; null in this slice (OO-5). */
+    /** The track's notation events; null until notated (OO-5). */
     public JSONArray notation;
     /** The track's ordered effect history, loaded from the ops table. */
     public final EffectHistory history;

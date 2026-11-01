@@ -66,6 +66,7 @@ import com.google.android.gms.ads.MobileAds;
 import com.audiofx.app.model.Effect;
 import com.audiofx.app.model.EffectHistory;
 import com.audiofx.app.model.Project;
+import com.audiofx.app.model.TonicInfo;
 import com.audiofx.app.model.TrackModel;
 
 import com.chaquo.python.PyObject;
@@ -114,12 +115,12 @@ public class MainActivity extends Activity {
 
     private TextView tvProjectName;
     /** Karaoke notation state (feature/tonic), PER TRACK: notation
-     * events and tonic chip text keyed by track id (LEGACY_NOTATION_KEY
-     * for picked files). The readouts always show the selected
-     * track's notation. */
+     * events and the tonic live on each track's TrackModel (OO-5).
+     * notationKey() still yields LEGACY_NOTATION_KEY / "file:..."
+     * keys for picked files; those resolve to no track and store
+     * nothing. The readouts always show the selected track's
+     * notation. */
     private static final String LEGACY_NOTATION_KEY = "__legacy__";
-    private final Map<String, JSONArray> notationByTrack = new HashMap<>();
-    private final Map<String, JSONObject> tonicInfoByTrack = new HashMap<>();
     // Tonic match check (Settings > Multi-track, pref tonic_match_check):
     // background Sa estimation for tracks that have audio but no
     // tonic yet, plus the mismatch popup's bookkeeping. The queued
@@ -550,7 +551,7 @@ public class MainActivity extends Activity {
         if (lane.swaraView == null) {
             return;
         }
-        JSONArray events = notationByTrack.get(lane.trackId);
+        JSONArray events = trackNotation(lane.trackId);
         if (events == null) {
             return;
         }
@@ -2033,16 +2034,65 @@ public class MainActivity extends Activity {
      * fails loudly there when ops exist, never silently. Called
      * (one line) at every mTracks reload site, at the settled point
      * of adoptLibraryEntry, and at currentEntryId transitions
-     * outside it — see the OO-4 hook inventory. */
+     * outside it — see the OO-4 hook inventory.
+     *
+     * OO-5 carry-over (coordinator ruling): loadProject builds
+     * fresh TrackModels with null tonic/notation, but this refresh
+     * runs at many IN-PROJECT reload sites (lock/mute/volume/
+     * rename/delete/ensure-tracks), where the old never-cleared
+     * session maps made tonic/notation survive. To preserve that,
+     * when the reload is for the SAME entryId the outgoing
+     * project's TrackModels hand their tonic/notation to the
+     * incoming ones by track id. When the entryId differs (project
+     * switch/close) there is NO carry-over — the state is dropped
+     * (sanctioned; OO-7 restores it from the DB). This is refresh
+     * assembly only: the state still lives solely on the current
+     * project's TrackModels, never in a side cache. */
     private void refreshCurrentProject() {
         if (libraryDb == null || currentEntryId == null) {
             currentProject = null;
             return;
         }
+        Project outgoing = currentProject;
         currentProject = libraryDb.loadProject(currentEntryId, RENDERABLE_OPS);
         if (currentProject != null) {
+            if (outgoing != null && outgoing.entry != null
+                    && currentEntryId.equals(outgoing.entry.id)) {
+                for (TrackModel incoming : currentProject.tracks) {
+                    TrackModel old = outgoing.trackById(incoming.row.id);
+                    if (old != null) {
+                        incoming.tonic = old.tonic;
+                        incoming.notation = old.notation;
+                    }
+                }
+            }
             currentProject.selected = currentProject.trackById(selectedTrackId);
         }
+    }
+
+    /** The TrackModel for a track id in the current project, or
+     * null when no project is open or the id is not one of its
+     * tracks (e.g. a legacy picked-file notation key). OO-5: tonic
+     * and notation state lives on these TrackModels, nowhere else. */
+    private TrackModel trackModelById(String trackId) {
+        return currentProject != null
+                ? currentProject.trackById(trackId) : null;
+    }
+
+    /** A track's tonic (TrackModel.tonic), or null when the track
+     * is not in the current project or has no tonic yet. */
+    private TonicInfo trackTonic(String trackId) {
+        TrackModel tm = trackModelById(trackId);
+        return tm != null ? tm.tonic : null;
+    }
+
+    /** A track's notation events (TrackModel.notation), or null
+     * when the track is not in the current project or has no
+     * notation yet. (The old map's values were never null, so this
+     * also replaces its containsKey checks.) */
+    private JSONArray trackNotation(String trackId) {
+        TrackModel tm = trackModelById(trackId);
+        return tm != null ? tm.notation : null;
     }
 
     /** Renderable op names loaded once from the bundled ops manifest
@@ -2626,8 +2676,21 @@ public class MainActivity extends Activity {
                 setStatus("No tonic found in this audio.");
                 return;
             }
-            notationByTrack.put(key, info.getJSONArray("events"));
-            tonicInfoByTrack.put(key, info);
+            // OO-5 + coordinator ruling (legacy keys): notation
+            // events and the tonic are stored on the key's
+            // TrackModel only when the key resolves to a track in
+            // the current project; legacy picked-file keys
+            // ("file:..." / LEGACY_NOTATION_KEY) resolve to
+            // nothing and the stores are skipped -- those puts
+            // were write-only dead stores (no read site ever used
+            // a non-UUID key). getJSONArray is still evaluated
+            // unconditionally, as the old put did.
+            JSONArray events = info.getJSONArray("events");
+            TrackModel tm = trackModelById(key);
+            if (tm != null) {
+                tm.notation = events;
+                tm.tonic = TonicInfo.fromJson(info);
+            }
             refreshLaneHeaderFor(key);
             refreshNotationUi();
             setStatus("Notation ready \u2014 play to follow the swarams.");
@@ -2672,7 +2735,7 @@ public class MainActivity extends Activity {
         }
         final List<String> missing = new ArrayList<>();
         for (LibraryDb.Track t : mTracks) {
-            if (trackHasAudio(t) && tonicInfoByTrack.get(t.id) == null
+            if (trackHasAudio(t) && trackTonic(t.id) == null
                     && !tonicBgQueued.contains(t.id)) {
                 missing.add(t.id);
             }
@@ -2762,7 +2825,7 @@ public class MainActivity extends Activity {
             final String trackId) {
         runOnUiThread(() -> startTonicBlink(trackId));
         try {
-            if (tonicInfoByTrack.get(trackId) != null) {
+            if (trackTonic(trackId) != null) {
                 return; // a Notation run beat us to it
             }
             renderTrackBlocking(entryId, trackId);
@@ -2778,7 +2841,10 @@ public class MainActivity extends Activity {
             final JSONObject info = new JSONObject(json);
             if (info.has("sa_hz")) {
                 runOnUiThread(() -> {
-                    tonicInfoByTrack.put(trackId, info);
+                    TrackModel tm = trackModelById(trackId);
+                    if (tm != null) {
+                        tm.tonic = TonicInfo.fromJson(info);
+                    }
                     refreshLaneHeaderFor(trackId);
                     if (trackId.equals(selectedTrackId)) {
                         refreshNotationUi();
@@ -2851,7 +2917,8 @@ public class MainActivity extends Activity {
         List<JSONObject> tonics = new ArrayList<>();
         StringBuilder sig = new StringBuilder(entryId);
         for (LibraryDb.Track t : mTracks) {
-            JSONObject info = tonicInfoByTrack.get(t.id);
+            TonicInfo tonic = trackTonic(t.id);
+            JSONObject info = tonic != null ? tonic.toJson() : null;
             if (info == null || !trackHasAudio(t)) {
                 continue;
             }
@@ -2982,11 +3049,12 @@ public class MainActivity extends Activity {
             }
             runOnUiThread(() -> {
                 for (TonicAlignStep s : applied) {
-                    JSONObject inf = tonicInfoByTrack.get(s.trackId);
-                    if (inf != null) {
+                    TrackModel tm = trackModelById(s.trackId);
+                    if (tm != null && tm.tonic != null) {
                         try {
-                            tonicInfoByTrack.put(s.trackId,
-                                    shiftedTonicInfo(inf, s.shiftSemis));
+                            tm.tonic = TonicInfo.fromJson(
+                                    shiftedTonicInfo(tm.tonic.toJson(),
+                                            s.shiftSemis));
                         } catch (Exception ignored) {
                         }
                     }
@@ -3067,17 +3135,17 @@ public class MainActivity extends Activity {
         if (!checkTrackUnlocked(track.id)) {
             return;
         }
-        JSONObject info = tonicInfoByTrack.get(track.id);
-        if (info != null) {
-            showPitchDialog(track.id, info);
+        TonicInfo tonic = trackTonic(track.id);
+        if (tonic != null) {
+            showPitchDialog(track.id, tonic.toJson());
             return;
         }
         final String path =
                 libraryDb.trackRenderFile(track.id).getAbsolutePath();
         runNotation(path, track.id, entryId, laneWave(track.id), () -> {
-            JSONObject inf = tonicInfoByTrack.get(track.id);
+            TonicInfo inf = trackTonic(track.id);
             if (inf != null) {
-                showPitchDialog(track.id, inf);
+                showPitchDialog(track.id, inf.toJson());
             }
         });
     }
@@ -5173,10 +5241,10 @@ public class MainActivity extends Activity {
     /** Name, lock/mute icons, and the muted dim for one lane. */
     private void updateLaneHeader(TrackLane lane, LibraryDb.Track t) {
         lane.nameView.setText(t.name);
-        JSONObject tonicInfo = tonicInfoByTrack.get(t.id);
-        if (tonicInfo != null) {
+        TonicInfo tonic = trackTonic(t.id);
+        if (tonic != null) {
             cancelTonicBlink(lane);
-            lane.tonicView.setText(tonicText(tonicInfo));
+            lane.tonicView.setText(tonicText(tonic.toJson()));
             lane.tonicView.setVisibility(View.VISIBLE);
         } else if (lane.tonicBlink != null
                 && lane.tonicBlink.isRunning()) {
@@ -5188,7 +5256,7 @@ public class MainActivity extends Activity {
         }
         if (lane.swaraView != null) {
             lane.swaraView.setVisibility(
-                    notationByTrack.containsKey(t.id)
+                    trackNotation(t.id) != null
                             ? View.VISIBLE : View.GONE);
         }
         if (lane.volumeBar != null) {
