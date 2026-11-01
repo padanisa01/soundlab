@@ -107,6 +107,18 @@ public class MainActivity extends Activity {
     private static final String LEGACY_NOTATION_KEY = "__legacy__";
     private final Map<String, JSONArray> notationByTrack = new HashMap<>();
     private final Map<String, JSONObject> tonicInfoByTrack = new HashMap<>();
+    // Tonic match check (Settings > DSP Lab, pref tonic_match_check):
+    // background Sa estimation for tracks that have audio but no
+    // tonic yet, plus the mismatch popup's bookkeeping. The queued
+    // set is mutated on the UI thread only (the worker snapshots it).
+    private final java.util.Set<String> tonicBgQueued =
+            new java.util.HashSet<>();
+    private volatile boolean tonicBgRunning;
+    private String tonicPopupSignature;
+    private boolean tonicPopupShowing;
+    /** Two tracks count as the same tonic within this many cents
+     * (after folding to the nearest octave). */
+    private static final double TONIC_MATCH_TOLERANCE_CENTS = 15.0;
     private ImageButton btnMenu;
     private AdView adView;
     private PremiumBilling premiumBilling;
@@ -1225,6 +1237,20 @@ public class MainActivity extends Activity {
             prefs.edit().putBoolean("mic_truepeak", on).apply();
             recorder.setTruePeak(on);
             liveMonitor.setTruePeak(on);
+        });
+        // Tonic match check: gates the whole background experience
+        // (per-track Sa estimation, lane tonic labels for tracks
+        // never notated, and the mismatch popup). Default OFF --
+        // bindCueSwitch defaults to on, so bind explicitly like
+        // true-peak. Turning it on kicks estimation for the open
+        // project right away.
+        Switch tc = view.findViewById(R.id.sw_tonic_check);
+        tc.setChecked(prefs.getBoolean("tonic_match_check", false));
+        tc.setOnCheckedChangeListener((b, on) -> {
+            prefs.edit().putBoolean("tonic_match_check", on).apply();
+            if (on) {
+                maybeEstimateTonics();
+            }
         });
         // Tab strip: Soundcheck | DSP Lab, painted like the
         // Record|Soundcheck segmented control (paintSegment).
@@ -2479,6 +2505,11 @@ public class MainActivity extends Activity {
             final Runnable afterSuccess) {
         setBusy(true);
         setStatus("Notating \u2014 detecting Sa and tracing the melody...");
+        if (entryId != null) {
+            // Keep the background tonic estimator off this track
+            // while notation renders it.
+            tonicBgQueued.add(key);
+        }
         if (wave != null) {
             wave.startProgressAnimation();
         }
@@ -2498,6 +2529,9 @@ public class MainActivity extends Activity {
                     if (wave != null) {
                         wave.finishProgressAnimation();
                     }
+                    if (entryId != null) {
+                        tonicBgQueued.remove(key);
+                    }
                     applyNotation(infoJson, key);
                     if (afterSuccess != null) {
                         afterSuccess.run();
@@ -2508,6 +2542,9 @@ public class MainActivity extends Activity {
                     setBusy(false);
                     if (wave != null) {
                         wave.clearProgress();
+                    }
+                    if (entryId != null) {
+                        tonicBgQueued.remove(key);
                     }
                     setStatus("Notation failed: " + e.getMessage());
                 });
@@ -2539,6 +2576,371 @@ public class MainActivity extends Activity {
         int cents = info.optInt("cents", 0);
         return "Sa " + info.optString("note", "?") + " "
                 + (cents >= 0 ? "+" : "") + cents + "c";
+    }
+
+    // ------------------------------------------------------------------
+    // Tonic match check (Settings > DSP Lab, pref "tonic_match_check",
+    // default OFF). When on: tracks with audio but no tonic yet get a
+    // background Sa estimate (tonic only -- no melody tracing), shown
+    // in the lane header like a notation result; when the estimated
+    // tonics disagree, a popup offers a one-click alignment that
+    // pitch-shifts every out-of-tune track onto the first track's
+    // tonic with ordinary undoable pitch_shift ops.
+    // ------------------------------------------------------------------
+
+    private boolean tonicCheckPref() {
+        return getSharedPreferences("soundlab", MODE_PRIVATE)
+                .getBoolean("tonic_match_check", false);
+    }
+
+    /** Queue background tonic estimation for every track that has
+     * audio but no tonic yet; when nothing is missing, run the
+     * mismatch check. No-op unless the Settings switch is on. Called
+     * from refreshLanes() and when the switch is turned on. */
+    private void maybeEstimateTonics() {
+        if (!tonicCheckPref()) {
+            return;
+        }
+        final String entryId = currentEntryId;
+        if (entryId == null || isRecordingSession()) {
+            return;
+        }
+        final List<String> missing = new ArrayList<>();
+        for (LibraryDb.Track t : mTracks) {
+            if (trackHasAudio(t) && tonicInfoByTrack.get(t.id) == null
+                    && !tonicBgQueued.contains(t.id)) {
+                missing.add(t.id);
+            }
+        }
+        if (missing.isEmpty()) {
+            checkTonicMismatch();
+            return;
+        }
+        tonicBgQueued.addAll(missing);
+        if (tonicBgRunning) {
+            return;
+        }
+        tonicBgRunning = true;
+        new Thread(() -> {
+            try {
+                for (String trackId : missing) {
+                    if (!entryId.equals(currentEntryId)) {
+                        break; // project changed under us
+                    }
+                    estimateTrackTonicBg(entryId, trackId);
+                }
+            } finally {
+                runOnUiThread(() -> {
+                    tonicBgRunning = false;
+                    tonicBgQueued.removeAll(missing);
+                    if (entryId.equals(currentEntryId)) {
+                        // Pick up anything that arrived meanwhile;
+                        // drains into the mismatch check.
+                        maybeEstimateTonics();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /** One track's background Sa estimate (worker thread): render
+     * the track, detect the tonic only, store it for the lane
+     * header. Best-effort -- a track whose tonic cannot be found
+     * stays unlabelled and out of the mismatch check. Notation
+     * events are NOT touched: the karaoke readout still requires a
+     * real Notation run. */
+    private void estimateTrackTonicBg(final String entryId,
+            final String trackId) {
+        runOnUiThread(() -> {
+            WaveformView w = laneWave(trackId);
+            if (w != null) {
+                w.startProgressAnimation();
+            }
+        });
+        try {
+            if (tonicInfoByTrack.get(trackId) != null) {
+                return; // a Notation run beat us to it
+            }
+            renderTrackBlocking(entryId, trackId);
+            if (!Python.isStarted()) {
+                Python.start(new AndroidPlatform(this));
+            }
+            final String json = Python.getInstance()
+                    .getModule("audiofx.android_bridge")
+                    .callAttr("tonic_detect_file",
+                            libraryDb.trackRenderFile(trackId)
+                                    .getAbsolutePath())
+                    .toString();
+            final JSONObject info = new JSONObject(json);
+            if (info.has("sa_hz")) {
+                runOnUiThread(() -> {
+                    tonicInfoByTrack.put(trackId, info);
+                    refreshLaneHeaderFor(trackId);
+                    if (trackId.equals(selectedTrackId)) {
+                        refreshNotationUi();
+                    }
+                });
+            }
+        } catch (Exception e) {
+            // Silent: background estimation must never surface as
+            // an error in an unrelated flow.
+        } finally {
+            runOnUiThread(() -> {
+                WaveformView w = laneWave(trackId);
+                if (w != null) {
+                    w.finishProgressAnimation();
+                }
+            });
+        }
+    }
+
+    /** Signed semitone distance from one tonic to another, folded
+     * to the nearest octave ((-6, +6]): a Sa detected one octave up
+     * is the same tonic, not a mismatch. */
+    private static double tonicDiffSemis(double fromHz, double toHz) {
+        double d = 12.0 * Math.log(toHz / fromHz) / Math.log(2.0);
+        while (d <= -6.0) {
+            d += 12.0;
+        }
+        while (d > 6.0) {
+            d -= 12.0;
+        }
+        return d;
+    }
+
+    /** One out-of-tune track's alignment: shift by this many
+     * semitones to land on the reference tonic. */
+    private static final class TonicAlignStep {
+        final String trackId;
+        final String trackName;
+        final double shiftSemis;
+
+        TonicAlignStep(String trackId, String trackName,
+                double shiftSemis) {
+            this.trackId = trackId;
+            this.trackName = trackName;
+            this.shiftSemis = shiftSemis;
+        }
+    }
+
+    /** Compare every known track tonic against the first track's
+     * (position order) and, when any differ by more than
+     * TONIC_MATCH_TOLERANCE_CENTS, show the alignment popup -- at
+     * most once per distinct tonic combination, so dismissing it
+     * does not re-prompt on every lane refresh. */
+    private void checkTonicMismatch() {
+        if (!tonicCheckPref() || tonicPopupShowing) {
+            return;
+        }
+        final String entryId = currentEntryId;
+        if (entryId == null || isRecordingSession()) {
+            return;
+        }
+        LibraryDb.Track refTrack = null;
+        JSONObject refInfo = null;
+        double refHz = 0;
+        List<LibraryDb.Track> tonicked = new ArrayList<>();
+        List<JSONObject> tonics = new ArrayList<>();
+        StringBuilder sig = new StringBuilder(entryId);
+        for (LibraryDb.Track t : mTracks) {
+            JSONObject info = tonicInfoByTrack.get(t.id);
+            if (info == null || !trackHasAudio(t)) {
+                continue;
+            }
+            double hz = info.optDouble("sa_hz", 0);
+            if (hz <= 0) {
+                continue;
+            }
+            tonicked.add(t);
+            tonics.add(info);
+            sig.append('|').append(t.id).append('@')
+                    .append(Math.round(hz * 10.0));
+            if (refTrack == null) {
+                refTrack = t;
+                refInfo = info;
+                refHz = hz;
+            }
+        }
+        if (refTrack == null || tonicked.size() < 2) {
+            return;
+        }
+        final List<TonicAlignStep> steps = new ArrayList<>();
+        final List<String> lockedOff = new ArrayList<>();
+        boolean mismatch = false;
+        for (int i = 1; i < tonicked.size(); i++) {
+            LibraryDb.Track t = tonicked.get(i);
+            double hz = tonics.get(i).optDouble("sa_hz", 0);
+            double d = tonicDiffSemis(hz, refHz);
+            if (Math.abs(d) * 100.0 <= TONIC_MATCH_TOLERANCE_CENTS) {
+                continue;
+            }
+            mismatch = true;
+            double rounded = Math.round(d * 100.0) / 100.0;
+            if (t.locked) {
+                lockedOff.add(t.name);
+            } else {
+                steps.add(new TonicAlignStep(t.id, t.name, rounded));
+            }
+        }
+        if (!mismatch) {
+            tonicPopupSignature = null;
+            return;
+        }
+        if (sig.toString().equals(tonicPopupSignature)) {
+            return;
+        }
+        tonicPopupSignature = sig.toString();
+        StringBuilder msg = new StringBuilder(
+                "The tracks in this project are not all in the same key:\n");
+        for (int i = 0; i < tonicked.size(); i++) {
+            msg.append("\n").append(tonicked.get(i).name).append(" \u2014 ")
+                    .append(tonicText(tonics.get(i)));
+        }
+        if (!steps.isEmpty()) {
+            msg.append("\n\nAlign everything to ").append(refTrack.name)
+                    .append(" (").append(tonicText(refInfo)).append(")?");
+            for (TonicAlignStep s : steps) {
+                msg.append("\n\u2022 ").append(s.trackName).append(": ")
+                        .append(s.shiftSemis >= 0 ? "raise" : "lower")
+                        .append(" pitch by ")
+                        .append(String.format(Locale.US, "%.2f",
+                                Math.abs(s.shiftSemis)))
+                        .append(" semitones");
+            }
+        }
+        for (String name : lockedOff) {
+            msg.append("\n\u2022 ").append(name)
+                    .append(" is locked and cannot be shifted.");
+        }
+        final JSONObject ref = refInfo;
+        AlertDialog.Builder builder = new AlertDialog.Builder(
+                this, R.style.Theme_SoundLab_Dialog)
+                .setTitle("Tonic mismatch")
+                .setMessage(msg.toString());
+        if (steps.isEmpty()) {
+            builder.setPositiveButton("OK", null);
+        } else {
+            builder.setNegativeButton("Not now", null);
+            builder.setPositiveButton("Align pitches", (d, w) ->
+                    applyTonicAlignPlan(entryId, steps, ref));
+        }
+        AlertDialog dialog = builder.create();
+        tonicPopupShowing = true;
+        dialog.setOnDismissListener(d -> tonicPopupShowing = false);
+        dialog.show();
+    }
+
+    /** The pitch engine the one-click alignment writes into its
+     * ops: the DSP Lab pitch pref, same as the Pitch dialog's
+     * preselection. */
+    private String pitchEnginePref() {
+        return "formant".equals(getSharedPreferences("soundlab",
+                MODE_PRIVATE).getString("dsp_pitch_engine", "wsola"))
+                ? "formant" : "wsola";
+    }
+
+    /** Apply the alignment plan: one undoable pitch_shift op per
+     * out-of-tune track, rendered with the same incremental path
+     * as a manual Pitch convert; a failed track's op is rolled
+     * back and the rest still apply. Each shifted track's stored
+     * tonic is advanced analytically by its shift, so the lane
+     * headers (and any re-check) reflect the aligned pitch without
+     * a fresh Notation run. */
+    private void applyTonicAlignPlan(final String entryId,
+            final List<TonicAlignStep> steps, final JSONObject refInfo) {
+        for (int i = 0; i < steps.size(); i++) {
+            Analytics.effectApplied(this, "pitch_shift", null);
+        }
+        setBusy(true);
+        setStatus("Aligning track tonics\u2026");
+        new Thread(() -> {
+            final List<TonicAlignStep> applied = new ArrayList<>();
+            for (TonicAlignStep s : steps) {
+                boolean added = false;
+                try {
+                    String params = new JSONObject()
+                            .put("semitones", s.shiftSemis)
+                            .put("engine", pitchEnginePref()).toString();
+                    String label = "Pitch "
+                            + (s.shiftSemis >= 0 ? "+" : "")
+                            + String.format(Locale.US, "%.2f",
+                                    s.shiftSemis)
+                            + " st (tonic align)";
+                    libraryDb.addOp(entryId, s.trackId, "pitch_shift",
+                            params, label);
+                    added = true;
+                    renderIncrementalOrFull(entryId, s.trackId,
+                            "pitch_shift", params);
+                    applied.add(s);
+                } catch (Exception e) {
+                    if (added) {
+                        try {
+                            libraryDb.popLastOp(entryId, s.trackId);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+            }
+            runOnUiThread(() -> {
+                for (TonicAlignStep s : applied) {
+                    JSONObject inf = tonicInfoByTrack.get(s.trackId);
+                    if (inf != null) {
+                        try {
+                            tonicInfoByTrack.put(s.trackId,
+                                    shiftedTonicInfo(inf, s.shiftSemis));
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    refreshLaneHeaderFor(s.trackId);
+                    refreshLanePeaks(s.trackId);
+                }
+                if (!applied.isEmpty()) {
+                    cachedDiagJson = null;
+                    cachedDiagPath = null;
+                    diagLastPath = null;
+                    diagTrackId = null;
+                    diagSummaryCache.clear();
+                }
+                releasePlayer();
+                updateUndoBadge();
+                setBusy(false);
+                tonicPopupSignature = null;
+                if (applied.size() == steps.size()) {
+                    setStatus("All tracks aligned to "
+                            + tonicText(refInfo) + ".");
+                } else {
+                    setStatus("Aligned " + applied.size() + " of "
+                            + steps.size() + " tracks to "
+                            + tonicText(refInfo) + ".");
+                }
+            });
+        }).start();
+    }
+
+    /** A tonic info advanced by a pitch shift: the new Sa in Hz,
+     * with the note name and cents recomputed from it. Other
+     * fields (score, runner_up_rel) carry over. */
+    private static JSONObject shiftedTonicInfo(JSONObject info,
+            double semis) throws Exception {
+        double hz = info.optDouble("sa_hz", 0)
+                * Math.pow(2.0, semis / 12.0);
+        double midiExact = 69.0
+                + 12.0 * Math.log(hz / 440.0) / Math.log(2.0);
+        long midi = Math.round(midiExact);
+        int cents = (int) Math.round((midiExact - midi) * 100.0);
+        String note = PITCH_NOTES[(int) (((midi % 12) + 12) % 12)]
+                + (midi / 12 - 1);
+        JSONObject out = new JSONObject();
+        out.put("sa_hz", hz);
+        out.put("note", note);
+        out.put("cents", cents);
+        if (info.has("score")) {
+            out.put("score", info.optDouble("score"));
+        }
+        if (info.has("runner_up_rel")) {
+            out.put("runner_up_rel", info.optDouble("runner_up_rel"));
+        }
+        return out;
     }
 
     private static final String[] PITCH_NOTES = {
@@ -4594,6 +4996,10 @@ public class MainActivity extends Activity {
         // what makes opened/imported audio behave like recorded audio
         // regardless of call order elsewhere.
         updateTrackActions();
+        // Tonic match check: queue background Sa estimation for any
+        // track that has audio but no tonic yet (no-op unless the
+        // Settings switch is on).
+        maybeEstimateTonics();
     }
 
     /** Selection highlight across lanes. */

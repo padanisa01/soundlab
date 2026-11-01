@@ -398,6 +398,24 @@ or the plan changes.
   across edits, new recordings, and project re-opens — until
   Notation is run again on that track (which replaces it). Picked
   files (no project) notate the current render or pristine input.
+- **Tonic match check** (Settings > DSP Lab, `tonic_match_check`,
+  default OFF -- the switch gates the whole experience): with it on,
+  every track that has audio but no tonic yet gets a background
+  Sa-only estimate (`tonic_detect_file` in the bridge --
+  `detect_tonic`, no melody tracing) when lanes load; the estimate
+  shows in the lane header exactly like a notation tonic, but
+  notation events are not produced (karaoke still needs a real
+  Notation run). When two or more tracks' tonics differ by more
+  than 15 cents (folded to the nearest octave, so an octave-up Sa
+  counts as the same tonic), a "Tonic mismatch" popup lists each
+  track's Sa and the exact raise/lower (in semitones) that would
+  align every out-of-tune track to the FIRST track's tonic; its
+  "Align pitches" button applies those as ordinary undoable
+  `pitch_shift` ops (engine from the DSP Lab pitch pref), advancing
+  each shifted track's stored tonic analytically so headers and
+  re-checks agree without a fresh Notation run. Locked tracks are
+  reported but never shifted. The popup shows at most once per
+  distinct tonic combination.
 - Tonic: long-term average spectrum (the drone is in every frame),
   harmonic-series scoring of prominent peaks in 50–300 Hz with a
   subharmonic preference (Pa is Sa's 3rd harmonic but Sa is not a

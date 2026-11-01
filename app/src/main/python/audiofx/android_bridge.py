@@ -686,6 +686,19 @@ def tonic_file(input_wav_path):
     return json.dumps(info if info is not None else {})
 
 
+def tonic_detect_file(input_wav_path):
+    """Tonic (Sa) only for a WAV file -- no melody tracing. Returns
+    JSON (see tonic.detect_tonic: sa_hz, note, cents, score,
+    runner_up_rel), or {} when no tonic is found. Much cheaper than
+    tonic_file; used by the background tonic-match check, which only
+    needs each track's Sa."""
+    if not os.path.isfile(input_wav_path):
+        raise ValueError("input file not found: %s" % input_wav_path)
+    samples, sample_rate = read_wav_mono(input_wav_path)
+    info = _tonic.detect_tonic(samples, sample_rate)
+    return json.dumps(info if info is not None else {})
+
+
 def list_tune_up_profiles():
     """Profile metadata for the Tune Up recipe picker UI."""
     return json.dumps(_diagnose.list_profiles())
