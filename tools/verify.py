@@ -115,6 +115,8 @@ SCAFFOLD_CHECKS = [
     ("app/src/main/java/com/audiofx/app/model/Project.java", "entryId()"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "openEntryId()"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "refreshCurrentProjectFor"),
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", "currentTracks()"),
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", "selectedRow()"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "currentProject.selected"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "trackTonic("),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "trackNotation("),

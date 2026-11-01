@@ -87,6 +87,7 @@ import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.Deque;
 import java.util.HashMap;
@@ -224,8 +225,6 @@ public class MainActivity extends Activity {
     private Button btnJoin;
     private TextView tvTimeCur;
     private TextView tvTimeTot;
-    /** Multitrack: tracks of the open entry, in position order. */
-    private List<LibraryDb.Track> mTracks = new ArrayList<>();
 
     private String inputPath;   // cached WAV picked by the user, or a library pristine
     private String inputFileName = "audio.wav";
@@ -237,11 +236,12 @@ public class MainActivity extends Activity {
      */
     private boolean mixDirty = false;
     private String playerOutputPath;   // file the live player was built for
-    /** OO-4 transition: the domain Project for the open entry, kept
-     * in sync by refreshCurrentProject() at project/track sync
-     * points. The legacy mTracks field remains the working state
-     * for track-list logic in this slice; entry identity and
-     * selection already live on the Project (OO-6). */
+    /** The current project (OO-6): the domain Project for the open
+     * entry, or null in picked-file / no-project mode. Project
+     * identity, the track list, and the selection all live on this
+     * object (see openEntryId(), currentTracks(), selectedId());
+     * it is rebuilt by refreshCurrentProject() at project/track
+     * sync points. */
     private Project currentProject;
     private LibraryDb libraryDb;
     private double audioDurationSec;
@@ -597,7 +597,8 @@ public class MainActivity extends Activity {
      * a lane-refresh for callers that stored new notation. */
     private void refreshNotationUi() {
         for (TrackLane lane : lanes) {
-            LibraryDb.Track t = getTrackById(lane.trackId);
+            TrackModel tmForRow = trackModelById(lane.trackId);
+            LibraryDb.Track t = tmForRow != null ? tmForRow.row : null;
             if (t != null) {
                 updateLaneHeader(lane, t);
             }
@@ -608,7 +609,8 @@ public class MainActivity extends Activity {
     private void refreshLaneHeaderFor(String trackId) {
         for (TrackLane lane : lanes) {
             if (lane.trackId.equals(trackId)) {
-                LibraryDb.Track t = getTrackById(trackId);
+                TrackModel tmForRow = trackModelById(trackId);
+                LibraryDb.Track t = tmForRow != null ? tmForRow.row : null;
                 if (t != null) {
                     updateLaneHeader(lane, t);
                 }
@@ -1329,7 +1331,8 @@ public class MainActivity extends Activity {
      * every action gate (buttons, menu, Save). */
     private boolean hasUsableAudio() {
         if (currentProject != null) {
-            for (LibraryDb.Track t : mTracks) {
+            for (TrackModel tm : currentTracks()) {
+                LibraryDb.Track t = tm.row;
                 if (trackHasAudio(t)) {
                     return true;
                 }
@@ -1783,7 +1786,8 @@ public class MainActivity extends Activity {
      * track with audio -- the condition for offering the
      * add-to-project choice on Open. */
     private boolean currentProjectHasAudioTrack() {
-        for (LibraryDb.Track t : mTracks) {
+        for (TrackModel tm : currentTracks()) {
+            LibraryDb.Track t = tm.row;
             if (trackHasAudio(t)) {
                 return true;
             }
@@ -1852,10 +1856,6 @@ public class MainActivity extends Activity {
             }
             setStatus("Could not import file: " + e.getMessage());
             return;
-        }
-        try {
-            mTracks = libraryDb.listTracks(entryId);
-        } catch (Exception ignored) {
         }
         refreshCurrentProject();
         if (currentProject != null) {
@@ -1984,7 +1984,7 @@ public class MainActivity extends Activity {
         // ---- Multitrack: every open entry shows its tracks ----
         // Load the tracks BEFORE evaluating the action gates: this
         // method used to call updateTrackActions() first, when
-        // mTracks still held the PREVIOUS project (or nothing, at
+        // the track list still held the PREVIOUS project (or nothing, at
         // app start), so audio opened from a file or the library
         // landed with Notation/Pitch/Diagnose/Save/Share disabled
         // and nothing ever re-enabled them. Freshly recorded takes
@@ -2011,7 +2011,8 @@ public class MainActivity extends Activity {
         // audio, then mix. refreshMix above shows the cached mix (if any)
         // while the fresh render runs.
         boolean anyAudio = false;
-        for (LibraryDb.Track t : mTracks) {
+        for (TrackModel tm : currentTracks()) {
+            LibraryDb.Track t = tm.row;
             if (trackHasAudio(t)) {
                 anyAudio = true;
                 break;
@@ -2094,6 +2095,23 @@ public class MainActivity extends Activity {
      * no project is open or nothing is selected (OO-6). */
     private String selectedId() {
         return currentProject != null ? currentProject.selectedId() : null;
+    }
+
+    /** The current project's tracks as TrackModels, in position
+     * order (OO-6), or an empty list when no project is open: the
+     * model-side form of the old track-list field, which was
+     * likewise never null (an empty list stood for no tracks). */
+    private List<TrackModel> currentTracks() {
+        return currentProject != null
+                ? currentProject.tracks : Collections.emptyList();
+    }
+
+    /** The selected track's row (Project.selected), or null when
+     * no project is open or nothing is selected (OO-6). */
+    private LibraryDb.Track selectedRow() {
+        TrackModel sel = currentProject != null
+                ? currentProject.selected : null;
+        return sel != null ? sel.row : null;
     }
 
     /** The TrackModel for a track id in the current project, or
@@ -2296,7 +2314,8 @@ public class MainActivity extends Activity {
         setStatus(workingMsg);
         new Thread(() -> {
             try {
-                for (LibraryDb.Track t : mTracks) {
+                for (TrackModel tm : currentTracks()) {
+                    LibraryDb.Track t = tm.row;
                     if (trackHasAudio(t)) {
                         if (undoDepth(t.id) > 0) {
                             renderChainToCache(entryId, t.id);
@@ -2367,7 +2386,7 @@ public class MainActivity extends Activity {
         if (entryId == null) {
             return;
         }
-        final LibraryDb.Track track = getSelectedTrack();
+        final LibraryDb.Track track = selectedRow();
         if (track == null) {
             return;
         }
@@ -2500,7 +2519,7 @@ public class MainActivity extends Activity {
      * still no-op via applyLibraryOp's guard.
      */
     private void diagnoseSelectedTrack(final String entryId) {
-        final LibraryDb.Track track = getSelectedTrack();
+        final LibraryDb.Track track = selectedRow();
         if (track == null) {
             setStatus("Open or record audio first.");
             return;
@@ -2621,7 +2640,7 @@ public class MainActivity extends Activity {
     }
 
     private void notateSelectedTrack(final String entryId) {
-        final LibraryDb.Track track = getSelectedTrack();
+        final LibraryDb.Track track = selectedRow();
         if (track == null) {
             setStatus("Open or record audio first.");
             return;
@@ -2760,7 +2779,8 @@ public class MainActivity extends Activity {
             return;
         }
         final List<String> missing = new ArrayList<>();
-        for (LibraryDb.Track t : mTracks) {
+        for (TrackModel tm : currentTracks()) {
+            LibraryDb.Track t = tm.row;
             if (trackHasAudio(t) && trackTonic(t.id) == null
                     && !tonicBgQueued.contains(t.id)) {
                 missing.add(t.id);
@@ -2885,7 +2905,8 @@ public class MainActivity extends Activity {
                 TrackLane lane = laneById.get(trackId);
                 if (lane != null) {
                     cancelTonicBlink(lane);
-                    LibraryDb.Track t = getTrackById(trackId);
+                    TrackModel tmForRow = trackModelById(trackId);
+                    LibraryDb.Track t = tmForRow != null ? tmForRow.row : null;
                     if (t != null) {
                         updateLaneHeader(lane, t);
                     }
@@ -2942,7 +2963,8 @@ public class MainActivity extends Activity {
         List<LibraryDb.Track> tonicked = new ArrayList<>();
         List<JSONObject> tonics = new ArrayList<>();
         StringBuilder sig = new StringBuilder(entryId);
-        for (LibraryDb.Track t : mTracks) {
+        for (TrackModel tm : currentTracks()) {
+            LibraryDb.Track t = tm.row;
             TonicInfo tonic = trackTonic(t.id);
             JSONObject info = tonic != null ? tonic.toJson() : null;
             if (info == null || !trackHasAudio(t)) {
@@ -3149,7 +3171,7 @@ public class MainActivity extends Activity {
             setStatus("Pitch shift works on library tracks.");
             return;
         }
-        final LibraryDb.Track track = getSelectedTrack();
+        final LibraryDb.Track track = selectedRow();
         if (track == null) {
             setStatus("Open or record audio first.");
             return;
@@ -4410,7 +4432,7 @@ public class MainActivity extends Activity {
      * no-op with the "Track locked" toast. */
     private void runTuneUp(final String findingsJson, final String profile) {
         final String entryId = openEntryId();
-        final LibraryDb.Track track = getSelectedTrack();
+        final LibraryDb.Track track = selectedRow();
         if (entryId == null || track == null) {
             setStatus("Open or record audio first.");
             return;
@@ -4517,7 +4539,7 @@ public class MainActivity extends Activity {
     private void runImproveQuality(final String findingsJson,
             final String qualityJson, final double ovrlBefore) {
         final String entryId = openEntryId();
-        final LibraryDb.Track track = getSelectedTrack();
+        final LibraryDb.Track track = selectedRow();
         if (entryId == null || track == null) {
             setStatus("Open or record audio first.");
             return;
@@ -4651,7 +4673,7 @@ public class MainActivity extends Activity {
      * {"preset": name, "bands": [...], "dyn_eq": [...]}. */
     private void runMasterMultiband(final String preset) {
         final String entryId = openEntryId();
-        final LibraryDb.Track track = getSelectedTrack();
+        final LibraryDb.Track track = selectedRow();
         if (entryId == null || track == null) {
             setStatus("Open or record audio first.");
             return;
@@ -4709,7 +4731,7 @@ public class MainActivity extends Activity {
         if (entryId == null) {
             return;
         }
-        final LibraryDb.Track track = getSelectedTrack();
+        final LibraryDb.Track track = selectedRow();
         if (track == null) {
             return;
         }
@@ -4843,14 +4865,13 @@ public class MainActivity extends Activity {
     private void ensureTracksForEntry(String entryId) {
         try {
             LibraryDb.LibraryEntry e = libraryDb.getEntry(entryId);
-            mTracks = libraryDb.ensureTracks(entryId,
+            // DB side effect only (creates Track 1 for legacy
+            // entries); the in-memory list is the Project's, loaded
+            // by the refresh below.
+            libraryDb.ensureTracks(entryId,
                     e != null ? e.pristinePath : null);
-            if (mTracks == null) {
-                mTracks = new ArrayList<>();
-            }
         } catch (Exception ex) {
             setStatus("Could not load tracks: " + ex.getMessage());
-            mTracks = new ArrayList<>();
         }
         refreshCurrentProjectFor(entryId);
         // A stale selection was dropped by the refresh (its track
@@ -4862,31 +4883,13 @@ public class MainActivity extends Activity {
         }
     }
 
-    private LibraryDb.Track getTrackById(String trackId) {
-        if (trackId == null) {
-            return null;
-        }
-        for (LibraryDb.Track t : mTracks) {
-            if (trackId.equals(t.id)) {
-                return t;
-            }
-        }
-        return null;
-    }
-
-    /** The currently selected track, or null when no entry is open. */
-    private LibraryDb.Track getSelectedTrack() {
-        TrackModel sel = currentProject != null
-                ? currentProject.selected : null;
-        return sel != null ? sel.row : null;
-    }
-
     /**
      * Guard for track edits: shows the "Track locked" toast and returns
      * false when the track is locked.
      */
     private boolean checkTrackUnlocked(String trackId) {
-        LibraryDb.Track t = getTrackById(trackId);
+        TrackModel tmForRow = trackModelById(trackId);
+        LibraryDb.Track t = tmForRow != null ? tmForRow.row : null;
         if (t != null && t.locked) {
             Toast.makeText(this, R.string.track_locked,
                     Toast.LENGTH_SHORT).show();
@@ -4951,7 +4954,7 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Sync the per-track lanes with mTracks. Existing lanes are reused
+     * Sync the per-track lanes with the project's tracks. Existing lanes are reused
      * so zoom, selection, and peaks survive; only structural changes
      * (add/remove/reorder) rebuild. Also refreshes the waveformView
      * alias (selected lane), the selection highlight, and the project
@@ -4976,7 +4979,8 @@ public class MainActivity extends Activity {
         laneById.clear();
         laneList.removeAllViews();
         float density = getResources().getDisplayMetrics().density;
-        for (LibraryDb.Track t : mTracks) {
+        for (TrackModel tm : currentTracks()) {
+            LibraryDb.Track t = tm.row;
             TrackLane lane = old.get(t.id);
             if (lane == null) {
                 lane = buildLane(t, density);
@@ -5082,7 +5086,8 @@ public class MainActivity extends Activity {
         nameLp.rightMargin = (int) (8 * density);
         header.addView(name, nameLp);
         name.setOnClickListener(v -> {
-            LibraryDb.Track t = getTrackById(track.id);
+            TrackModel tmForRow = trackModelById(track.id);
+            LibraryDb.Track t = tmForRow != null ? tmForRow.row : null;
             if (t != null) {
                 showRenameTrackDialog(t);
             }
@@ -5108,7 +5113,8 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams lockLp = new LinearLayout.LayoutParams(
                 (int) (28 * density), (int) (28 * density));
         lockBtn.setOnClickListener(v -> {
-            LibraryDb.Track t = getTrackById(track.id);
+            TrackModel tmForRow = trackModelById(track.id);
+            LibraryDb.Track t = tmForRow != null ? tmForRow.row : null;
             if (t != null) {
                 toggleTrackLock(t.id, !t.locked);
             }
@@ -5126,7 +5132,8 @@ public class MainActivity extends Activity {
                 (int) (28 * density), (int) (28 * density));
         muteLp.leftMargin = (int) (6 * density);
         muteBtn.setOnClickListener(v -> {
-            LibraryDb.Track t = getTrackById(track.id);
+            TrackModel tmForRow = trackModelById(track.id);
+            LibraryDb.Track t = tmForRow != null ? tmForRow.row : null;
             if (t != null) {
                 toggleTrackMute(t.id, !t.muted);
             }
@@ -5145,7 +5152,8 @@ public class MainActivity extends Activity {
                 (int) (28 * density), (int) (28 * density));
         delLp.leftMargin = (int) (6 * density);
         deleteBtn.setOnClickListener(v -> {
-            LibraryDb.Track t = getTrackById(track.id);
+            TrackModel tmForRow = trackModelById(track.id);
+            LibraryDb.Track t = tmForRow != null ? tmForRow.row : null;
             if (t != null) {
                 confirmDeleteTrack(t);
             }
@@ -5344,7 +5352,6 @@ public class MainActivity extends Activity {
         }
         try {
             libraryDb.setTrackLocked(trackId, locked);
-            mTracks = libraryDb.listTracks(openEntryId());
             refreshCurrentProject();
             refreshLanes();
             setStatus(getString(locked
@@ -5371,7 +5378,6 @@ public class MainActivity extends Activity {
         }
         try {
             libraryDb.setTrackVolume(trackId, gain);
-            mTracks = libraryDb.listTracks(openEntryId());
             refreshCurrentProject();
             mixDirty = true;
             releasePlayer(); // the playing mix no longer matches
@@ -5391,7 +5397,6 @@ public class MainActivity extends Activity {
         }
         try {
             libraryDb.setTrackMuted(trackId, muted);
-            mTracks = libraryDb.listTracks(openEntryId());
             refreshCurrentProject();
             refreshLanes();
             mixDirty = true;
@@ -5445,7 +5450,6 @@ public class MainActivity extends Activity {
                     }
                     try {
                         libraryDb.renameTrack(track.id, name);
-                        mTracks = libraryDb.listTracks(openEntryId());
                         refreshCurrentProject();
                         refreshLanes();
                     } catch (Exception e) {
@@ -5493,11 +5497,6 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> {
                 // Reload without ensureTracks: deleting the last track
                 // must leave zero tracks, not auto-recreate one.
-                try {
-                    mTracks = libraryDb.listTracks(entryId);
-                } catch (Exception ignored) {
-                    mTracks = new ArrayList<>();
-                }
                 refreshCurrentProject();
                 // If the deleted track was selected, the refresh
                 // dropped the selection; pick another track.
@@ -5511,7 +5510,7 @@ public class MainActivity extends Activity {
                 mixDirty = true;
                 setBusy(false);
                 Analytics.trackDeleted(this);
-                setStatus(mTracks.isEmpty() ? "Track deleted."
+                setStatus(currentTracks().isEmpty() ? "Track deleted."
                         : "Track deleted.");
             });
         }).start();
@@ -5559,7 +5558,8 @@ public class MainActivity extends Activity {
     /** Track facts for resolve_record_target, in position order. */
     private String buildTracksJson() {
         JSONArray arr = new JSONArray();
-        for (LibraryDb.Track t : mTracks) {
+        for (TrackModel tm : currentTracks()) {
+            LibraryDb.Track t = tm.row;
             try {
                 JSONObject o = new JSONObject();
                 o.put("id", t.id);
@@ -5578,12 +5578,12 @@ public class MainActivity extends Activity {
     private LibraryDb.Track createNumberedTrack(String entryId)
             throws Exception {
         int maxPos = 0;
-        for (LibraryDb.Track t : mTracks) {
+        for (TrackModel tm : currentTracks()) {
+            LibraryDb.Track t = tm.row;
             maxPos = Math.max(maxPos, t.position);
         }
         LibraryDb.Track created =
                 libraryDb.createTrack(entryId, "Track " + (maxPos + 1));
-        mTracks = libraryDb.listTracks(entryId);
         refreshCurrentProject();
         return created;
     }
@@ -5610,15 +5610,18 @@ public class MainActivity extends Activity {
             if ("create".equals(action)) {
                 return createNumberedTrack(entryId);
             }
+            TrackModel pickedTm = trackModelById(
+                    pyResultField(result, "track_id"));
             LibraryDb.Track picked =
-                    getTrackById(pyResultField(result, "track_id"));
+                    pickedTm != null ? pickedTm.row : null;
             if (picked != null && !picked.locked && !trackHasAudio(picked)) {
                 return picked;
             }
             return createNumberedTrack(entryId);
         } catch (Exception e) {
             Log.w("AudioMechanic", "resolve_record_target failed", e);
-            for (LibraryDb.Track t : mTracks) {
+            for (TrackModel tm : currentTracks()) {
+                LibraryDb.Track t = tm.row;
                 if (!t.locked && !trackHasAudio(t)) {
                     return t;
                 }
@@ -5670,7 +5673,8 @@ public class MainActivity extends Activity {
      */
     private double renderTrackChain(String entryId, String trackId)
             throws Exception {
-        LibraryDb.Track track = getTrackById(trackId);
+        TrackModel tmForRow = trackModelById(trackId);
+        LibraryDb.Track track = tmForRow != null ? tmForRow.row : null;
         if (track == null) {
             throw new Exception("track not found");
         }
@@ -5774,7 +5778,8 @@ public class MainActivity extends Activity {
      */
     private List<MixTrack> collectMixWavs() {
         final List<MixTrack> mixTracks = new ArrayList<>();
-        for (LibraryDb.Track t : mTracks) {
+        for (TrackModel tm : currentTracks()) {
+            LibraryDb.Track t = tm.row;
             try {
                 File render = libraryDb.trackRenderFile(t.id);
                 if (render.exists() && render.length() > 44) {
@@ -5801,7 +5806,8 @@ public class MainActivity extends Activity {
             tracksJson.put(o);
         }
         JSONArray mutedJson = new JSONArray();
-        for (LibraryDb.Track t : mTracks) {
+        for (TrackModel tm : currentTracks()) {
+            LibraryDb.Track t = tm.row;
             if (t.muted) {
                 mutedJson.put(t.id);
             }
@@ -6234,7 +6240,7 @@ public class MainActivity extends Activity {
             // Punch-in: the selected track is unlocked, holds audio, and
             // the user set a start marker. The take replaces audio from
             // the marker; otherwise the normal target rule applies.
-            LibraryDb.Track selected = getSelectedTrack();
+            LibraryDb.Track selected = selectedRow();
             pendingPunchStartSec = null;
             LibraryDb.Track target;
             if (selected != null && !selected.locked
@@ -6580,17 +6586,19 @@ public class MainActivity extends Activity {
                 // Track 1's audio, so no target resolution is needed.
                 entryId = createProjectForTake(take, wasLive, captureLabel);
                 ensureTracksForEntry(entryId);
-                if (mTracks.isEmpty()) {
+                if (currentTracks().isEmpty()) {
                     throw new Exception("new project has no tracks");
                 }
-                trackId = mTracks.get(0).id;
+                trackId = currentTracks().get(0).row.id;
             } else {
                 entryId = openEntryId();
                 ensureTracksForEntry(entryId);
                 // Use the track picked at record start; resolve again
                 // only if it somehow vanished mid-session.
+                TrackModel targetTm =
+                        trackModelById(pendingRecordTrackId);
                 LibraryDb.Track target =
-                        getTrackById(pendingRecordTrackId);
+                        targetTm != null ? targetTm.row : null;
                 if (target == null) {
                     target = resolveRecordTarget();
                 }
@@ -6765,7 +6773,8 @@ public class MainActivity extends Activity {
         diagTrackId = null;
         diagSummaryCache.clear();
         final WaveformView tcWave = laneWave(trackId);
-        final LibraryDb.Track track = getTrackById(trackId);
+        TrackModel tmForRow = trackModelById(trackId);
+        final LibraryDb.Track track = tmForRow != null ? tmForRow.row : null;
         final String rawPath = (!wasPunch && track != null)
                 ? track.wavPath : null;
         setBusy(true);
@@ -6835,13 +6844,13 @@ public class MainActivity extends Activity {
                     + finalTxt + ".";
         }
         try {
-            LibraryDb.Track t = getTrackById(trackId);
+            TrackModel tmForRow = trackModelById(trackId);
+            LibraryDb.Track t = tmForRow != null ? tmForRow.row : null;
             if (t != null && t.name != null
                     && t.name.matches("Track \\d+")) {
                 libraryDb.renameTrack(trackId, nextSoundcheckLabel());
             }
             libraryDb.setTrackMuted(trackId, true);
-            mTracks = libraryDb.listTracks(entryId);
             refreshCurrentProject();
             mixDirty = true;
             releasePlayer();
@@ -6862,7 +6871,8 @@ public class MainActivity extends Activity {
     /** First free default label: soundcheck, soundcheck_1, ... */
     private String nextSoundcheckLabel() {
         java.util.Set<String> names = new java.util.HashSet<>();
-        for (LibraryDb.Track t : mTracks) {
+        for (TrackModel tm : currentTracks()) {
+            LibraryDb.Track t = tm.row;
             names.add(t.name);
         }
         if (!names.contains("soundcheck")) {
@@ -7600,7 +7610,8 @@ public class MainActivity extends Activity {
 
         int audible = 0;
         StringBuilder names = new StringBuilder();
-        for (LibraryDb.Track t : mTracks) {
+        for (TrackModel tm : currentTracks()) {
+            LibraryDb.Track t = tm.row;
             if (trackHasAudio(t)) {
                 if (audible > 0) {
                     names.append(", ");
@@ -7687,7 +7698,8 @@ public class MainActivity extends Activity {
             return;
         }
         final List<LibraryDb.Track> audible = new ArrayList<>();
-        for (LibraryDb.Track t : mTracks) {
+        for (TrackModel tm : currentTracks()) {
+            LibraryDb.Track t = tm.row;
             if (trackHasAudio(t)) {
                 audible.add(t);
             }
@@ -8151,7 +8163,8 @@ public class MainActivity extends Activity {
         lanesProgressStart();
         new Thread(() -> {
             try {
-                for (LibraryDb.Track t : mTracks) {
+                for (TrackModel tm : currentTracks()) {
+                    LibraryDb.Track t = tm.row;
                     if (trackHasAudio(t)) {
                         renderTrackBlocking(entryId, t.id);
                     }
