@@ -6,8 +6,10 @@
 2. Run the full unittest suite.
 3. Static-check the Android/Gradle scaffold: required files exist and contain
    their key markers (plugin ids, manifest package, Chaquopy bootstrap, UI).
+4. Check the ops manifest Android asset is byte-identical to the Python
+   manifest (single source of truth for the effect list).
 
-Exit 0 only if all three pass. Also wired into Gradle as `gradle testPython`.
+Exit 0 only if all pass. Also wired into Gradle as `gradle testPython`.
 """
 
 import compileall
@@ -56,6 +58,8 @@ SCAFFOLD_CHECKS = [
     ("app/src/main/python/audiofx/android_bridge.py", "DSP_VERSION"),
     ("app/src/main/python/audiofx/registry.py", "REGISTRY"),
     ("app/src/main/python/audiofx/registry.py", "def apply_op"),
+    ("app/src/main/assets/ops_manifest.json", "\"renderable\""),
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", "ops_manifest.json"),
     ("app/src/main/python/audiofx/android_bridge.py", "registry"),
     ("tests/test_registry.py", "TestRegistryCompleteness"),
     ("tests/test_pipeline.py", "render_chain"),
@@ -210,6 +214,32 @@ def main():
             ok = False
     if ok:
         print("scaffold OK")
+
+    print("== 4. Ops manifest sync check ==")
+    # OO-2: the Android asset must be byte-identical to the Python
+    # manifest — it is a generated copy of the single source of truth,
+    # never a second hand-maintained list (design doc 10.2).
+    py_manifest_rel = "app/src/main/python/audiofx/ops_manifest.json"
+    asset_manifest_rel = "app/src/main/assets/ops_manifest.json"
+    py_manifest = os.path.join(ROOT, py_manifest_rel)
+    asset_manifest = os.path.join(ROOT, asset_manifest_rel)
+    if not os.path.isfile(py_manifest):
+        print("MISSING FILE:", py_manifest_rel)
+        ok = False
+    elif not os.path.isfile(asset_manifest):
+        print("MISSING FILE:", asset_manifest_rel)
+        ok = False
+    else:
+        with open(py_manifest, "rb") as f:
+            py_bytes = f.read()
+        with open(asset_manifest, "rb") as f:
+            asset_bytes = f.read()
+        if py_bytes != asset_bytes:
+            print("MANIFEST MISMATCH: %s differs from %s"
+                  % (asset_manifest_rel, py_manifest_rel))
+            ok = False
+        else:
+            print("manifest copies identical (%d bytes)" % len(py_bytes))
 
     print("VERIFY " + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
