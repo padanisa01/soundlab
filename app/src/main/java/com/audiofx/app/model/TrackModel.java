@@ -54,12 +54,18 @@ public final class TrackModel {
         return db.trackRenderFile(row.id);
     }
 
-    /** A track counts as having audio when its take WAV holds
-     * samples: the exact predicate of MainActivity.trackHasAudio
-     * (file exists and is longer than the 44-byte WAV header),
-     * applied to {@link #takeFile()}. */
+    /** A track counts as having audio when its WAV holds samples:
+     * the exact predicate of MainActivity.trackHasAudio, applied
+     * to the row's wavPath (for legacy-adopted Track 1 that is the
+     * entry pristine path, NOT the track take file -- the two
+     * disagree there, and trackHasAudio is the established
+     * behavior). Null row / null wavPath -> false; otherwise the
+     * file must exist and be longer than the 44-byte WAV header. */
     public boolean hasAudio() {
-        File f = takeFile();
-        return f != null && f.exists() && f.length() > 44;
+        if (row == null || row.wavPath == null) {
+            return false;
+        }
+        File f = new File(row.wavPath);
+        return f.exists() && f.length() > 44;
     }
 }

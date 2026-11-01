@@ -104,6 +104,7 @@ SCAFFOLD_CHECKS = [
     ("app/src/main/java/com/audiofx/app/model/Project.java", "class Project"),
     ("app/src/main/java/com/audiofx/app/model/Project.java", "trackById"),
     ("app/src/main/java/com/audiofx/app/model/TrackModel.java", "class TrackModel"),
+    ("app/src/main/java/com/audiofx/app/model/TrackModel.java", "hasAudio"),
     ("app/src/main/java/com/audiofx/app/model/ProjectSettings.java", "class ProjectSettings"),
     ("app/src/main/java/com/audiofx/app/LibraryDb.java", "loadProject"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "currentProject"),
