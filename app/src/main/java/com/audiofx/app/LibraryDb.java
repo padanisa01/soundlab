@@ -291,22 +291,9 @@ public class LibraryDb extends SQLiteOpenHelper {
     // ------------------------------------------------------------------
 
     /**
-     * Creates an entry with a generated UUID. updated_at is set to createdAt.
-     * Returns the new entry id.
-     */
-    public synchronized String createEntry(String name, long createdAt,
-            double durationS, int sampleRate, int channels,
-            String source, String captureLabel, String dspVersion,
-            String pristinePath) {
-        return createEntryWithId(UUID.randomUUID().toString(), name, createdAt,
-                durationS, sampleRate, channels, source, captureLabel,
-                dspVersion, pristinePath);
-    }
-
-    /**
      * Creates an entry with a caller-supplied id (lets MainActivity know the
-     * UUID before copying the take into takeFile(id)). Otherwise identical to
-     * {@link #createEntry}: updated_at is set to createdAt, returns the id.
+     * UUID before copying the take into takeFile(id)): updated_at is set to
+     * createdAt, returns the id.
      *
      * @throws IllegalArgumentException if id is null/empty or an entry with
      *         that id already exists
@@ -1009,9 +996,6 @@ public class LibraryDb extends SQLiteOpenHelper {
                 out.add(new Export(
                         c.getLong(c.getColumnIndexOrThrow("id")),
                         c.getString(c.getColumnIndexOrThrow("entry_id")),
-                        c.getString(c.getColumnIndexOrThrow("file_name")),
-                        c.getString(c.getColumnIndexOrThrow("folder_label")),
-                        c.getInt(c.getColumnIndexOrThrow("op_count")),
                         c.getLong(c.getColumnIndexOrThrow("created_at"))));
             }
         }
@@ -1168,18 +1152,11 @@ public class LibraryDb extends SQLiteOpenHelper {
     public static class Export {
         public final long rowId;
         public final String entryId;
-        public final String fileName;
-        public final String folderLabel;
-        public final int opCount;
         public final long createdAt;
 
-        public Export(long rowId, String entryId, String fileName,
-                String folderLabel, int opCount, long createdAt) {
+        public Export(long rowId, String entryId, long createdAt) {
             this.rowId = rowId;
             this.entryId = entryId;
-            this.fileName = fileName;
-            this.folderLabel = folderLabel;
-            this.opCount = opCount;
             this.createdAt = createdAt;
         }
     }

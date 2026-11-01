@@ -33,7 +33,7 @@ EXPECTED_OPS = {
     "tune_up", "punch_in", "livefx",
 }
 
-# Java MainActivity.isRenderableOp: every op except livefx (livefx and
+# Java renderable-op set: every op except livefx (livefx and
 # the Java-only display label "fork" are not renderable; "fork" is not
 # a Python op at all).
 EXPECTED_NON_RENDERABLE = {"livefx"}

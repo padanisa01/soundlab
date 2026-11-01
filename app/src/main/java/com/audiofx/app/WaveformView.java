@@ -230,10 +230,6 @@ public class WaveformView extends View {
         invalidate();
     }
 
-    public boolean isLive() {
-        return liveMode;
-    }
-
     /** Live recording indicator: a sine wave from 0 to the current take
      * time t, amplitude-modulated by the captured envelope, with a red
      * vertical marker and time label at t (the right edge; the take fills
@@ -335,15 +331,6 @@ public class WaveformView extends View {
         this.selectionListener = listener;
     }
 
-    /** Current selection as audio fractions, or nulls when unset. */
-    public Float getSelectionStart() {
-        return selStartFrac;
-    }
-
-    public Float getSelectionEnd() {
-        return selEndFrac;
-    }
-
     public void clearSelection() {
         if (selStartFrac != null || selEndFrac != null) {
             selStartFrac = null;
@@ -428,23 +415,6 @@ public class WaveformView extends View {
                 break;
         }
         return true;
-    }
-
-    /** Programmatic zoom (e.g. from +/- buttons): factor > 1 zooms in. */
-    public void zoomBy(float factor) {
-        if (getWidth() <= 0) {
-            return;
-        }
-        float newZoom = Math.max(1f, Math.min(MAX_ZOOM, zoom * factor));
-        if (newZoom == zoom) {
-            return;
-        }
-        // Keep the center of the view anchored.
-        float centerFrac = viewStart + 0.5f / zoom;
-        zoom = newZoom;
-        viewStart = newZoom == 1f ? 0f : centerFrac - 0.5f / newZoom;
-        clampViewStart();
-        invalidate();
     }
 
     private class ScaleListener extends ScaleGestureDetector.SimpleOnScaleGestureListener {
