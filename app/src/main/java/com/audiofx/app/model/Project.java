@@ -15,9 +15,10 @@ import java.util.List;
  * {@link #tracks} is an unmodifiable defensive copy of the list
  * handed to the constructor, in LibraryDb.listTracks order
  * (position ASC): callers cannot mutate the project's track list
- * through it. {@link #selected} is mutable session state, set by
- * MainActivity in this slice (selection moves fully onto Project
- * in OO-6).
+ * through it. {@link #selected} is mutable session state: as of
+ * OO-6 it is the ONLY home of the track selection (MainActivity's
+ * former selected-id field is gone); MainActivity sets it via
+ * {@link #trackById} and reads it via {@link #selectedId()}.
  */
 public final class Project {
 
@@ -36,6 +37,11 @@ public final class Project {
         this.tracks = Collections.unmodifiableList(new ArrayList<>(tracks));
         this.settings = settings;
         this.selected = null;
+    }
+
+    /** The selected track's id, or null when none is selected. */
+    public String selectedId() {
+        return selected != null ? selected.row.id : null;
     }
 
     /** The track with the given id, or null when there is none
