@@ -46,7 +46,6 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
@@ -630,13 +629,11 @@ public class MainActivity extends Activity {
      */
     private static final class EffectHistoryDb {
         static final class Row {
-            final String fileHash;
             final String effects;
             final long timestamp;
             final String outputPath;
 
-            Row(String fileHash, String effects, long timestamp, String outputPath) {
-                this.fileHash = fileHash;
+            Row(String effects, long timestamp, String outputPath) {
                 this.effects = effects;
                 this.timestamp = timestamp;
                 this.outputPath = outputPath;
@@ -651,7 +648,7 @@ public class MainActivity extends Activity {
                 stack = new ArrayDeque<>();
                 rows.put(fileHash, stack);
             }
-            stack.addLast(new Row(fileHash, effects, timestamp, outputPath));
+            stack.addLast(new Row(effects, timestamp, outputPath));
         }
 
         /** Remove and return the most recent row, or null if none. */
@@ -664,11 +661,6 @@ public class MainActivity extends Activity {
         Row latest(String fileHash) {
             Deque<Row> stack = rows.get(fileHash);
             return (stack == null || stack.isEmpty()) ? null : stack.peekLast();
-        }
-
-        boolean canUndo(String fileHash) {
-            Deque<Row> stack = rows.get(fileHash);
-            return stack != null && !stack.isEmpty();
         }
 
         /** All rows for the file, oldest first (for the history panel). */
@@ -718,7 +710,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         // OO-2: load the renderable-op set from the bundled ops manifest
-        // before any isRenderableOp call can happen (all call sites are
+        // before any renderable-op check can happen (all call sites are
         // in methods that only run after onCreate).
         loadRenderableOps();
         // Crash reporter: write uncaught exceptions to a file in Downloads
@@ -2211,22 +2203,12 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** True for ops that render_chain executes (display-only ops excluded). */
-    private static boolean isRenderableOp(String opType) {
-        if (RENDERABLE_OPS == null) {
-            throw new IllegalStateException(
-                    "RENDERABLE_OPS not loaded: loadRenderableOps() must"
-                            + " run in onCreate before any renderable-op check");
-        }
-        return RENDERABLE_OPS.contains(opType);
-    }
-
     /** The track's effect history as the domain model (OO-3): the
      * persisted op rows wrapped by EffectHistory, with renderability
      * resolved against RENDERABLE_OPS here so the model package
      * stays free of MainActivity. LibraryDb.listOps declares no
      * throws; a null RENDERABLE_OPS fails loudly in Effect.fromOp
-     * (only when the track has ops), as isRenderableOp did. */
+     * (only when the track has ops). */
     private EffectHistory historyOf(String entryId, String trackId) {
         return EffectHistory.fromOps(
                 libraryDb.listOps(entryId, trackId), RENDERABLE_OPS);
@@ -5726,39 +5708,6 @@ public class MainActivity extends Activity {
             tmp.delete();
         }
         return dur;
-    }
-
-    /** Full render of one track only, with the standard progress UI. */
-    private void renderTrack(String trackId) {
-        final String entryId = openEntryId();
-        if (entryId == null || trackId == null) {
-            return;
-        }
-        final WaveformView rtWave = laneWave(trackId);
-        setBusy(true);
-        if (rtWave != null) {
-            rtWave.startProgressAnimation();
-        }
-        setStatus("Rendering track...");
-        new Thread(() -> {
-            try {
-                renderTrackBlocking(entryId, trackId);
-                runOnUiThread(() -> {
-                    setBusy(false);
-                    if (rtWave != null) {
-                        rtWave.finishProgressAnimation();
-                    }
-                });
-            } catch (Exception e) {
-                runOnUiThread(() -> {
-                    setStatus("Render failed: " + e.getMessage());
-                    setBusy(false);
-                    if (rtWave != null) {
-                        rtWave.clearProgress();
-                    }
-                });
-            }
-        }).start();
     }
 
     /**
