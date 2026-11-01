@@ -6,6 +6,11 @@ import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 
+import com.audiofx.app.model.EffectHistory;
+import com.audiofx.app.model.Project;
+import com.audiofx.app.model.ProjectSettings;
+import com.audiofx.app.model.TrackModel;
+
 import org.json.JSONObject;
 
 import java.io.File;
@@ -18,6 +23,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -318,6 +324,33 @@ public class LibraryDb extends SQLiteOpenHelper {
             }
             return readEntry(c);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Project assembly (OO-4)
+    // ------------------------------------------------------------------
+
+    /**
+     * Assembles the domain Project for an entry (design doc 4.2):
+     * the entry row, one TrackModel per track from listTracks
+     * (in its returned order), each with its EffectHistory built
+     * from listOps resolved against renderableOps, and a fresh
+     * ProjectSettings. The single composition point for the model;
+     * all SQL stays in this class. Project.selected is left null —
+     * MainActivity sets it. Returns null when the entry is missing.
+     */
+    public Project loadProject(String entryId, Set<String> renderableOps) {
+        LibraryEntry entry = getEntry(entryId);
+        if (entry == null) {
+            return null;
+        }
+        List<TrackModel> tracks = new ArrayList<>();
+        for (Track track : listTracks(entryId)) {
+            tracks.add(new TrackModel(this, track,
+                    EffectHistory.fromOps(listOps(entryId, track.id),
+                            renderableOps)));
+        }
+        return new Project(entry, tracks, new ProjectSettings());
     }
 
     /** All entries, newest first (updated_at DESC). */

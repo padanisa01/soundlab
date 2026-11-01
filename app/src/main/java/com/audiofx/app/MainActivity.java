@@ -65,6 +65,8 @@ import com.google.android.gms.ads.MobileAds;
 
 import com.audiofx.app.model.Effect;
 import com.audiofx.app.model.EffectHistory;
+import com.audiofx.app.model.Project;
+import com.audiofx.app.model.TrackModel;
 
 import com.chaquo.python.PyObject;
 import com.chaquo.python.Python;
@@ -237,6 +239,11 @@ public class MainActivity extends Activity {
     private boolean mixDirty = false;
     private String playerOutputPath;   // file the live player was built for
     private String currentEntryId;     // library entry being edited; null for picked files
+    /** OO-4 transition: the domain Project for currentEntryId, kept
+     * in sync by refreshCurrentProject() at project/track sync
+     * points. Legacy fields (mTracks/currentEntryId/selectedTrackId)
+     * remain the working state for all existing logic in this slice. */
+    private Project currentProject;
     private LibraryDb libraryDb;
     private double audioDurationSec;
     private int outputSeq;  // disambiguates output files within the same millisecond
@@ -1851,6 +1858,7 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {
         }
         selectedTrackId = track.id;
+        refreshCurrentProject();
         refreshLanes();
         updateTrackActions();
         onTrackContentChanged(track.id);
@@ -1948,6 +1956,7 @@ public class MainActivity extends Activity {
                 } catch (Exception ignored) {
                 }
                 currentEntryId = null;
+                refreshCurrentProject();
                 setStatus("Recording file missing — removed from library.");
                 return;
             }
@@ -1983,6 +1992,7 @@ public class MainActivity extends Activity {
         ensureTracksForEntry(entryId);
         refreshLanes();
         updateTrackActions();
+        refreshCurrentProject();
         int depth = undoDepth(selectedTrackId);
         setStatus(depth > 0
                 ? "Loaded from library — " + depth + " effects in history."
@@ -2010,6 +2020,28 @@ public class MainActivity extends Activity {
             reRenderEntry("Rendering...");
         } else {
             refreshAllLanePeaks();
+        }
+    }
+
+    /** OO-4 transition sync: rebuild currentProject from the legacy
+     * fields (the working state in this slice) via
+     * LibraryDb.loadProject, and point Project.selected at the
+     * TrackModel for selectedTrackId. Picked-file mode has no
+     * project: a null libraryDb or currentEntryId nulls the model.
+     * RENDERABLE_OPS is passed straight through, matching the
+     * codebase's posture in historyOf/Effect.fromOp: a null set
+     * fails loudly there when ops exist, never silently. Called
+     * (one line) at every mTracks reload site, at the settled point
+     * of adoptLibraryEntry, and at currentEntryId transitions
+     * outside it — see the OO-4 hook inventory. */
+    private void refreshCurrentProject() {
+        if (libraryDb == null || currentEntryId == null) {
+            currentProject = null;
+            return;
+        }
+        currentProject = libraryDb.loadProject(currentEntryId, RENDERABLE_OPS);
+        if (currentProject != null) {
+            currentProject.selected = currentProject.trackById(selectedTrackId);
         }
     }
 
@@ -4729,6 +4761,7 @@ public class MainActivity extends Activity {
         if (selectedTrackId == null || getTrackById(selectedTrackId) == null) {
             selectedTrackId = mTracks.isEmpty() ? null : mTracks.get(0).id;
         }
+        refreshCurrentProject();
     }
 
     private LibraryDb.Track getTrackById(String trackId) {
@@ -5205,6 +5238,7 @@ public class MainActivity extends Activity {
         try {
             libraryDb.setTrackLocked(trackId, locked);
             mTracks = libraryDb.listTracks(currentEntryId);
+            refreshCurrentProject();
             refreshLanes();
             setStatus(getString(locked
                     ? R.string.track_locked : R.string.track_unlocked));
@@ -5231,6 +5265,7 @@ public class MainActivity extends Activity {
         try {
             libraryDb.setTrackVolume(trackId, gain);
             mTracks = libraryDb.listTracks(currentEntryId);
+            refreshCurrentProject();
             mixDirty = true;
             releasePlayer(); // the playing mix no longer matches
             setStatus("Track volume " + Math.round(gain * 100) + "%");
@@ -5250,6 +5285,7 @@ public class MainActivity extends Activity {
         try {
             libraryDb.setTrackMuted(trackId, muted);
             mTracks = libraryDb.listTracks(currentEntryId);
+            refreshCurrentProject();
             refreshLanes();
             mixDirty = true;
             releasePlayer(); // the playing mix no longer matches
@@ -5303,6 +5339,7 @@ public class MainActivity extends Activity {
                     try {
                         libraryDb.renameTrack(track.id, name);
                         mTracks = libraryDb.listTracks(currentEntryId);
+                        refreshCurrentProject();
                         refreshLanes();
                     } catch (Exception e) {
                         setStatus("Rename failed: " + e.getMessage());
@@ -5361,6 +5398,7 @@ public class MainActivity extends Activity {
                 if (selectedTrackId == null && !mTracks.isEmpty()) {
                     selectedTrackId = mTracks.get(0).id;
                 }
+                refreshCurrentProject();
                 refreshLanes();
                 updateProjectDuration();
                 mixDirty = true;
@@ -5439,6 +5477,7 @@ public class MainActivity extends Activity {
         LibraryDb.Track created =
                 libraryDb.createTrack(entryId, "Track " + (maxPos + 1));
         mTracks = libraryDb.listTracks(entryId);
+        refreshCurrentProject();
         return created;
     }
 
@@ -6079,6 +6118,7 @@ public class MainActivity extends Activity {
                 setStatus("Recording — tap the red button to stop.");
             } catch (Exception e) {
                 currentEntryId = null;
+                refreshCurrentProject();
                 setStatus("Could not create project.");
                 return;
             }
@@ -6694,6 +6734,7 @@ public class MainActivity extends Activity {
             }
             libraryDb.setTrackMuted(trackId, true);
             mTracks = libraryDb.listTracks(entryId);
+            refreshCurrentProject();
             mixDirty = true;
             releasePlayer();
             refreshLanes();
