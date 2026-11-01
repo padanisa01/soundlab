@@ -63,6 +63,9 @@ import com.google.android.gms.ads.AdSize;
 import com.google.android.gms.ads.AdView;
 import com.google.android.gms.ads.MobileAds;
 
+import com.audiofx.app.model.Effect;
+import com.audiofx.app.model.EffectHistory;
+
 import com.chaquo.python.PyObject;
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
@@ -1391,9 +1394,10 @@ public class MainActivity extends Activity {
         if (currentEntryId != null && selectedTrackId != null) {
             // History follows the selected track.
             try {
-                for (LibraryDb.Op op
-                        : libraryDb.listOps(currentEntryId, selectedTrackId)) {
-                    rows.add(new String[]{op.label, fmtDateTime(op.createdAt)});
+                for (Effect effect
+                        : historyOf(currentEntryId, selectedTrackId).effects()) {
+                    rows.add(new String[]{effect.label,
+                            fmtDateTime(effect.createdAt)});
                 }
             } catch (Exception ignored) {
             }
@@ -2065,41 +2069,33 @@ public class MainActivity extends Activity {
         return RENDERABLE_OPS.contains(opType);
     }
 
+    /** The track's effect history as the domain model (OO-3): the
+     * persisted op rows wrapped by EffectHistory, with renderability
+     * resolved against RENDERABLE_OPS here so the model package
+     * stays free of MainActivity. LibraryDb.listOps declares no
+     * throws; a null RENDERABLE_OPS fails loudly in Effect.fromOp
+     * (only when the track has ops), as isRenderableOp did. */
+    private EffectHistory historyOf(String entryId, String trackId) {
+        return EffectHistory.fromOps(
+                libraryDb.listOps(entryId, trackId), RENDERABLE_OPS);
+    }
+
     /** Undo depth = the given track's persisted renderable op count;
      * survives restarts. */
     private int undoDepth(String trackId) {
         if (currentEntryId == null || trackId == null) {
             return 0;
         }
-        int n = 0;
         try {
-            for (LibraryDb.Op op : libraryDb.listOps(currentEntryId, trackId)) {
-                if (isRenderableOp(op.opType)) {
-                    n++;
-                }
-            }
+            return historyOf(currentEntryId, trackId).undoDepth();
         } catch (Exception ignored) {
         }
-        return n;
+        return 0;
     }
 
     /** ops_json for render_chain: the track's renderable ops, in seq order. */
     private String buildOpsJson(String entryId, String trackId) throws Exception {
-        StringBuilder sb = new StringBuilder("[");
-        boolean first = true;
-        for (LibraryDb.Op op : libraryDb.listOps(entryId, trackId)) {
-            if (!isRenderableOp(op.opType)) {
-                continue; // livefx / fork are display-only
-            }
-            if (!first) {
-                sb.append(",");
-            }
-            first = false;
-            sb.append("{\"op\":").append(JSONObject.quote(op.opType))
-                    .append(",\"params\":").append(op.paramsJson).append("}");
-        }
-        sb.append("]");
-        return sb.toString();
+        return historyOf(entryId, trackId).toOpsJson();
     }
 
     /**
@@ -4595,18 +4591,13 @@ public class MainActivity extends Activity {
             return;
         }
         final String trackId = track.id;
-        final LibraryDb.Op last;
+        final Effect last;
         try {
-            List<LibraryDb.Op> ops = libraryDb.listOps(entryId, trackId);
-            LibraryDb.Op found = null;
-            for (int i = ops.size() - 1; i >= 0; i--) {
-                if (isRenderableOp(ops.get(i).opType)) {
-                    found = ops.get(i);
-                    break;
-                }
-            }
+            EffectHistory history = historyOf(entryId, trackId);
+            Effect found = history.lastRenderable();
+            List<Effect> effects = history.effects();
             if (found == null
-                    || !isRenderableOp(ops.get(ops.size() - 1).opType)) {
+                    || !effects.get(effects.size() - 1).renderable()) {
                 // Nothing renderable to undo; display-only ops are never popped.
                 Toast.makeText(this, "Nothing to undo", Toast.LENGTH_SHORT).show();
                 return;
@@ -4626,9 +4617,9 @@ public class MainActivity extends Activity {
             try {
                 // Punch-in takes are durable files referenced by the op;
                 // delete the take when its op is undone.
-                if ("punch_in".equals(last.opType)) {
+                if ("punch_in".equals(last.name)) {
                     try {
-                        String takePath = new JSONObject(last.paramsJson)
+                        String takePath = last.params()
                                 .optString("take_path", null);
                         if (takePath != null) {
                             new File(takePath).delete();
@@ -4658,7 +4649,7 @@ public class MainActivity extends Activity {
                 // Roll the popped op back on: re-add with the same content
                 // (it regains the top seq, preserving order).
                 try {
-                    libraryDb.addOp(entryId, trackId, last.opType,
+                    libraryDb.addOp(entryId, trackId, last.name,
                             last.paramsJson, last.label);
                 } catch (Exception ignored) {
                 }
