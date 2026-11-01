@@ -44,8 +44,6 @@ from . import repair as _repair
 
 #: Band split frequencies, low -> high (contract-frozen).
 CROSSOVERS_HZ = (120.0, 1000.0, 6000.0)
-#: Dynamic-EQ center frequencies, low -> high (contract-frozen).
-DYN_EQ_FREQS_HZ = (300.0, 3000.0, 6500.0)
 
 #: Raised-cosine crossover transition width, in octaves, centered
 #: (in log-frequency) on each crossover frequency.

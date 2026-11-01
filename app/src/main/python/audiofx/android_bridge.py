@@ -5,17 +5,14 @@ effect order Warmth -> Reverb -> Echo.
 """
 
 import json
-import math
 import os
 import wave
 
 from . import diagnose as _diagnose
 from . import mastering as _mastering
-from . import pitch as _pitch
 from . import quality as _quality
-from . import repair as _repair
 from . import tonic as _tonic
-from .effects import Echo, Reverb, Warmth
+from .effects import Reverb
 from . import registry as _registry
 from .registry import (
     _apply_fx,
@@ -33,8 +30,6 @@ try:
 except ImportError:  # pragma: no cover
     _np = None
     _HAVE_NP = False
-
-import hashlib as _hashlib
 
 # Chain-tip cache: entry id -> [float samples, sample_rate]. Lets a new op
 # render incrementally from the previous tip instead of re-rendering the
@@ -58,10 +53,8 @@ def _tip_seed(cache_key, samples, sample_rate):
     store = samples.copy() if _HAVE_NP else list(samples)
     _tip_cache[cache_key] = [store, sample_rate]
 from .pipeline import (
-    EffectChain,
     encode_mp3,
     read_wav_mono,
-    splice_with_crossfade,
     waveform_peaks as _waveform_peaks,
     write_wav,
 )

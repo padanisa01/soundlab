@@ -1,5 +1,4 @@
 """Tests for tonic detection and swara notation (audiofx.tonic)."""
-import math
 import sys
 import os
 import unittest

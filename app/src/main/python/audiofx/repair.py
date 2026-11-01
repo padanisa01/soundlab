@@ -79,10 +79,6 @@ def _istft(spectra, n_fft, hop, length):
     return out[:length]
 
 
-def _freqs(n_fft, sample_rate):
-    return _np.fft.rfftfreq(n_fft, 1.0 / sample_rate)
-
-
 # ---------------------------------------------------------------------------
 # Trivial ops (pure Python)
 # ---------------------------------------------------------------------------
