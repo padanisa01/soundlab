@@ -1749,6 +1749,116 @@ public class MainActivity extends Activity {
 
     private void adoptAudioFile(File wavFile, String displayName,
             AudioDecoder.DecodeResult decodeResult) {
+        // With a project already open that has audio, the user
+        // chooses: add the file as a new track in this project, or
+        // start a new project with it. Otherwise (nothing open, or
+        // an empty project) it simply becomes a new project.
+        if (currentEntryId != null && currentProjectHasAudioTrack()) {
+            showImportChoiceDialog(wavFile, displayName, decodeResult);
+            return;
+        }
+        adoptAudioFileAsProject(wavFile, displayName, decodeResult);
+    }
+
+    /** True when the open project already holds at least one
+     * track with audio -- the condition for offering the
+     * add-to-project choice on Open. */
+    private boolean currentProjectHasAudioTrack() {
+        for (LibraryDb.Track t : mTracks) {
+            if (trackHasAudio(t)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Open-flow choice (shown only when the current project
+     * already has a track): add the picked file to this project
+     * as a new track, or start a new project with it. */
+    private void showImportChoiceDialog(final File wavFile,
+            final String displayName,
+            final AudioDecoder.DecodeResult decodeResult) {
+        new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+                .setTitle("Open")
+                .setMessage("Add \"" + displayName + "\" to the "
+                        + "current project as a new track, or start "
+                        + "a new project with it?")
+                .setPositiveButton("Add to project", (d, w) ->
+                        addAudioFileToCurrentProject(wavFile,
+                                displayName))
+                .setNegativeButton("New project", (d, w) ->
+                        adoptAudioFileAsProject(wavFile, displayName,
+                                decodeResult))
+                .setNeutralButton("Cancel", null)
+                .show();
+    }
+
+    /** Import the picked file as a NEW TRACK of the current
+     * project: the file becomes the track's pristine take (no
+     * ops), named after the file. Selected and rendered like a
+     * fresh take. */
+    private void addAudioFileToCurrentProject(File wavFile,
+            String displayName) {
+        final String entryId = currentEntryId;
+        if (entryId == null) {
+            adoptAudioFileAsProject(wavFile, displayName, null);
+            return;
+        }
+        LibraryDb.Track track = null;
+        File dest = null;
+        try {
+            track = libraryDb.createTrack(entryId,
+                    importTrackName(displayName));
+            dest = libraryDb.trackTakeFile(track.id);
+            copyFile(wavFile, dest);
+            double[] info = wavInfo(dest);
+            // AM-3 import cap, same as the new-project path.
+            if (dest.length() > MAX_IMPORT_BYTES
+                    || info[2] > MAX_IMPORT_SECONDS) {
+                dest.delete();
+                libraryDb.deleteTrack(track.id);
+                setStatus("This file is too large to import "
+                        + "(limit 500 MB or 2 hours).");
+                return;
+            }
+        } catch (Exception e) {
+            if (dest != null) {
+                dest.delete();
+            }
+            if (track != null) {
+                try {
+                    libraryDb.deleteTrack(track.id);
+                } catch (Exception ignored) {
+                }
+            }
+            setStatus("Could not import file: " + e.getMessage());
+            return;
+        }
+        try {
+            mTracks = libraryDb.listTracks(entryId);
+        } catch (Exception ignored) {
+        }
+        selectedTrackId = track.id;
+        refreshLanes();
+        updateTrackActions();
+        onTrackContentChanged(track.id);
+        setStatus("Added \"" + track.name + "\" to this project.");
+    }
+
+    /** Display name -> track/project name: strip the extension,
+     * trim, fall back to a generic label. */
+    private static String importTrackName(String displayName) {
+        String name = displayName;
+        int dot = name.lastIndexOf('.');
+        if (dot > 0) {
+            name = name.substring(0, dot);
+        }
+        name = name.trim();
+        return name.isEmpty() ? "Imported audio" : name;
+    }
+
+    private void adoptAudioFileAsProject(File wavFile, String displayName,
+            AudioDecoder.DecodeResult decodeResult) {
         final String entryId = UUID.randomUUID().toString();
         final File dest = libraryDb.takeFile(entryId);
         if (decodeResult != null) {
@@ -1767,15 +1877,7 @@ public class MainActivity extends Activity {
                 setStatus("This file is too large to import (limit 500 MB or 2 hours).");
                 return;
             }
-            String name = displayName;
-            int dot = name.lastIndexOf('.');
-            if (dot > 0) {
-                name = name.substring(0, dot);
-            }
-            name = name.trim();
-            if (name.isEmpty()) {
-                name = "Imported audio";
-            }
+            String name = importTrackName(displayName);
             libraryDb.createEntryWithId(entryId, name, System.currentTimeMillis(),
                     info[2], (int) info[0], (int) info[1],
                     "import", displayName, LibraryDb.DSP_VERSION,

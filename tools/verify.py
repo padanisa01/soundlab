@@ -76,6 +76,8 @@ SCAFFOLD_CHECKS = [
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "builtinMicDevice"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "phoneMicPref"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "runMasterMultiband"),
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", "showImportChoiceDialog"),
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", "addAudioFileToCurrentProject"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "showSaveDialog"),
     ("app/src/main/java/com/audiofx/app/WaveformView.java", "startLive"),
     ("app/src/main/java/com/audiofx/app/MicCapture.java", "blockPeak"),

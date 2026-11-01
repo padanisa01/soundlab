@@ -21,6 +21,15 @@ or the plan changes.
   Imports are capped at 500 MB or 2 hours, whichever is hit first;
   larger files are rejected with a message before decoding, and the
   Python WAV reader enforces the same cap as defense in depth.
+- **Open into project choice** (2026-11-01): when a project with
+  at least one audio track is already open, picking a file asks
+  first -- "Add to project" imports the file as a NEW TRACK of
+  the current project (the file becomes that track's pristine
+  take, named after the file, selected and rendered like a fresh
+  take), "New project" keeps the old behavior (the file becomes
+  a new project), and Cancel imports nothing. With no project
+  open (or an empty one) the file simply becomes a new project,
+  as before. The same import cap applies on both paths.
 - **Record**: the red record button captures from the microphone to a
   16-bit PCM WAV take, tried in order: UNPROCESSED @ 48 kHz stereo
   (raw, no AGC or noise suppression — the highest-fidelity path),
