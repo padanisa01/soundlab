@@ -2124,6 +2124,34 @@ public class MainActivity extends Activity {
         return tm != null ? tm.notation : null;
     }
 
+    /** Write-through tonic persistence (OO-7, design doc section
+     * 11): mirror a TrackModel's tonic into tracks.tonic_json with
+     * exactly the value held in memory (TonicInfo's five-key JSON,
+     * the shape loadProject parses back), so the persisted and
+     * in-memory values can never diverge. Called at every tonic
+     * assignment site: applyNotation, the background-estimation
+     * store, and the pitch-align analytic update. */
+    private void persistTrackTonic(TrackModel tm) {
+        if (libraryDb == null || tm == null || tm.row == null) {
+            return;
+        }
+        libraryDb.setTrackTonic(tm.row.id,
+                tm.tonic != null ? tm.tonic.toJson().toString() : null);
+    }
+
+    /** Write-through notation persistence (OO-7): mirror a
+     * TrackModel's notation into tracks.notation_json with exactly
+     * the value held in memory (the events array's toString(), the
+     * shape loadProject parses back). Called at the one notation
+     * assignment site: applyNotation. */
+    private void persistTrackNotation(TrackModel tm) {
+        if (libraryDb == null || tm == null || tm.row == null) {
+            return;
+        }
+        libraryDb.setTrackNotation(tm.row.id,
+                tm.notation != null ? tm.notation.toString() : null);
+    }
+
     /** Renderable op names loaded once from the bundled ops manifest
      * (app/src/main/assets/ops_manifest.json, byte-identical to the
      * Python audiofx/ops_manifest.json — tools/verify.py enforces the
@@ -2720,6 +2748,8 @@ public class MainActivity extends Activity {
             if (tm != null) {
                 tm.notation = events;
                 tm.tonic = TonicInfo.fromJson(info);
+                persistTrackNotation(tm);
+                persistTrackTonic(tm);
             }
             refreshLaneHeaderFor(key);
             refreshNotationUi();
@@ -2875,6 +2905,7 @@ public class MainActivity extends Activity {
                     TrackModel tm = trackModelById(trackId);
                     if (tm != null) {
                         tm.tonic = TonicInfo.fromJson(info);
+                        persistTrackTonic(tm);
                     }
                     refreshLaneHeaderFor(trackId);
                     if (trackId.equals(selectedId())) {
@@ -3088,6 +3119,7 @@ public class MainActivity extends Activity {
                             tm.tonic = TonicInfo.fromJson(
                                     shiftedTonicInfo(tm.tonic.toJson(),
                                             s.shiftSemis));
+                            persistTrackTonic(tm);
                         } catch (Exception ignored) {
                         }
                     }

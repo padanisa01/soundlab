@@ -129,6 +129,8 @@ SCAFFOLD_CHECKS = [
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "TonicInfo.fromJson"),
     ("app/src/main/java/com/audiofx/app/LibraryDb.java", "new JSONObject(track.tonicJson)"),
     ("app/src/main/java/com/audiofx/app/LibraryDb.java", "new JSONArray(track.notationJson)"),
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", "persistTrackTonic"),
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", "persistTrackNotation"),
     ("app/src/main/java/com/audiofx/app/model/TrackModel.java", "public TonicInfo tonic"),
     ("app/src/main/java/com/audiofx/app/model/TrackModel.java", "public JSONArray notation"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "historyOf"),

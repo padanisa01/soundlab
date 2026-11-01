@@ -397,7 +397,12 @@ or the plan changes.
   200 ms position updater. Results are kept per
   track and follow track selection. A track's notation PERSISTS —
   across edits, new recordings, and project re-opens — until
-  Notation is run again on that track (which replaces it). Picked
+  Notation is run again on that track (which replaces it). The
+  track's tonic and notation are stored per track in the library
+  database (`tonic_json` / `notation_json` on the track row) and
+  restored when the project opens, so they survive app restarts
+  too; every in-memory update (Notation, background estimation,
+  tonic-align) is written through to the stored copy. Picked
   files (no project) notate the current render or pristine input.
 - **Tonic match check** (Settings > Multi-track, `tonic_match_check`,
   default OFF -- the switch gates the whole experience): with it on,
