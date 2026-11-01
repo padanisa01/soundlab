@@ -84,7 +84,6 @@
 
             <!-- Track actions: open / save / share -->
             <LinearLayout
-                android:id="@+id/track_card"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:background="@drawable/bg_card"
@@ -300,7 +299,6 @@
 
                 <!-- Record mode: normal take or soundcheck take. -->
                 <LinearLayout
-                    android:id="@+id/record_mode_row"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_gravity="center_horizontal"
