@@ -71,9 +71,11 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.text.SimpleDateFormat;
@@ -82,9 +84,11 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -701,6 +705,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // OO-2: load the renderable-op set from the bundled ops manifest
+        // before any isRenderableOp call can happen (all call sites are
+        // in methods that only run after onCreate).
+        loadRenderableOps();
         // Crash reporter: write uncaught exceptions to a file in Downloads
         // so they can be shared without debug tools.
         final Thread.UncaughtExceptionHandler defaultHandler =
@@ -2001,19 +2009,60 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** Renderable op names loaded once from the bundled ops manifest
+     * (app/src/main/assets/ops_manifest.json, byte-identical to the
+     * Python audiofx/ops_manifest.json — tools/verify.py enforces the
+     * equality). Null until loadRenderableOps() runs in onCreate. */
+    private static Set<String> RENDERABLE_OPS;
+
+    /** Load RENDERABLE_OPS from the ops_manifest.json asset: the names
+     * whose "renderable" flag is true. The manifest is bundled trusted
+     * data, so any failure is loud (RuntimeException), never a silent
+     * fallback — a silent empty set would drop ops from renders, the
+     * historical pitch_shift bug. */
+    private void loadRenderableOps() {
+        if (RENDERABLE_OPS != null) {
+            return;
+        }
+        InputStream in = null;
+        try {
+            in = getAssets().open("ops_manifest.json");
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) != -1) {
+                out.write(buf, 0, n);
+            }
+            JSONArray manifest = new JSONArray(out.toString("UTF-8"));
+            Set<String> ops = new HashSet<>();
+            for (int i = 0; i < manifest.length(); i++) {
+                JSONObject entry = manifest.getJSONObject(i);
+                if (entry.optBoolean("renderable", false)) {
+                    ops.add(entry.getString("name"));
+                }
+            }
+            RENDERABLE_OPS = ops;
+        } catch (IOException | JSONException e) {
+            throw new RuntimeException(
+                    "Failed to load renderable ops from ops_manifest.json", e);
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
     /** True for ops that render_chain executes (display-only ops excluded). */
     private static boolean isRenderableOp(String opType) {
-        return "fx".equals(opType) || "normalize".equals(opType)
-                || "trim".equals(opType) || "join".equals(opType)
-                || "dc_remove".equals(opType) || "fade_ends".equals(opType)
-                || "silence_trim".equals(opType) || "hum_notch".equals(opType)
-                || "declip".equals(opType) || "denoise".equals(opType)
-                || "deplosive".equals(opType) || "deess".equals(opType)
-                || "level".equals(opType) || "loudness".equals(opType)
-                || "eq_balance".equals(opType) || "tune_up".equals(opType)
-                || "pitch_shift".equals(opType)
-                || "mastering".equals(opType)
-                || "punch_in".equals(opType);
+        if (RENDERABLE_OPS == null) {
+            throw new IllegalStateException(
+                    "RENDERABLE_OPS not loaded: loadRenderableOps() must"
+                            + " run in onCreate before any renderable-op check");
+        }
+        return RENDERABLE_OPS.contains(opType);
     }
 
     /** Undo depth = the given track's persisted renderable op count;

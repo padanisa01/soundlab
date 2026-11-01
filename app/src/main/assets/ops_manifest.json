@@ -1,0 +1,164 @@
+[
+  {
+    "name": "fx",
+    "renderable": true,
+    "defaults": {
+      "warmth": 0.5,
+      "reverb_preset": "studio",
+      "echo": 0.3,
+      "start_sec": null,
+      "end_sec": null
+    },
+    "summary": "Warmth -> Reverb -> Echo effect chain"
+  },
+  {
+    "name": "pitch_shift",
+    "renderable": true,
+    "defaults": {
+      "semitones": 0.0,
+      "engine": "wsola"
+    },
+    "summary": "Shift pitch by semitones (WSOLA or formant engine)"
+  },
+  {
+    "name": "mastering",
+    "renderable": true,
+    "defaults": {
+      "bands": null,
+      "dyn_eq": null
+    },
+    "summary": "Multiband compression + dynamic EQ mastering"
+  },
+  {
+    "name": "normalize",
+    "renderable": true,
+    "defaults": {
+      "target_db": -1.0,
+      "percentile": 99.0
+    },
+    "summary": "Peak normalize, gain capped by the absolute peak"
+  },
+  {
+    "name": "trim",
+    "renderable": true,
+    "defaults": {
+      "start_sec": null,
+      "end_sec": null
+    },
+    "summary": "Silence the selected window (duration unchanged)"
+  },
+  {
+    "name": "join",
+    "renderable": true,
+    "defaults": {
+      "start_sec": null,
+      "end_sec": null
+    },
+    "summary": "Cut the selected window out and join the remainder"
+  },
+  {
+    "name": "dc_remove",
+    "renderable": true,
+    "defaults": {},
+    "summary": "Remove DC offset (subtract the mean)"
+  },
+  {
+    "name": "fade_ends",
+    "renderable": true,
+    "defaults": {
+      "fade_sec": 0.02
+    },
+    "summary": "Short linear fades at both ends"
+  },
+  {
+    "name": "silence_trim",
+    "renderable": true,
+    "defaults": {
+      "threshold_db": -45.0,
+      "min_silence_sec": 0.5
+    },
+    "summary": "Trim leading/trailing silence below a threshold"
+  },
+  {
+    "name": "hum_notch",
+    "renderable": true,
+    "defaults": {
+      "freq_hz": 60.0
+    },
+    "summary": "Notch out mains hum at the given frequency"
+  },
+  {
+    "name": "declip",
+    "renderable": true,
+    "defaults": {},
+    "summary": "Reconstruct clipped (flat-topped) samples"
+  },
+  {
+    "name": "denoise",
+    "renderable": true,
+    "defaults": {
+      "strength": 0.5
+    },
+    "summary": "Spectral-gating noise reduction"
+  },
+  {
+    "name": "deplosive",
+    "renderable": true,
+    "defaults": {},
+    "summary": "Reduce plosive low-frequency bursts"
+  },
+  {
+    "name": "deess",
+    "renderable": true,
+    "defaults": {
+      "reduction_db": 8.0
+    },
+    "summary": "Reduce sibilance (de-esser)"
+  },
+  {
+    "name": "level",
+    "renderable": true,
+    "defaults": {},
+    "summary": "Level volume over time (slow gain riding)"
+  },
+  {
+    "name": "loudness",
+    "renderable": true,
+    "defaults": {
+      "target_lufs": -16.0
+    },
+    "summary": "Normalize integrated loudness to a LUFS target"
+  },
+  {
+    "name": "eq_balance",
+    "renderable": true,
+    "defaults": {
+      "low_gain_db": 0.0,
+      "high_gain_db": 0.0
+    },
+    "summary": "Low/high shelf EQ balance"
+  },
+  {
+    "name": "tune_up",
+    "renderable": true,
+    "defaults": {
+      "fixes": []
+    },
+    "summary": "Composite op: expand and apply a list of fix sub-ops"
+  },
+  {
+    "name": "punch_in",
+    "renderable": true,
+    "defaults": {
+      "take_path": null,
+      "start_frame": 0
+    },
+    "summary": "Splice a recorded take into the track at a frame offset"
+  },
+  {
+    "name": "livefx",
+    "renderable": false,
+    "defaults": {},
+    "summary": "Display-only label for live-FX takes (never re-rendered)"
+  }
+]
