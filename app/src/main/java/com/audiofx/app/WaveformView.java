@@ -469,12 +469,15 @@ public class WaveformView extends View {
 
     /**
      * Animate the fill easing toward ~92% over ~20s while background work
-     * runs. The fill spans the whole waveform by default; use
+     * runs. The fill spans the lane's whole waveform by default: on the
+     * shared project timeline that is the content span [0, contentFrac],
+     * NOT the full project width — a short track on a long project must
+     * not sweep the silent tail past its own audio (BUG-1). Use
      * {@link #startProgressAnimation(float, float)} to confine it to a
      * window. Call {@link #finishProgressAnimation()} when the work completes.
      */
     public void startProgressAnimation() {
-        startProgressAnimation(0f, 1f);
+        startProgressAnimation(0f, contentFrac());
     }
 
     /**
