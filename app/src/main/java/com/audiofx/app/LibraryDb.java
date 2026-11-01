@@ -9,8 +9,10 @@ import android.database.sqlite.SQLiteOpenHelper;
 import com.audiofx.app.model.EffectHistory;
 import com.audiofx.app.model.Project;
 import com.audiofx.app.model.ProjectSettings;
+import com.audiofx.app.model.TonicInfo;
 import com.audiofx.app.model.TrackModel;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
@@ -361,6 +363,11 @@ public class LibraryDb extends SQLiteOpenHelper {
      * ProjectSettings. The single composition point for the model;
      * all SQL stays in this class. Project.selected is left null —
      * MainActivity sets it. Returns null when the entry is missing.
+     *
+     * OO-7: each TrackModel's tonic/notation is restored from the
+     * track row's persisted tonic_json / notation_json (DB v5).
+     * A null/empty column leaves the field null; malformed stored
+     * JSON degrades to null — it must never crash project load.
      */
     public Project loadProject(String entryId, Set<String> renderableOps) {
         LibraryEntry entry = getEntry(entryId);
@@ -369,9 +376,26 @@ public class LibraryDb extends SQLiteOpenHelper {
         }
         List<TrackModel> tracks = new ArrayList<>();
         for (Track track : listTracks(entryId)) {
-            tracks.add(new TrackModel(this, track,
+            TrackModel tm = new TrackModel(this, track,
                     EffectHistory.fromOps(listOps(entryId, track.id),
-                            renderableOps)));
+                            renderableOps));
+            if (track.tonicJson != null && !track.tonicJson.isEmpty()) {
+                try {
+                    tm.tonic = TonicInfo.fromJson(
+                            new JSONObject(track.tonicJson));
+                } catch (Exception ignored) {
+                    tm.tonic = null;
+                }
+            }
+            if (track.notationJson != null
+                    && !track.notationJson.isEmpty()) {
+                try {
+                    tm.notation = new JSONArray(track.notationJson);
+                } catch (Exception ignored) {
+                    tm.notation = null;
+                }
+            }
+            tracks.add(tm);
         }
         return new Project(entry, tracks, new ProjectSettings());
     }

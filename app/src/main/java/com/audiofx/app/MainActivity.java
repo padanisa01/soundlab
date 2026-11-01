@@ -2048,18 +2048,13 @@ public class MainActivity extends Activity {
      * point of adoptLibraryEntry, and at project open transitions
      * outside it — see the OO-4 hook inventory, carried forward.
      *
-     * OO-5 carry-over (coordinator ruling): loadProject builds
-     * fresh TrackModels with null tonic/notation, but this refresh
-     * runs at many IN-PROJECT reload sites (lock/mute/volume/
-     * rename/delete/ensure-tracks), where the old never-cleared
-     * session maps made tonic/notation survive. To preserve that,
-     * when the reload is for the SAME entryId the outgoing
-     * project's TrackModels hand their tonic/notation to the
-     * incoming ones by track id. When the entryId differs (project
-     * switch/close) there is NO carry-over — the state is dropped
-     * (sanctioned; OO-7 restores it from the DB). This is refresh
-     * assembly only: the state still lives solely on the current
-     * project's TrackModels, never in a side cache. */
+     * OO-7: the OO-5 same-entry tonic/notation hand-off is gone.
+     * loadProject restores tonic/notation from the DB (tracks
+     * .tonic_json / .notation_json), and every in-memory assignment
+     * is mirrored write-through to those columns, so a reload at
+     * any site — in-project or project switch alike — restores
+     * exactly the current values with no carry-over. Only the
+     * OO-6 selection carry-over below remains. */
     private void refreshCurrentProjectFor(String entryId) {
         if (libraryDb == null || entryId == null) {
             currentProject = null;
@@ -2068,16 +2063,6 @@ public class MainActivity extends Activity {
         Project outgoing = currentProject;
         currentProject = libraryDb.loadProject(entryId, RENDERABLE_OPS);
         if (currentProject != null) {
-            if (outgoing != null && outgoing.entry != null
-                    && entryId.equals(outgoing.entry.id)) {
-                for (TrackModel incoming : currentProject.tracks) {
-                    TrackModel old = outgoing.trackById(incoming.row.id);
-                    if (old != null) {
-                        incoming.tonic = old.tonic;
-                        incoming.notation = old.notation;
-                    }
-                }
-            }
             currentProject.selected = currentProject.trackById(
                     outgoing != null ? outgoing.selectedId() : null);
         }

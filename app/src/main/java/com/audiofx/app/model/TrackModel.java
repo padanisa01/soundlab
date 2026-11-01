@@ -15,9 +15,11 @@ import java.io.File;
  * sketch names a NotationResult type for the notation field, but
  * the app's real notation payload is a JSONArray of notation
  * events, so the field is a JSONArray. {@link #tonic} and
- * {@link #notation} hold the track's session state as of OO-5
- * (moved here from MainActivity's former per-track maps; null
- * until estimated/notated, and not yet persisted — OO-7).
+ * {@link #notation} hold the track's state as of OO-5 (moved here
+ * from MainActivity's former per-track maps; null until
+ * estimated/notated), persisted per track since OO-7 (DB v5
+ * tonic_json / notation_json, restored by LibraryDb.loadProject
+ * and mirrored write-through at every assignment site).
  *
  * File paths are resolved through LibraryDb (the repository owns
  * the library file layout); this class never builds paths itself.
