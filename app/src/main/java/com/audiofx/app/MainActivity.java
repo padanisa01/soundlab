@@ -18,6 +18,7 @@ import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.RectF;
+import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import android.media.AudioAttributes;
 import android.media.AudioDeviceInfo;
@@ -37,6 +38,7 @@ import android.provider.OpenableColumns;
 import android.util.Log;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.Window;
 import android.view.animation.AlphaAnimation;
 import android.view.animation.Animation;
 import android.widget.ArrayAdapter;
@@ -1202,11 +1204,26 @@ public class MainActivity extends Activity {
                 maybeEstimateTonics();
             }
         });
-        new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
+        AlertDialog dialog = new AlertDialog.Builder(
+                this, R.style.Theme_SoundLab_Dialog)
                 .setTitle("Settings")
                 .setView(view)
                 .setPositiveButton("Close", null)
-                .show();
+                .create();
+        dialog.show();
+        // Almost full-screen: with wrap-content sizing the dialog
+        // window collapses to the switch column's width and the
+        // row labels wrap mid-word (the rows' text column is
+        // weighted, so it needs a real width to lay out against).
+        // Size the window explicitly -- 94% of the display width,
+        // 88% of its height; the layout's ScrollView scrolls
+        // whatever does not fit.
+        Window window = dialog.getWindow();
+        if (window != null) {
+            DisplayMetrics dm = getResources().getDisplayMetrics();
+            window.setLayout((int) (dm.widthPixels * 0.94),
+                    (int) (dm.heightPixels * 0.88));
+        }
     }
 
     /** Bind a Settings switch to a boolean pref with an explicit
