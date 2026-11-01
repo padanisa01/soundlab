@@ -996,9 +996,6 @@ public class LibraryDb extends SQLiteOpenHelper {
                 out.add(new Export(
                         c.getLong(c.getColumnIndexOrThrow("id")),
                         c.getString(c.getColumnIndexOrThrow("entry_id")),
-                        c.getString(c.getColumnIndexOrThrow("file_name")),
-                        c.getString(c.getColumnIndexOrThrow("folder_label")),
-                        c.getInt(c.getColumnIndexOrThrow("op_count")),
                         c.getLong(c.getColumnIndexOrThrow("created_at"))));
             }
         }
@@ -1155,18 +1152,11 @@ public class LibraryDb extends SQLiteOpenHelper {
     public static class Export {
         public final long rowId;
         public final String entryId;
-        public final String fileName;
-        public final String folderLabel;
-        public final int opCount;
         public final long createdAt;
 
-        public Export(long rowId, String entryId, String fileName,
-                String folderLabel, int opCount, long createdAt) {
+        public Export(long rowId, String entryId, long createdAt) {
             this.rowId = rowId;
             this.entryId = entryId;
-            this.fileName = fileName;
-            this.folderLabel = folderLabel;
-            this.opCount = opCount;
             this.createdAt = createdAt;
         }
     }
