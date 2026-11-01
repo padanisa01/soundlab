@@ -2048,18 +2048,13 @@ public class MainActivity extends Activity {
      * point of adoptLibraryEntry, and at project open transitions
      * outside it — see the OO-4 hook inventory, carried forward.
      *
-     * OO-5 carry-over (coordinator ruling): loadProject builds
-     * fresh TrackModels with null tonic/notation, but this refresh
-     * runs at many IN-PROJECT reload sites (lock/mute/volume/
-     * rename/delete/ensure-tracks), where the old never-cleared
-     * session maps made tonic/notation survive. To preserve that,
-     * when the reload is for the SAME entryId the outgoing
-     * project's TrackModels hand their tonic/notation to the
-     * incoming ones by track id. When the entryId differs (project
-     * switch/close) there is NO carry-over — the state is dropped
-     * (sanctioned; OO-7 restores it from the DB). This is refresh
-     * assembly only: the state still lives solely on the current
-     * project's TrackModels, never in a side cache. */
+     * OO-7: the OO-5 same-entry tonic/notation hand-off is gone.
+     * loadProject restores tonic/notation from the DB (tracks
+     * .tonic_json / .notation_json), and every in-memory assignment
+     * is mirrored write-through to those columns, so a reload at
+     * any site — in-project or project switch alike — restores
+     * exactly the current values with no carry-over. Only the
+     * OO-6 selection carry-over below remains. */
     private void refreshCurrentProjectFor(String entryId) {
         if (libraryDb == null || entryId == null) {
             currentProject = null;
@@ -2068,16 +2063,6 @@ public class MainActivity extends Activity {
         Project outgoing = currentProject;
         currentProject = libraryDb.loadProject(entryId, RENDERABLE_OPS);
         if (currentProject != null) {
-            if (outgoing != null && outgoing.entry != null
-                    && entryId.equals(outgoing.entry.id)) {
-                for (TrackModel incoming : currentProject.tracks) {
-                    TrackModel old = outgoing.trackById(incoming.row.id);
-                    if (old != null) {
-                        incoming.tonic = old.tonic;
-                        incoming.notation = old.notation;
-                    }
-                }
-            }
             currentProject.selected = currentProject.trackById(
                     outgoing != null ? outgoing.selectedId() : null);
         }
@@ -2137,6 +2122,47 @@ public class MainActivity extends Activity {
     private JSONArray trackNotation(String trackId) {
         TrackModel tm = trackModelById(trackId);
         return tm != null ? tm.notation : null;
+    }
+
+    /** Write-through tonic persistence (OO-7, design doc section
+     * 11): mirror a TrackModel's tonic into tracks.tonic_json with
+     * exactly the value held in memory (TonicInfo's five-key JSON,
+     * the shape loadProject parses back), so the persisted and
+     * in-memory values can never diverge. Called at every tonic
+     * assignment site: applyNotation, the background-estimation
+     * store, and the pitch-align analytic update. */
+    private void persistTrackTonic(TrackModel tm) {
+        // Best-effort: persistence is write-through bookkeeping —
+        // a DB failure must never surface in the user flow (the
+        // in-memory value stays authoritative for this session),
+        // so any failure here is swallowed, never thrown onward.
+        try {
+            if (libraryDb == null || tm == null || tm.row == null) {
+                return;
+            }
+            libraryDb.setTrackTonic(tm.row.id,
+                    tm.tonic != null ? tm.tonic.toJson().toString() : null);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** Write-through notation persistence (OO-7): mirror a
+     * TrackModel's notation into tracks.notation_json with exactly
+     * the value held in memory (the events array's toString(), the
+     * shape loadProject parses back). Called at the one notation
+     * assignment site: applyNotation. */
+    private void persistTrackNotation(TrackModel tm) {
+        // Best-effort, like persistTrackTonic: a DB failure must
+        // never surface in the user flow; the in-memory value
+        // stays authoritative for this session.
+        try {
+            if (libraryDb == null || tm == null || tm.row == null) {
+                return;
+            }
+            libraryDb.setTrackNotation(tm.row.id,
+                    tm.notation != null ? tm.notation.toString() : null);
+        } catch (Exception ignored) {
+        }
     }
 
     /** Renderable op names loaded once from the bundled ops manifest
@@ -2735,6 +2761,8 @@ public class MainActivity extends Activity {
             if (tm != null) {
                 tm.notation = events;
                 tm.tonic = TonicInfo.fromJson(info);
+                persistTrackNotation(tm);
+                persistTrackTonic(tm);
             }
             refreshLaneHeaderFor(key);
             refreshNotationUi();
@@ -2890,6 +2918,7 @@ public class MainActivity extends Activity {
                     TrackModel tm = trackModelById(trackId);
                     if (tm != null) {
                         tm.tonic = TonicInfo.fromJson(info);
+                        persistTrackTonic(tm);
                     }
                     refreshLaneHeaderFor(trackId);
                     if (trackId.equals(selectedId())) {
@@ -3103,6 +3132,7 @@ public class MainActivity extends Activity {
                             tm.tonic = TonicInfo.fromJson(
                                     shiftedTonicInfo(tm.tonic.toJson(),
                                             s.shiftSemis));
+                            persistTrackTonic(tm);
                         } catch (Exception ignored) {
                         }
                     }
