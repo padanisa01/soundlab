@@ -402,7 +402,10 @@ or the plan changes.
   default OFF -- the switch gates the whole experience): with it on,
   every track that has audio but no tonic yet gets a background
   Sa-only estimate (`tonic_detect_file` in the bridge --
-  `detect_tonic`, no melody tracing) when lanes load; the estimate
+  `detect_tonic`, no melody tracing) when lanes load; while a
+  track is being estimated its tonic label shows "Sa ..." and
+  softly blinks red/yellow (the waveform progress animation is
+  reserved for user-initiated work); the estimate
   shows in the lane header exactly like a notation tonic, but
   notation events are not produced (karaoke still needs a real
   Notation run). When two or more tracks' tonics differ by more

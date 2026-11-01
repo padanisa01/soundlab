@@ -7,6 +7,7 @@ import android.os.Looper;
 import android.text.InputType;
 import android.view.Gravity;
 import android.Manifest;
+import android.animation.ArgbEvaluator;
 import android.animation.ObjectAnimator;
 import android.animation.ValueAnimator;
 import android.content.Intent;
@@ -14,6 +15,7 @@ import android.content.SharedPreferences;
 import android.content.UriPermission;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.RectF;
 import android.util.TypedValue;
@@ -2643,20 +2645,59 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /** Start the "estimating" indicator for a lane (UI thread):
+     * the tonic label shows a placeholder and softly blinks
+     * red/yellow -- deliberately NOT the waveform progress
+     * animation, which is reserved for user-initiated work. */
+    private void startTonicBlink(String trackId) {
+        TrackLane lane = laneById.get(trackId);
+        if (lane == null || lane.tonicView == null) {
+            return;
+        }
+        cancelTonicBlink(lane);
+        TextView tv = lane.tonicView;
+        tv.setText("Sa \u2026");
+        tv.setVisibility(View.VISIBLE);
+        ValueAnimator anim = ValueAnimator.ofObject(
+                new ArgbEvaluator(),
+                Color.rgb(198, 40, 40), Color.rgb(245, 183, 28));
+        anim.setDuration(950);
+        // Effectively "until done" (~19 min), but bounded so a
+        // blink on a discarded lane can never run forever.
+        anim.setRepeatCount(600);
+        anim.setRepeatMode(ValueAnimator.REVERSE);
+        anim.addUpdateListener(a -> {
+            try {
+                tv.setTextColor((Integer) a.getAnimatedValue());
+            } catch (Exception ignored) {
+            }
+        });
+        lane.tonicBlink = anim;
+        anim.start();
+    }
+
+    /** Stop a lane's estimating blink and restore the tonic
+     * label's resting color (UI thread). */
+    private void cancelTonicBlink(TrackLane lane) {
+        if (lane.tonicBlink != null) {
+            lane.tonicBlink.cancel();
+            lane.tonicBlink = null;
+        }
+        if (lane.tonicView != null) {
+            lane.tonicView.setTextColor(getColor(R.color.sl_mut));
+        }
+    }
+
     /** One track's background Sa estimate (worker thread): render
      * the track, detect the tonic only, store it for the lane
      * header. Best-effort -- a track whose tonic cannot be found
      * stays unlabelled and out of the mismatch check. Notation
      * events are NOT touched: the karaoke readout still requires a
-     * real Notation run. */
+     * real Notation run. While it runs, the lane's tonic label
+     * blinks red/yellow (see startTonicBlink). */
     private void estimateTrackTonicBg(final String entryId,
             final String trackId) {
-        runOnUiThread(() -> {
-            WaveformView w = laneWave(trackId);
-            if (w != null) {
-                w.startProgressAnimation();
-            }
-        });
+        runOnUiThread(() -> startTonicBlink(trackId));
         try {
             if (tonicInfoByTrack.get(trackId) != null) {
                 return; // a Notation run beat us to it
@@ -2686,9 +2727,13 @@ public class MainActivity extends Activity {
             // an error in an unrelated flow.
         } finally {
             runOnUiThread(() -> {
-                WaveformView w = laneWave(trackId);
-                if (w != null) {
-                    w.finishProgressAnimation();
+                TrackLane lane = laneById.get(trackId);
+                if (lane != null) {
+                    cancelTonicBlink(lane);
+                    LibraryDb.Track t = getTrackById(trackId);
+                    if (t != null) {
+                        updateLaneHeader(lane, t);
+                    }
                 }
             });
         }
@@ -5274,7 +5319,13 @@ public class MainActivity extends Activity {
         lane.nameView.setText(t.name);
         JSONObject tonicInfo = tonicInfoByTrack.get(t.id);
         if (tonicInfo != null) {
+            cancelTonicBlink(lane);
             lane.tonicView.setText(tonicText(tonicInfo));
+            lane.tonicView.setVisibility(View.VISIBLE);
+        } else if (lane.tonicBlink != null
+                && lane.tonicBlink.isRunning()) {
+            // Background estimation in flight: keep the blinking
+            // "Sa ..." placeholder instead of hiding the label.
             lane.tonicView.setVisibility(View.VISIBLE);
         } else {
             lane.tonicView.setVisibility(View.GONE);
@@ -5734,6 +5785,7 @@ public class MainActivity extends Activity {
         LinearLayout root;
         TextView nameView;
         TextView tonicView;
+        ValueAnimator tonicBlink;
         TextView swaraView;
         SeekBar volumeBar;
         Button lockBtn;
