@@ -626,6 +626,20 @@ or the plan changes.
 - Every export of a library entry is logged (file name, folder, op count
   at export time); picked files are not logged.
 
+## Internal architecture
+- **OO redesign (2026-11-01, branch `feature/oo-design`)**: a
+  zero-user-facing-change refactor. Effects now live in a single
+  Python registry (`audiofx/registry.py` + `ops_manifest.json`);
+  Java loads its renderable-op set from the same manifest bundled
+  as an asset (no hand-kept whitelist). Project/track state is
+  modelled by `Project` / `TrackModel` / `Effect` /
+  `EffectHistory` / `TonicInfo` classes, and per-track tonic +
+  notation persist in the library DB (v5, `tonic_json` /
+  `notation_json` — see "Tonic and notation"). Verified
+  behavior-identical: golden renders bit-identical to the
+  pre-refactor baseline, full test suite green, dead code
+  removed under proof.
+
 ## First-use tutorial
 - On first launch the app shows a 9-step guided tour: a dim
   overlay (`TutorialOverlayView`, CLEAR-xfermode spotlight hole
