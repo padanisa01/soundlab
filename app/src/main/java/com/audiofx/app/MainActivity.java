@@ -237,12 +237,11 @@ public class MainActivity extends Activity {
      */
     private boolean mixDirty = false;
     private String playerOutputPath;   // file the live player was built for
-    private String currentEntryId;     // library entry being edited; null for picked files
-    /** OO-4 transition: the domain Project for currentEntryId, kept
+    /** OO-4 transition: the domain Project for the open entry, kept
      * in sync by refreshCurrentProject() at project/track sync
-     * points. Legacy fields (mTracks/currentEntryId) remain the
-     * working state for track-list/entry logic in this slice;
-     * selection already lives on the Project (OO-6). */
+     * points. The legacy mTracks field remains the working state
+     * for track-list logic in this slice; entry identity and
+     * selection already live on the Project (OO-6). */
     private Project currentProject;
     private LibraryDb libraryDb;
     private double audioDurationSec;
@@ -586,7 +585,7 @@ public class MainActivity extends Activity {
      * inside a project, the legacy key for picked files. */
     private String notationKey() {
         String selId = selectedId();
-        if (currentEntryId != null && selId != null) {
+        if (currentProject != null && selId != null) {
             return selId;
         }
         return inputPath != null ? "file:" + inputPath
@@ -937,7 +936,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         // The entry may have been renamed or edited in the library.
-        if (currentEntryId != null) {
+        if (currentProject != null) {
             updateProjectName();
             refreshHistoryPanel();
         }
@@ -1329,7 +1328,7 @@ public class MainActivity extends Activity {
      * legacy picked file, the file itself. Single source of truth for
      * every action gate (buttons, menu, Save). */
     private boolean hasUsableAudio() {
-        if (currentEntryId != null) {
+        if (currentProject != null) {
             for (LibraryDb.Track t : mTracks) {
                 if (trackHasAudio(t)) {
                     return true;
@@ -1372,10 +1371,10 @@ public class MainActivity extends Activity {
     /** Project status bar: entry/file name, or an untitled placeholder. */
     private void updateProjectName() {        String name;
         boolean untitled = false;
-        if (currentEntryId != null) {
+        if (currentProject != null) {
             String entryName = null;
             try {
-                LibraryDb.LibraryEntry e = libraryDb.getEntry(currentEntryId);
+                LibraryDb.LibraryEntry e = libraryDb.getEntry(openEntryId());
                 if (e != null) {
                     entryName = e.name;
                 }
@@ -1399,11 +1398,11 @@ public class MainActivity extends Activity {
     /** Effect history panel: library ops or legacy picked-file history. */
     private void refreshHistoryPanel() {
         List<String[]> rows = new ArrayList<>();
-        if (currentEntryId != null && selectedId() != null) {
+        if (currentProject != null && selectedId() != null) {
             // History follows the selected track.
             try {
                 for (Effect effect
-                        : historyOf(currentEntryId, selectedId()).effects()) {
+                        : historyOf(openEntryId(), selectedId()).effects()) {
                     rows.add(new String[]{effect.label,
                             fmtDateTime(effect.createdAt)});
                 }
@@ -1557,7 +1556,7 @@ public class MainActivity extends Activity {
     private void updateUndoBadge() {
         // Library entries use the persisted op chain; picked files use the
         // legacy session-only history.
-        int depth = currentEntryId != null
+        int depth = currentProject != null
                 ? undoDepth(selectedId())
                 : historyDb.depth(fileHash(inputFileName));
         undoBadge.setText(String.valueOf(depth));
@@ -1773,7 +1772,7 @@ public class MainActivity extends Activity {
         // chooses: add the file as a new track in this project, or
         // start a new project with it. Otherwise (nothing open, or
         // an empty project) it simply becomes a new project.
-        if (currentEntryId != null && currentProjectHasAudioTrack()) {
+        if (currentProject != null && currentProjectHasAudioTrack()) {
             showImportChoiceDialog(wavFile, displayName, decodeResult);
             return;
         }
@@ -1819,7 +1818,7 @@ public class MainActivity extends Activity {
      * fresh take. */
     private void addAudioFileToCurrentProject(File wavFile,
             String displayName) {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId == null) {
             adoptAudioFileAsProject(wavFile, displayName, null);
             return;
@@ -1958,13 +1957,12 @@ public class MainActivity extends Activity {
                     libraryDb.deleteEntry(entryId);
                 } catch (Exception ignored) {
                 }
-                currentEntryId = null;
-                refreshCurrentProject();
+                currentProject = null;
                 setStatus("Recording file missing — removed from library.");
                 return;
             }
         }
-        currentEntryId = entryId;
+        refreshCurrentProjectFor(entryId);
         inputPath = e.pristinePath;
         inputFileName = e.name;
         releasePlayer();
@@ -2026,20 +2024,28 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** OO-4 transition sync: rebuild currentProject from the legacy
-     * fields (the working state in this slice) via
+    /** Reload currentProject for the currently open entry (OO-6:
+     * project identity lives on the Project itself, so this is
+     * refreshCurrentProjectFor for the open entry's id; with no
+     * project open it keeps the model null). */
+    private void refreshCurrentProject() {
+        refreshCurrentProjectFor(
+                currentProject != null ? currentProject.entryId() : null);
+    }
+
+    /** Rebuild currentProject for the given entry via
      * LibraryDb.loadProject, and point Project.selected at the
      * TrackModel for the outgoing project's selection (OO-6:
      * selection lives on the Project, so a reload preserves it by
      * track id; a selection whose track vanished becomes null).
-     * Picked-file mode has no
-     * project: a null libraryDb or currentEntryId nulls the model.
-     * RENDERABLE_OPS is passed straight through, matching the
-     * codebase's posture in historyOf/Effect.fromOp: a null set
-     * fails loudly there when ops exist, never silently. Called
-     * (one line) at every mTracks reload site, at the settled point
-     * of adoptLibraryEntry, and at currentEntryId transitions
-     * outside it — see the OO-4 hook inventory.
+     * Picked-file mode has no project: a null libraryDb or a null
+     * entryId nulls the model — exactly the old entry-id field's
+     * null semantics. RENDERABLE_OPS is passed straight through,
+     * matching the codebase's posture in historyOf/Effect.fromOp:
+     * a null set fails loudly there when ops exist, never silently.
+     * Called (one line) at every track reload site, at the settled
+     * point of adoptLibraryEntry, and at project open transitions
+     * outside it — see the OO-4 hook inventory, carried forward.
      *
      * OO-5 carry-over (coordinator ruling): loadProject builds
      * fresh TrackModels with null tonic/notation, but this refresh
@@ -2053,16 +2059,16 @@ public class MainActivity extends Activity {
      * (sanctioned; OO-7 restores it from the DB). This is refresh
      * assembly only: the state still lives solely on the current
      * project's TrackModels, never in a side cache. */
-    private void refreshCurrentProject() {
-        if (libraryDb == null || currentEntryId == null) {
+    private void refreshCurrentProjectFor(String entryId) {
+        if (libraryDb == null || entryId == null) {
             currentProject = null;
             return;
         }
         Project outgoing = currentProject;
-        currentProject = libraryDb.loadProject(currentEntryId, RENDERABLE_OPS);
+        currentProject = libraryDb.loadProject(entryId, RENDERABLE_OPS);
         if (currentProject != null) {
             if (outgoing != null && outgoing.entry != null
-                    && currentEntryId.equals(outgoing.entry.id)) {
+                    && entryId.equals(outgoing.entry.id)) {
                 for (TrackModel incoming : currentProject.tracks) {
                     TrackModel old = outgoing.trackById(incoming.row.id);
                     if (old != null) {
@@ -2074,6 +2080,14 @@ public class MainActivity extends Activity {
             currentProject.selected = currentProject.trackById(
                     outgoing != null ? outgoing.selectedId() : null);
         }
+    }
+
+    /** The open project's entry id (Project.entryId), or null in
+     * picked-file / no-project mode (OO-6): currentProject is null
+     * precisely when no entry is open, so this reproduces the old
+     * entry-id field's null semantics exactly. */
+    private String openEntryId() {
+        return currentProject != null ? currentProject.entryId() : null;
     }
 
     /** The selected track's id (Project.selected), or null when
@@ -2177,11 +2191,11 @@ public class MainActivity extends Activity {
     /** Undo depth = the given track's persisted renderable op count;
      * survives restarts. */
     private int undoDepth(String trackId) {
-        if (currentEntryId == null || trackId == null) {
+        if (currentProject == null || trackId == null) {
             return 0;
         }
         try {
-            return historyOf(currentEntryId, trackId).undoDepth();
+            return historyOf(openEntryId(), trackId).undoDepth();
         } catch (Exception ignored) {
         }
         return 0;
@@ -2273,7 +2287,7 @@ public class MainActivity extends Activity {
      * audible truth). The mix owns the progress tail via refreshMix.
      */
     private void reRenderEntry(String workingMsg) {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId == null) {
             return;
         }
@@ -2349,7 +2363,7 @@ public class MainActivity extends Activity {
                                 final String doneMsg, final Runnable onRendered,
                                 final boolean incremental, final File preRendered,
                                 final double preRenderedDur) {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId == null) {
             return;
         }
@@ -2453,7 +2467,7 @@ public class MainActivity extends Activity {
         // (The post-Improve re-diagnosis calls diagnoseSelectedTrack
         // directly and keeps the remembered value.)
         qualityOvrlBeforeImprove = null;
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId != null) {
             diagnoseSelectedTrack(entryId);
             return;
@@ -2591,7 +2605,7 @@ public class MainActivity extends Activity {
      * the lane waveform's progress animation. Legacy picked files
      * notate their current render / pristine input instead. */
     private void onNotationClicked() {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId != null) {
             notateSelectedTrack(entryId);
             return;
@@ -2741,7 +2755,7 @@ public class MainActivity extends Activity {
         if (!tonicCheckPref()) {
             return;
         }
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId == null || isRecordingSession()) {
             return;
         }
@@ -2764,7 +2778,7 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 for (String trackId : missing) {
-                    if (!entryId.equals(currentEntryId)) {
+                    if (!entryId.equals(openEntryId())) {
                         break; // project changed under us
                     }
                     estimateTrackTonicBg(entryId, trackId);
@@ -2773,7 +2787,7 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     tonicBgRunning = false;
                     tonicBgQueued.removeAll(missing);
-                    if (entryId.equals(currentEntryId)) {
+                    if (entryId.equals(openEntryId())) {
                         // Pick up anything that arrived meanwhile;
                         // drains into the mismatch check.
                         maybeEstimateTonics();
@@ -2918,7 +2932,7 @@ public class MainActivity extends Activity {
         if (!tonicCheckPref() || tonicPopupShowing) {
             return;
         }
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId == null || isRecordingSession()) {
             return;
         }
@@ -3130,7 +3144,7 @@ public class MainActivity extends Activity {
      * (undoable, lane progress animation via applyLibraryOp). If the
      * track has no tonic yet, detect it first, then open the dialog. */
     private void onPitchClicked() {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId == null) {
             setStatus("Pitch shift works on library tracks.");
             return;
@@ -4395,7 +4409,7 @@ public class MainActivity extends Activity {
      * adopt the composite tune_up op onto that track. Locked tracks
      * no-op with the "Track locked" toast. */
     private void runTuneUp(final String findingsJson, final String profile) {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         final LibraryDb.Track track = getSelectedTrack();
         if (entryId == null || track == null) {
             setStatus("Open or record audio first.");
@@ -4502,7 +4516,7 @@ public class MainActivity extends Activity {
      * applies nothing. */
     private void runImproveQuality(final String findingsJson,
             final String qualityJson, final double ovrlBefore) {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         final LibraryDb.Track track = getSelectedTrack();
         if (entryId == null || track == null) {
             setStatus("Open or record audio first.");
@@ -4569,8 +4583,8 @@ public class MainActivity extends Activity {
                     applyLibraryOp("tune_up", params.toString(), summary,
                             "Improving quality...", "Quality improved.",
                             () -> mainHandler.post(() -> {
-                                if (currentEntryId != null) {
-                                    diagnoseSelectedTrack(currentEntryId);
+                                if (currentProject != null) {
+                                    diagnoseSelectedTrack(openEntryId());
                                 }
                             }));
                 });
@@ -4636,7 +4650,7 @@ public class MainActivity extends Activity {
      * params persist the full numeric lists, per the DSP-2 contract:
      * {"preset": name, "bands": [...], "dyn_eq": [...]}. */
     private void runMasterMultiband(final String preset) {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         final LibraryDb.Track track = getSelectedTrack();
         if (entryId == null || track == null) {
             setStatus("Open or record audio first.");
@@ -4691,7 +4705,7 @@ public class MainActivity extends Activity {
     /** Pop the selected track's last renderable op and re-render
      * (cross-session undo). Locked tracks no-op with the toast. */
     private void undoLibraryOp() {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId == null) {
             return;
         }
@@ -4838,7 +4852,7 @@ public class MainActivity extends Activity {
             setStatus("Could not load tracks: " + ex.getMessage());
             mTracks = new ArrayList<>();
         }
-        refreshCurrentProject();
+        refreshCurrentProjectFor(entryId);
         // A stale selection was dropped by the refresh (its track
         // is gone); fall back to the first track, as the pre-OO-6
         // field fix-up did against the reloaded track list.
@@ -4947,7 +4961,7 @@ public class MainActivity extends Activity {
         if (laneList == null) {
             return;
         }
-        if (currentEntryId == null) {
+        if (currentProject == null) {
             lanes.clear();
             laneById.clear();
             laneList.removeAllViews();
@@ -5298,7 +5312,7 @@ public class MainActivity extends Activity {
     }
 
     private void onAddTrackClicked() {
-        if (currentEntryId == null) {
+        if (currentProject == null) {
             return;
         }
         if (isRecordingSession()) {
@@ -5307,7 +5321,7 @@ public class MainActivity extends Activity {
         }
         try {
             LibraryDb.Track created =
-                    createNumberedTrack(currentEntryId);
+                    createNumberedTrack(openEntryId());
             if (currentProject != null) {
                 currentProject.selected =
                         currentProject.trackById(created.id);
@@ -5321,7 +5335,7 @@ public class MainActivity extends Activity {
     }
 
     private void toggleTrackLock(String trackId, boolean locked) {
-        if (currentEntryId == null) {
+        if (currentProject == null) {
             return;
         }
         if (isRecordingSession()) {
@@ -5330,7 +5344,7 @@ public class MainActivity extends Activity {
         }
         try {
             libraryDb.setTrackLocked(trackId, locked);
-            mTracks = libraryDb.listTracks(currentEntryId);
+            mTracks = libraryDb.listTracks(openEntryId());
             refreshCurrentProject();
             refreshLanes();
             setStatus(getString(locked
@@ -5348,7 +5362,7 @@ public class MainActivity extends Activity {
     /** Per-track volume slider release: persist the gain, reload,
      * and invalidate the mix (same contract as mute). */
     private void applyTrackVolume(String trackId, double gain) {
-        if (currentEntryId == null) {
+        if (currentProject == null) {
             return;
         }
         if (isRecordingSession()) {
@@ -5357,7 +5371,7 @@ public class MainActivity extends Activity {
         }
         try {
             libraryDb.setTrackVolume(trackId, gain);
-            mTracks = libraryDb.listTracks(currentEntryId);
+            mTracks = libraryDb.listTracks(openEntryId());
             refreshCurrentProject();
             mixDirty = true;
             releasePlayer(); // the playing mix no longer matches
@@ -5368,7 +5382,7 @@ public class MainActivity extends Activity {
     }
 
     private void toggleTrackMute(String trackId, boolean muted) {
-        if (currentEntryId == null) {
+        if (currentProject == null) {
             return;
         }
         if (isRecordingSession()) {
@@ -5377,7 +5391,7 @@ public class MainActivity extends Activity {
         }
         try {
             libraryDb.setTrackMuted(trackId, muted);
-            mTracks = libraryDb.listTracks(currentEntryId);
+            mTracks = libraryDb.listTracks(openEntryId());
             refreshCurrentProject();
             refreshLanes();
             mixDirty = true;
@@ -5431,7 +5445,7 @@ public class MainActivity extends Activity {
                     }
                     try {
                         libraryDb.renameTrack(track.id, name);
-                        mTracks = libraryDb.listTracks(currentEntryId);
+                        mTracks = libraryDb.listTracks(openEntryId());
                         refreshCurrentProject();
                         refreshLanes();
                     } catch (Exception e) {
@@ -5460,7 +5474,7 @@ public class MainActivity extends Activity {
     }
 
     private void deleteTrack(String trackId) {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId == null) {
             return;
         }
@@ -5581,7 +5595,7 @@ public class MainActivity extends Activity {
      * fallback keeps the same invariant when the bridge fails.
      */
     private LibraryDb.Track resolveRecordTarget() {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId == null) {
             return null;
         }
@@ -5682,7 +5696,7 @@ public class MainActivity extends Activity {
 
     /** Full render of one track only, with the standard progress UI. */
     private void renderTrack(String trackId) {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId == null || trackId == null) {
             return;
         }
@@ -5867,7 +5881,7 @@ public class MainActivity extends Activity {
      * stale (rebuilt on demand). A track with no render clears its lane.
      */
     private void refreshLanePeaks(String trackId) {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         final TrackLane lane = trackId != null ? laneById.get(trackId) : null;
         if (entryId == null || lane == null) {
             return;
@@ -5936,7 +5950,7 @@ public class MainActivity extends Activity {
      * re-render). The mix file goes stale (rebuilt on demand).
      */
     private void refreshAllLanePeaks() {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId == null || lanes.isEmpty()) {
             return;
         }
@@ -6041,7 +6055,7 @@ public class MainActivity extends Activity {
      * mixDirty.
      */
     private String ensureMixFile() throws Exception {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId == null) {
             return null;
         }
@@ -6076,7 +6090,7 @@ public class MainActivity extends Activity {
      */
     /** A track's content changed: re-render that track, refresh its lane. */
     private void onTrackContentChanged(String trackId) {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId == null || trackId == null) {
             return;
         }
@@ -6186,7 +6200,7 @@ public class MainActivity extends Activity {
             stopPlayback();
         }
         // Resolve the take's track now so pause/stop use a stable target.
-        if (currentEntryId == null) {
+        if (currentProject == null) {
             // No project open: create an empty one now so the live lane
             // exists and the recording indicator has a waveform to draw
             // in. The take lands on Track 1 at stop via the normal path.
@@ -6198,7 +6212,7 @@ public class MainActivity extends Activity {
                 libraryDb.createEntryWithId(entryId, name,
                         System.currentTimeMillis(), 0, 44100, 2, "mic",
                         "Mic", LibraryDb.DSP_VERSION, "");
-                currentEntryId = entryId;
+                refreshCurrentProjectFor(entryId);
                 inputFileName = name;
                 // Create Track 1 directly (reserves its take-file path);
                 // ensureTracks would adopt the entry's empty pristine path.
@@ -6210,14 +6224,13 @@ public class MainActivity extends Activity {
                 pendingPreCreatedEntry = true;
                 setStatus("Recording — tap the red button to stop.");
             } catch (Exception e) {
-                currentEntryId = null;
-                refreshCurrentProject();
+                currentProject = null;
                 setStatus("Could not create project.");
                 return;
             }
         }
-        if (currentEntryId != null) {
-            ensureTracksForEntry(currentEntryId);
+        if (currentProject != null) {
+            ensureTracksForEntry(openEntryId());
             // Punch-in: the selected track is unlocked, holds audio, and
             // the user set a start marker. The take replaces audio from
             // the marker; otherwise the normal target rule applies.
@@ -6250,7 +6263,7 @@ public class MainActivity extends Activity {
         setStatus("Preparing...");
         new Thread(() -> {
             File monitor = null;
-            if (currentEntryId != null) {
+            if (currentProject != null) {
                 try {
                     String p = ensureMixFile();
                     if (p != null) {
@@ -6556,7 +6569,7 @@ public class MainActivity extends Activity {
         // Multitrack: the take lands in a track's take file, never as a
         // fresh entry per take. The target rule only ever picks empty,
         // unlocked tracks, so recording never overwrites.
-        final boolean newProject = currentEntryId == null;
+        final boolean newProject = currentProject == null;
         final String entryId;
         final String trackId;
         boolean wasPunch = false;
@@ -6572,7 +6585,7 @@ public class MainActivity extends Activity {
                 }
                 trackId = mTracks.get(0).id;
             } else {
-                entryId = currentEntryId;
+                entryId = openEntryId();
                 ensureTracksForEntry(entryId);
                 // Use the track picked at record start; resolve again
                 // only if it somehow vanished mid-session.
@@ -6917,7 +6930,7 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "Pick an audio file first", Toast.LENGTH_SHORT).show();
             return;
         }
-        if (currentEntryId != null) {
+        if (currentProject != null) {
             // Library entry: cumulative op appended to the persisted chain.
             applyFxOp();
             return;
@@ -7016,7 +7029,7 @@ public class MainActivity extends Activity {
                     Toast.LENGTH_SHORT).show();
             return;
         }
-        if (currentEntryId != null) {
+        if (currentProject != null) {
             // Library entry: cumulative op appended to the persisted chain.
             applyNormalizeOp();
             return;
@@ -7118,7 +7131,7 @@ public class MainActivity extends Activity {
                     Toast.LENGTH_SHORT).show();
             return;
         }
-        if (currentEntryId != null) {
+        if (currentProject != null) {
             // Library entry: cumulative op appended to the persisted chain.
             // (joinSelection already cleared the selection above.)
             applyEditOp(op, startSec, endSec);
@@ -7223,7 +7236,7 @@ public class MainActivity extends Activity {
     }
 
     private void undoLastEffect() {
-        if (currentEntryId != null) {
+        if (currentProject != null) {
             // Library entry: pop the persisted op chain (cross-session).
             undoLibraryOp();
             return;
@@ -7422,7 +7435,7 @@ public class MainActivity extends Activity {
     private void playOutputAt(float fraction) {
         // The waveform shows a lazily-computed mix; make the mix file
         // fresh before auditioning it.
-        if (currentEntryId != null && mixDirty) {
+        if (currentProject != null && mixDirty) {
             setBusy(true);
             setStatus("Preparing mix...");
             new Thread(() -> {
@@ -7550,7 +7563,7 @@ public class MainActivity extends Activity {
     }
 
     private void onSaveClicked() {
-        if (currentEntryId != null) {
+        if (currentProject != null) {
             // Multitrack project: one WAV per track. The tracks are
             // the audio; the entry's legacy pristine file is not the
             // gate (same rule as updateTrackActions).
@@ -7669,7 +7682,7 @@ public class MainActivity extends Activity {
      * Each saved file is logged as an export on the entry.
      */
     private void doSaveTracksWav() {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId == null || saveFolderUri == null) {
             return;
         }
@@ -7911,9 +7924,9 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     dismissEncodeWaitScreen();
                     setStatus(doneMsg);
-                    if (currentEntryId != null) {
+                    if (currentProject != null) {
                         try {
-                            libraryDb.logExport(currentEntryId, savedAs,
+                            libraryDb.logExport(openEntryId(), savedAs,
                                     saveFolderName(), undoDepth(selectedId()));
                         } catch (Exception e) {
                             Log.w("AudioMechanic", "logExport failed", e);
@@ -7921,7 +7934,7 @@ public class MainActivity extends Activity {
                         // Separate try: an export-logging failure must not
                         // block the project rename below.
                         try {
-                            maybeAdoptExportName(currentEntryId, savedAs);
+                            maybeAdoptExportName(openEntryId(), savedAs);
                         } catch (Exception e) {
                             Log.w("AudioMechanic", "adoptExportName failed", e);
                         }
@@ -8104,7 +8117,7 @@ public class MainActivity extends Activity {
         if (shareInProgress) {
             return;
         }
-        if (currentEntryId != null) {
+        if (currentProject != null) {
             shareMixFresh();
             return;
         }
@@ -8128,7 +8141,7 @@ public class MainActivity extends Activity {
      * fresh mix file.
      */
     private void shareMixFresh() {
-        final String entryId = currentEntryId;
+        final String entryId = openEntryId();
         if (entryId == null) {
             return;
         }

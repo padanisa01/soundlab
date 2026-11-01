@@ -39,6 +39,15 @@ public final class Project {
         this.selected = null;
     }
 
+    /** The project's entry id (its LibraryEntry row id), or null
+     * when the project has no entry row. As of OO-6 this is the
+     * only home of the project identity MainActivity used to keep
+     * in a separate entry-id field: a null Project (no project
+     * open) is the picked-file / no-project state. */
+    public String entryId() {
+        return entry != null ? entry.id : null;
+    }
+
     /** The selected track's id, or null when none is selected. */
     public String selectedId() {
         return selected != null ? selected.row.id : null;
