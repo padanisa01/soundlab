@@ -7,8 +7,10 @@ import org.json.JSONObject;
  * A track's tonic (Sa): the value object mirroring the JSON the
  * Python bridge already returns for tonic detection (design docs
  * 4.2 and 10.3). Stable keys: sa_hz, note, cents, score,
- * runner_up_rel. Not wired into MainActivity yet (that is OO-5);
- * this class is the Java-side statement of the payload contract.
+ * runner_up_rel. As of OO-5 a track's tonic lives on its
+ * TrackModel as a TonicInfo; MainActivity reads and writes it via
+ * fromJson/toJson at the JSONObject boundaries. This class is
+ * the Java-side statement of the payload contract.
  */
 public final class TonicInfo {
 
