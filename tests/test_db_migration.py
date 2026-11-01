@@ -129,13 +129,16 @@ class TestDbMigrationV4ToV5(unittest.TestCase):
 
     def test_set_and_round_trip(self):
         self._migrate()
-        # The by-id column update setTrackTonic performs.
+        # The by-id column updates setTrackTonic / setTrackNotation
+        # perform — both Java setters also write updated_at
+        # (System.currentTimeMillis()), mirrored here with a fixed
+        # stand-in value.
         self.db.execute(
-            "UPDATE tracks SET tonic_json=? WHERE id=?",
-            (TONIC_JSON, "track-1"))
+            "UPDATE tracks SET tonic_json=?, updated_at=? WHERE id=?",
+            (TONIC_JSON, 3000, "track-1"))
         self.db.execute(
-            "UPDATE tracks SET notation_json=? WHERE id=?",
-            (NOTATION_JSON, "track-1"))
+            "UPDATE tracks SET notation_json=?, updated_at=? WHERE id=?",
+            (NOTATION_JSON, 3000, "track-1"))
         self.db.commit()
         row = self.db.execute(
             "SELECT tonic_json, notation_json FROM tracks"

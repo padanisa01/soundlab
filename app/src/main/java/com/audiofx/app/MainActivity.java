@@ -2132,11 +2132,18 @@ public class MainActivity extends Activity {
      * assignment site: applyNotation, the background-estimation
      * store, and the pitch-align analytic update. */
     private void persistTrackTonic(TrackModel tm) {
-        if (libraryDb == null || tm == null || tm.row == null) {
-            return;
+        // Best-effort: persistence is write-through bookkeeping —
+        // a DB failure must never surface in the user flow (the
+        // in-memory value stays authoritative for this session),
+        // so any failure here is swallowed, never thrown onward.
+        try {
+            if (libraryDb == null || tm == null || tm.row == null) {
+                return;
+            }
+            libraryDb.setTrackTonic(tm.row.id,
+                    tm.tonic != null ? tm.tonic.toJson().toString() : null);
+        } catch (Exception ignored) {
         }
-        libraryDb.setTrackTonic(tm.row.id,
-                tm.tonic != null ? tm.tonic.toJson().toString() : null);
     }
 
     /** Write-through notation persistence (OO-7): mirror a
@@ -2145,11 +2152,17 @@ public class MainActivity extends Activity {
      * shape loadProject parses back). Called at the one notation
      * assignment site: applyNotation. */
     private void persistTrackNotation(TrackModel tm) {
-        if (libraryDb == null || tm == null || tm.row == null) {
-            return;
+        // Best-effort, like persistTrackTonic: a DB failure must
+        // never surface in the user flow; the in-memory value
+        // stays authoritative for this session.
+        try {
+            if (libraryDb == null || tm == null || tm.row == null) {
+                return;
+            }
+            libraryDb.setTrackNotation(tm.row.id,
+                    tm.notation != null ? tm.notation.toString() : null);
+        } catch (Exception ignored) {
         }
-        libraryDb.setTrackNotation(tm.row.id,
-                tm.notation != null ? tm.notation.toString() : null);
     }
 
     /** Renderable op names loaded once from the bundled ops manifest
