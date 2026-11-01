@@ -461,54 +461,6 @@
                     android:textSize="11.5sp" />
             </LinearLayout>
 
-            <!-- Microphone card -->            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="14dp"
-                android:background="@drawable/bg_card"
-                android:orientation="vertical"
-                android:padding="14dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginBottom="6dp"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <ImageView
-                        android:layout_width="40dp"
-                        android:layout_height="40dp"
-                        android:background="@drawable/bg_icon_tile"
-                        android:padding="9dp"
-                        android:src="@drawable/ic_mic" />
-
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:layout_marginStart="12dp"
-                        android:orientation="vertical">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="Microphone"
-                            android:textColor="@color/sl_txt"
-                            android:textSize="14.5sp"
-                            android:textStyle="bold" />
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="Capture options live in Settings"
-                            android:textColor="@color/sl_dim"
-                            android:textSize="12sp" />
-                    </LinearLayout>
-                </LinearLayout>
-
-            </LinearLayout>
-
             <!-- Effects header -->
             <LinearLayout
                 android:layout_width="match_parent"

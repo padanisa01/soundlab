@@ -31,11 +31,14 @@ or the plan changes.
   input (stereo is mixed down to mono like any other input).
   RECORD_AUDIO is requested at runtime; a pulsing red button, a REC
   pill, and a live elapsed timer show while recording.
-- **Microphone card**: toggles for automatic gain control and noise
-  suppression, attached to the capture session via Android's
-  AutomaticGainControl / NoiseSuppressor effects (both off by
-  default, choices persist). The record-start toast reports which
+- **Capture preprocessing**: automatic gain control and noise
+  suppression (toggles in Settings > Microphone; see the Settings
+  panel entry), attached to the capture session via Android's
+  AutomaticGainControl / NoiseSuppressor effects (choices
+  persist). The record-start status line reports which
   effects actually engaged, or that the device doesn't support them.
+  The old main-screen Microphone card was removed entirely
+  (2026-11-01) once its settings moved into the Settings panel.
 - **Soundcheck mode** (branch feature/soundcheck, awaiting on-device
   QA): a segmented Record|Soundcheck control above the record button
   (sticky, persisted, locked during a session). A soundcheck take

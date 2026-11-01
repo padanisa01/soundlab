@@ -50,7 +50,7 @@ SCAFFOLD_CHECKS = [
     ("app/src/main/java/com/audiofx/app/CaptureFx.java", "NoiseSuppressor"),
     ("app/src/main/res/layout/dialog_settings.xml", "switch_agc"),
     ("app/src/main/res/layout/dialog_settings.xml", "switch_ns"),
-    ("app/src/main/res/layout/activity_main.xml", "ic_mic"),
+    ("app/src/main/res/drawable/ic_mic.xml", "vector"),
     ("app/src/main/python/audiofx/live.py", "class LiveChain"),
     ("app/src/main/python/audiofx/android_bridge.py", "def render_chain"),
     ("app/src/main/python/audiofx/android_bridge.py", "DSP_VERSION"),
