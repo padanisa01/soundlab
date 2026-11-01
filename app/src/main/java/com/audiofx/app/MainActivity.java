@@ -1236,6 +1236,42 @@ public class MainActivity extends Activity {
                 .getBoolean(key, def);
     }
 
+    /** The phone-microphone pref (default ON): record from the
+     * phone's built-in mic even when earphones with a mic are
+     * plugged in, so the earphones act purely as the overdub
+     * monitor. Read at the capture start sites. */
+    private boolean phoneMicPref() {
+        return getSharedPreferences("soundlab", MODE_PRIVATE)
+                .getBoolean("mic_phone_mic", true);
+    }
+
+    /** The built-in microphone as a preferred input device, or
+     * null when this device does not expose one. */
+    private AudioDeviceInfo builtinMicDevice() {
+        try {
+            AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+            if (am == null) {
+                return null;
+            }
+            for (AudioDeviceInfo d
+                    : am.getDevices(AudioManager.GET_DEVICES_INPUTS)) {
+                if (d.getType() == AudioDeviceInfo.TYPE_BUILTIN_MIC) {
+                    return d;
+                }
+            }
+        } catch (Exception e) {
+            // Fall through: no preference is a safe default.
+        }
+        return null;
+    }
+
+    /** The preferred capture input for the next take: the built-in
+     * mic when the phone-mic setting is on, else null (the system
+     * default route). */
+    private AudioDeviceInfo captureInputDevice() {
+        return phoneMicPref() ? builtinMicDevice() : null;
+    }
+
     /** The quality-score engine: always the Estimate (Tier 1
      * proxy) -- the Off alternative was removed. Passed to
      * diagnose_file as its quality_engine argument and folded into
