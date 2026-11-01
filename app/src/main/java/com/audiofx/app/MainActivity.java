@@ -115,11 +115,12 @@ public class MainActivity extends Activity {
 
     private TextView tvProjectName;
     /** Karaoke notation state (feature/tonic), PER TRACK: notation
-     * events and tonic chip text keyed by track id (LEGACY_NOTATION_KEY
-     * for picked files). The readouts always show the selected
-     * track's notation. */
+     * events and the tonic live on each track's TrackModel (OO-5).
+     * notationKey() still yields LEGACY_NOTATION_KEY / "file:..."
+     * keys for picked files; those resolve to no track and store
+     * nothing. The readouts always show the selected track's
+     * notation. */
     private static final String LEGACY_NOTATION_KEY = "__legacy__";
-    private final Map<String, JSONArray> notationByTrack = new HashMap<>();
     // Tonic match check (Settings > Multi-track, pref tonic_match_check):
     // background Sa estimation for tracks that have audio but no
     // tonic yet, plus the mismatch popup's bookkeeping. The queued
@@ -550,7 +551,7 @@ public class MainActivity extends Activity {
         if (lane.swaraView == null) {
             return;
         }
-        JSONArray events = notationByTrack.get(lane.trackId);
+        JSONArray events = trackNotation(lane.trackId);
         if (events == null) {
             return;
         }
@@ -2033,14 +2034,38 @@ public class MainActivity extends Activity {
      * fails loudly there when ops exist, never silently. Called
      * (one line) at every mTracks reload site, at the settled point
      * of adoptLibraryEntry, and at currentEntryId transitions
-     * outside it — see the OO-4 hook inventory. */
+     * outside it — see the OO-4 hook inventory.
+     *
+     * OO-5 carry-over (coordinator ruling): loadProject builds
+     * fresh TrackModels with null tonic/notation, but this refresh
+     * runs at many IN-PROJECT reload sites (lock/mute/volume/
+     * rename/delete/ensure-tracks), where the old never-cleared
+     * session maps made tonic/notation survive. To preserve that,
+     * when the reload is for the SAME entryId the outgoing
+     * project's TrackModels hand their tonic/notation to the
+     * incoming ones by track id. When the entryId differs (project
+     * switch/close) there is NO carry-over — the state is dropped
+     * (sanctioned; OO-7 restores it from the DB). This is refresh
+     * assembly only: the state still lives solely on the current
+     * project's TrackModels, never in a side cache. */
     private void refreshCurrentProject() {
         if (libraryDb == null || currentEntryId == null) {
             currentProject = null;
             return;
         }
+        Project outgoing = currentProject;
         currentProject = libraryDb.loadProject(currentEntryId, RENDERABLE_OPS);
         if (currentProject != null) {
+            if (outgoing != null && outgoing.entry != null
+                    && currentEntryId.equals(outgoing.entry.id)) {
+                for (TrackModel incoming : currentProject.tracks) {
+                    TrackModel old = outgoing.trackById(incoming.row.id);
+                    if (old != null) {
+                        incoming.tonic = old.tonic;
+                        incoming.notation = old.notation;
+                    }
+                }
+            }
             currentProject.selected = currentProject.trackById(selectedTrackId);
         }
     }
@@ -2059,6 +2084,15 @@ public class MainActivity extends Activity {
     private TonicInfo trackTonic(String trackId) {
         TrackModel tm = trackModelById(trackId);
         return tm != null ? tm.tonic : null;
+    }
+
+    /** A track's notation events (TrackModel.notation), or null
+     * when the track is not in the current project or has no
+     * notation yet. (The old map's values were never null, so this
+     * also replaces its containsKey checks.) */
+    private JSONArray trackNotation(String trackId) {
+        TrackModel tm = trackModelById(trackId);
+        return tm != null ? tm.notation : null;
     }
 
     /** Renderable op names loaded once from the bundled ops manifest
@@ -2642,15 +2676,19 @@ public class MainActivity extends Activity {
                 setStatus("No tonic found in this audio.");
                 return;
             }
-            notationByTrack.put(key, info.getJSONArray("events"));
-            // OO-5 + coordinator ruling (legacy keys): the tonic is
-            // stored on the key's TrackModel only when the key
-            // resolves to a track in the current project; legacy
-            // picked-file keys ("file:..." / LEGACY_NOTATION_KEY)
-            // resolve to nothing and the store is skipped -- no
-            // read site could ever hit those keys in the old map.
+            // OO-5 + coordinator ruling (legacy keys): notation
+            // events and the tonic are stored on the key's
+            // TrackModel only when the key resolves to a track in
+            // the current project; legacy picked-file keys
+            // ("file:..." / LEGACY_NOTATION_KEY) resolve to
+            // nothing and the stores are skipped -- those puts
+            // were write-only dead stores (no read site ever used
+            // a non-UUID key). getJSONArray is still evaluated
+            // unconditionally, as the old put did.
+            JSONArray events = info.getJSONArray("events");
             TrackModel tm = trackModelById(key);
             if (tm != null) {
+                tm.notation = events;
                 tm.tonic = TonicInfo.fromJson(info);
             }
             refreshLaneHeaderFor(key);
@@ -5218,7 +5256,7 @@ public class MainActivity extends Activity {
         }
         if (lane.swaraView != null) {
             lane.swaraView.setVisibility(
-                    notationByTrack.containsKey(t.id)
+                    trackNotation(t.id) != null
                             ? View.VISIBLE : View.GONE);
         }
         if (lane.volumeBar != null) {
