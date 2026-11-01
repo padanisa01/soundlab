@@ -53,7 +53,7 @@ public class LibraryDb extends SQLiteOpenHelper {
     public static final String DSP_VERSION = "2";
 
     private static final String DB_NAME = "soundlab_library.db";
-    private static final int DB_VERSION = 4;
+    private static final int DB_VERSION = 5;
 
     private final Context mAppContext;
 
@@ -92,7 +92,9 @@ public class LibraryDb extends SQLiteOpenHelper {
                 + "  volume REAL NOT NULL DEFAULT 1.0,\n"
                 + "  position INTEGER NOT NULL,\n"
                 + "  created_at INTEGER NOT NULL,\n"
-                + "  updated_at INTEGER NOT NULL\n"
+                + "  updated_at INTEGER NOT NULL,\n"
+                + "  tonic_json TEXT,\n"
+                + "  notation_json TEXT\n"
                 + ")");
         db.execSQL("CREATE INDEX idx_tracks_entry ON tracks(entry_id, position)");
         db.execSQL("CREATE TABLE ops(\n"
@@ -194,6 +196,27 @@ public class LibraryDb extends SQLiteOpenHelper {
             try {
                 db.execSQL("ALTER TABLE tracks ADD COLUMN"
                         + " volume REAL NOT NULL DEFAULT 1.0");
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
+            }
+        }
+        if (oldVersion < 5) {
+            // DB v5: per-track tonic + notation persistence (OO-7,
+            // design doc section 11: BOTH columns, notation is
+            // track-level state). Same ADD COLUMN pattern as
+            // v3/v4: safe under FK enforcement; existing rows get
+            // NULL — no stored tonic/notation yet, so background
+            // estimation / a fresh Notation run refills them,
+            // exactly the pre-OO-7 first-open behavior. The two
+            // columns are appended last, matching the onCreate
+            // DDL order for fresh installs.
+            db.beginTransaction();
+            try {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN"
+                        + " tonic_json TEXT");
+                db.execSQL("ALTER TABLE tracks ADD COLUMN"
+                        + " notation_json TEXT");
                 db.setTransactionSuccessful();
             } finally {
                 db.endTransaction();
@@ -619,7 +642,7 @@ public class LibraryDb extends SQLiteOpenHelper {
             db.endTransaction();
         }
         return new Track(newId, entryId, name, wavPath, false, false, 1.0, position,
-                now, now);
+                now, now, null, null);
     }
 
     /** All tracks for the entry, ORDER BY position ASC. */
@@ -695,6 +718,30 @@ public class LibraryDb extends SQLiteOpenHelper {
         SQLiteDatabase db = getWritableDatabase();
         ContentValues cv = new ContentValues();
         cv.put("muted", muted ? 1 : 0);
+        cv.put("updated_at", System.currentTimeMillis());
+        db.update("tracks", cv, "id=?", new String[]{trackId});
+    }
+
+    /** Sets the track's stored tonic JSON (OO-7 write-through:
+     * called with exactly the value assigned to TrackModel.tonic,
+     * serialized via TonicInfo.toJson(); and bumps updated_at). */
+    public synchronized void setTrackTonic(String trackId, String tonicJson) {
+        SQLiteDatabase db = getWritableDatabase();
+        ContentValues cv = new ContentValues();
+        cv.put("tonic_json", tonicJson);
+        cv.put("updated_at", System.currentTimeMillis());
+        db.update("tracks", cv, "id=?", new String[]{trackId});
+    }
+
+    /** Sets the track's stored notation JSON (OO-7 write-through:
+     * called with exactly the value assigned to
+     * TrackModel.notation, serialized via JSONArray.toString();
+     * and bumps updated_at). */
+    public synchronized void setTrackNotation(String trackId,
+            String notationJson) {
+        SQLiteDatabase db = getWritableDatabase();
+        ContentValues cv = new ContentValues();
+        cv.put("notation_json", notationJson);
         cv.put("updated_at", System.currentTimeMillis());
         db.update("tracks", cv, "id=?", new String[]{trackId});
     }
@@ -783,7 +830,9 @@ public class LibraryDb extends SQLiteOpenHelper {
                 c.getDouble(c.getColumnIndexOrThrow("volume")),
                 c.getInt(c.getColumnIndexOrThrow("position")),
                 c.getLong(c.getColumnIndexOrThrow("created_at")),
-                c.getLong(c.getColumnIndexOrThrow("updated_at")));
+                c.getLong(c.getColumnIndexOrThrow("updated_at")),
+                c.getString(c.getColumnIndexOrThrow("tonic_json")),
+                c.getString(c.getColumnIndexOrThrow("notation_json")));
     }
 
     // ------------------------------------------------------------------
@@ -1042,10 +1091,17 @@ public class LibraryDb extends SQLiteOpenHelper {
         public final int position;
         public final long createdAt;
         public final long updatedAt;
+        /** Persisted tonic payload (TonicInfo JSON), or null when
+         * the track has no stored tonic (OO-7, DB v5). */
+        public final String tonicJson;
+        /** Persisted notation events (JSONArray JSON), or null
+         * when the track has no stored notation (OO-7, DB v5). */
+        public final String notationJson;
 
         public Track(String id, String entryId, String name, String wavPath,
                 boolean locked, boolean muted, double volume, int position,
-                long createdAt, long updatedAt) {
+                long createdAt, long updatedAt, String tonicJson,
+                String notationJson) {
             this.id = id;
             this.entryId = entryId;
             this.name = name;
@@ -1056,6 +1112,8 @@ public class LibraryDb extends SQLiteOpenHelper {
             this.position = position;
             this.createdAt = createdAt;
             this.updatedAt = updatedAt;
+            this.tonicJson = tonicJson;
+            this.notationJson = notationJson;
         }
     }
 
