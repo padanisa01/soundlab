@@ -109,7 +109,7 @@ public class MainActivity extends Activity {
     private static final String LEGACY_NOTATION_KEY = "__legacy__";
     private final Map<String, JSONArray> notationByTrack = new HashMap<>();
     private final Map<String, JSONObject> tonicInfoByTrack = new HashMap<>();
-    // Tonic match check (Settings > DSP Lab, pref tonic_match_check):
+    // Tonic match check (Settings > Multi-track, pref tonic_match_check):
     // background Sa estimation for tracks that have audio but no
     // tonic yet, plus the mismatch popup's bookkeeping. The queued
     // set is mutated on the UI thread only (the worker snapshots it).
@@ -188,15 +188,7 @@ public class MainActivity extends Activity {
     private ImageButton btnRecord;
     private ImageButton btnStop;
     private ImageButton btnNormalize;
-    private Switch switchAgc;
-    private Switch switchNs;
-    private Switch switchLimiter;
-    private Switch switchPhoneMic;
-    private Switch switchLiveFx;
-    private Switch switchAutoNorm;
-    private LinearLayout advMicPanel;
-    private LinearLayout advMicHeader;
-    private ImageView advMicChevron;
+
     private ProgressBar progressBar;
     private LinearLayout histCard;
     private LinearLayout histList;
@@ -787,19 +779,7 @@ public class MainActivity extends Activity {
         tvReverbVal = findViewById(R.id.tv_reverb_val);
         seekWarmth = findViewById(R.id.seek_warmth);
         seekEcho = findViewById(R.id.seek_echo);
-        switchAgc = findViewById(R.id.switch_agc);
-        switchNs = findViewById(R.id.switch_ns);
-        switchLimiter = findViewById(R.id.switch_limiter);
-        switchPhoneMic = findViewById(R.id.switch_phone_mic);
-        switchLiveFx = findViewById(R.id.switch_livefx);
-        switchAutoNorm = findViewById(R.id.switch_autonorm);
         SharedPreferences prefs = getSharedPreferences("soundlab", MODE_PRIVATE);
-        switchAgc.setChecked(prefs.getBoolean("mic_agc", false));
-        switchNs.setChecked(prefs.getBoolean("mic_ns", true));
-        switchLimiter.setChecked(prefs.getBoolean("mic_limiter", true));
-        switchPhoneMic.setChecked(prefs.getBoolean("mic_phone_mic", true));
-        switchLiveFx.setChecked(prefs.getBoolean("mic_livefx", false));
-        switchAutoNorm.setChecked(prefs.getBoolean("mic_autonorm", true));
         // First use: offer the guided tour once (menu > Tutorial
         // replays it anytime).
         findViewById(android.R.id.content).post(() -> {
@@ -809,23 +789,6 @@ public class MainActivity extends Activity {
                 showTutorial();
             }
         });
-        switchAgc.setOnCheckedChangeListener((b, on) ->
-                prefs.edit().putBoolean("mic_agc", on).apply());
-        switchNs.setOnCheckedChangeListener((b, on) ->
-                prefs.edit().putBoolean("mic_ns", on).apply());
-        switchLimiter.setOnCheckedChangeListener((b, on) ->
-                prefs.edit().putBoolean("mic_limiter", on).apply());
-        switchPhoneMic.setOnCheckedChangeListener((b, on) ->
-                prefs.edit().putBoolean("mic_phone_mic", on).apply());
-        switchLiveFx.setOnCheckedChangeListener((b, on) ->
-                prefs.edit().putBoolean("mic_livefx", on).apply());
-        switchAutoNorm.setOnCheckedChangeListener((b, on) ->
-                prefs.edit().putBoolean("mic_autonorm", on).apply());
-        advMicPanel = findViewById(R.id.adv_mic_panel);
-        advMicHeader = findViewById(R.id.adv_mic_header);
-        advMicChevron = findViewById(R.id.adv_mic_chevron);
-        setAdvMicExpanded(prefs.getBoolean("mic_adv_expanded", false), false);
-        advMicHeader.setOnClickListener(v -> toggleAdvMic());
         chipStudio = findViewById(R.id.chip_studio);
         chipHall = findViewById(R.id.chip_hall);
         chipBath = findViewById(R.id.chip_bath);
@@ -1198,54 +1161,39 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    /** App settings: a tabbed dialog (tabs across the top, one page
-     * per tab). The Soundcheck tab holds the cue combination: border
-     * flash, burst beeps, headset routing, vibration. Each switch is
-     * stored live in prefs and defaults to on. The DSP Lab tab holds
-     * the DSP-upgrade engine defaults (DSP-6): every row is stored
-     * live in prefs and defaults to the pre-upgrade behavior. */
+    /** App settings: ONE vertically scrollable panel (the
+     * dialog layout is a ScrollView) with sections. Microphone
+     * holds the capture preprocessing switches (moved off the main
+     * screen); Soundcheck holds the cue combination; Multi-track
+     * holds the tonic match check. Engine choices are fixed and
+     * have no rows here: pitch = Formant, mastering = Multiband,
+     * notation = Classic, quality = Estimate, true-peak detection
+     * always on. Every switch is stored live in prefs. */
     private void showSettingsDialog() {
         View view = getLayoutInflater()
                 .inflate(R.layout.dialog_settings, null);
         SharedPreferences prefs =
                 getSharedPreferences("soundlab", MODE_PRIVATE);
+        // Microphone section (defaults match the old main-screen
+        // panel: AGC off, NS on, limiter on, phone mic on, live FX
+        // off, auto-normalize on).
+        bindPrefSwitch(view, R.id.switch_agc, prefs, "mic_agc", false);
+        bindPrefSwitch(view, R.id.switch_ns, prefs, "mic_ns", true);
+        bindPrefSwitch(view, R.id.switch_limiter, prefs,
+                "mic_limiter", true);
+        bindPrefSwitch(view, R.id.switch_phone_mic, prefs,
+                "mic_phone_mic", true);
+        bindPrefSwitch(view, R.id.switch_livefx, prefs,
+                "mic_livefx", false);
+        bindPrefSwitch(view, R.id.switch_autonorm, prefs,
+                "mic_autonorm", true);
+        // Soundcheck cue switches (default on).
         bindCueSwitch(view, R.id.sw_sc_border, prefs, "sc_cue_border");
         bindCueSwitch(view, R.id.sw_sc_beep, prefs, "sc_cue_beep");
         bindCueSwitch(view, R.id.sw_sc_headset, prefs, "sc_cue_headset");
         bindCueSwitch(view, R.id.sw_sc_vibrate, prefs, "sc_cue_vibrate");
-        // DSP Lab rows (all stored live, on change).
-        bindEngineSeg(view, R.id.seg_pitch_classic, R.id.seg_pitch_formant,
-                prefs, "dsp_pitch_engine", "wsola", "formant", true);
-        // Notation row (PRD amendment A2): Classic is selectable; the
-        // Neural segment is disabled (the neural engine is descoped
-        // in this build) and can never write the pref.
-        bindEngineSeg(view, R.id.seg_notation_classic,
-                R.id.seg_notation_neural,
-                prefs, "notation_engine", "classic", "neural", false);
-        bindEngineSeg(view, R.id.seg_quality_off, R.id.seg_quality_estimate,
-                prefs, "quality_engine", "off", "proxy", true);
-        bindEngineSeg(view, R.id.seg_master_classic,
-                R.id.seg_master_multiband,
-                prefs, "dsp_mastering_default", "classic", "multiband",
-                true);
-        // True-peak detection: a switch in the bindCueSwitch live
-        // style, but default OFF (PRD D3) -- bindCueSwitch defaults
-        // to on, so this row binds explicitly. Toggling applies to
-        // the capture objects immediately, exactly as the capture
-        // start sites do (see beginCapture / startLiveRecording).
-        Switch tp = view.findViewById(R.id.sw_truepeak);
-        tp.setChecked(prefs.getBoolean("mic_truepeak", false));
-        tp.setOnCheckedChangeListener((b, on) -> {
-            prefs.edit().putBoolean("mic_truepeak", on).apply();
-            recorder.setTruePeak(on);
-            liveMonitor.setTruePeak(on);
-        });
-        // Tonic match check: gates the whole background experience
-        // (per-track Sa estimation, lane tonic labels for tracks
-        // never notated, and the mismatch popup). Default OFF --
-        // bindCueSwitch defaults to on, so bind explicitly like
-        // true-peak. Turning it on kicks estimation for the open
-        // project right away.
+        // Tonic match check (default OFF): turning it on kicks
+        // estimation for the open project right away.
         Switch tc = view.findViewById(R.id.sw_tonic_check);
         tc.setChecked(prefs.getBoolean("tonic_match_check", false));
         tc.setOnCheckedChangeListener((b, on) -> {
@@ -1254,32 +1202,21 @@ public class MainActivity extends Activity {
                 maybeEstimateTonics();
             }
         });
-        // Tab strip: Soundcheck | DSP Lab, painted like the
-        // Record|Soundcheck segmented control (paintSegment).
-        final TextView tabSc = view.findViewById(R.id.tab_soundcheck);
-        final TextView tabDsp = view.findViewById(R.id.tab_dsplab);
-        final View pageSc = view.findViewById(R.id.settings_tab_soundcheck);
-        final View pageDsp = view.findViewById(R.id.settings_tab_dsplab);
-        final Runnable showSc = () -> {
-            pageSc.setVisibility(View.VISIBLE);
-            pageDsp.setVisibility(View.GONE);
-            paintSegment(tabSc, true);
-            paintSegment(tabDsp, false);
-        };
-        final Runnable showDsp = () -> {
-            pageSc.setVisibility(View.GONE);
-            pageDsp.setVisibility(View.VISIBLE);
-            paintSegment(tabSc, false);
-            paintSegment(tabDsp, true);
-        };
-        tabSc.setOnClickListener(v -> showSc.run());
-        tabDsp.setOnClickListener(v -> showDsp.run());
-        showSc.run();
         new AlertDialog.Builder(this, R.style.Theme_SoundLab_Dialog)
                 .setTitle("Settings")
                 .setView(view)
                 .setPositiveButton("Close", null)
                 .show();
+    }
+
+    /** Bind a Settings switch to a boolean pref with an explicit
+     * default, stored live on change. */
+    private void bindPrefSwitch(View root, int id,
+            SharedPreferences prefs, String key, boolean def) {
+        Switch sw = root.findViewById(id);
+        sw.setChecked(prefs.getBoolean(key, def));
+        sw.setOnCheckedChangeListener((b, on) ->
+                prefs.edit().putBoolean(key, on).apply());
     }
 
     private void bindCueSwitch(View root, int id,
@@ -1290,107 +1227,21 @@ public class MainActivity extends Activity {
                 prefs.edit().putBoolean(key, on).apply());
     }
 
-    /** Bind a two-segment engine row in the DSP Lab tab: segment A
-     * stores {@code valueA}, segment B stores {@code valueB}, both
-     * written to prefs live on tap (the bindCueSwitch pattern
-     * extended to segmented rows). Segments are painted with
-     * paintSegment, like the Record|Soundcheck control. When
-     * {@code secondEnabled} is false the B segment is disabled and
-     * dimmed, gets no click listener, and can never be painted
-     * selected -- the pref can only ever hold {@code valueA} from
-     * this row. */
-    private void bindEngineSeg(View root, int idA, int idB,
-            SharedPreferences prefs, String key,
-            String valueA, String valueB, boolean secondEnabled) {
-        final TextView segA = root.findViewById(idA);
-        final TextView segB = root.findViewById(idB);
-        final Runnable paint = () -> {
-            String cur = prefs.getString(key, valueA);
-            paintSegment(segA, valueA.equals(cur));
-            paintSegment(segB, secondEnabled && valueB.equals(cur));
-            if (!secondEnabled) {
-                segB.setEnabled(false);
-                segB.setAlpha(0.35f);
-            }
-        };
-        paint.run();
-        segA.setOnClickListener(v -> {
-            prefs.edit().putString(key, valueA).apply();
-            paint.run();
-        });
-        if (secondEnabled) {
-            segB.setOnClickListener(v -> {
-                prefs.edit().putString(key, valueB).apply();
-                paint.run();
-            });
-        }
-    }
-
-    /** The DSP Lab true-peak pref (default OFF, PRD D3). Read at the
-     * capture start sites alongside the mic_limiter choice. */
-    private boolean truePeakPref() {
+    /** A microphone pref (Settings > Microphone). The mic
+     * switches live in the Settings dialog now, so the capture
+     * flows read the stored values at capture start / take save.
+     * True-peak detection is not a pref: it is always on. */
+    private boolean micPref(String key, boolean def) {
         return getSharedPreferences("soundlab", MODE_PRIVATE)
-                .getBoolean("mic_truepeak", false);
+                .getBoolean(key, def);
     }
 
-    /** The phone-microphone pref (default ON): record from the
-     * phone's built-in mic even when earphones with a mic are
-     * plugged in, so the earphones act purely as the overdub
-     * monitor. Read at the capture start sites alongside
-     * mic_truepeak. */
-    private boolean phoneMicPref() {
-        return getSharedPreferences("soundlab", MODE_PRIVATE)
-                .getBoolean("mic_phone_mic", true);
-    }
-
-    /** The built-in microphone as a preferred input device, or
-     * null when this device does not expose one. */
-    private AudioDeviceInfo builtinMicDevice() {
-        try {
-            AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
-            if (am == null) {
-                return null;
-            }
-            for (AudioDeviceInfo d
-                    : am.getDevices(AudioManager.GET_DEVICES_INPUTS)) {
-                if (d.getType() == AudioDeviceInfo.TYPE_BUILTIN_MIC) {
-                    return d;
-                }
-            }
-        } catch (Exception e) {
-            // Fall through: no preference is a safe default.
-        }
-        return null;
-    }
-
-    /** The preferred capture input for the next take: the built-in
-     * mic when the phone-mic setting is on, else null (the system
-     * default route). */
-    private AudioDeviceInfo captureInputDevice() {
-        return phoneMicPref() ? builtinMicDevice() : null;
-    }
-
-    /** The DSP Lab quality-score pref (default "off"). Passed to
+    /** The quality-score engine: always the Estimate (Tier 1
+     * proxy) -- the Off alternative was removed. Passed to
      * diagnose_file as its quality_engine argument and folded into
-     * the diagnosis cache key, so switching engines never serves a
-     * stale report. */
+     * the diagnosis cache key. */
     private String qualityEnginePref() {
-        return getSharedPreferences("soundlab", MODE_PRIVATE)
-                .getString("quality_engine", "off");
-    }
-
-    /** One segment of a hand-rolled segmented control (the
-     * Record|Soundcheck strip's dimensions), painted by
-     * paintSegment. Used by dialogs that build their views in code
-     * (pitch, master). */
-    private TextView segmentTextView(String label) {
-        float dp = getResources().getDisplayMetrics().density;
-        TextView seg = new TextView(this);
-        seg.setText(label);
-        seg.setTextSize(13f);
-        seg.setPadding((int) (16 * dp), (int) (5 * dp),
-                (int) (16 * dp), (int) (5 * dp));
-        return seg;
+        return "proxy";
     }
 
     /** Starts the one-time premium purchase flow. */
@@ -1576,26 +1427,6 @@ public class MainActivity extends Activity {
         toastView.animate().alpha(1f).setDuration(200).start();
         mainHandler.removeCallbacks(hideToast);
         mainHandler.postDelayed(hideToast, 2600);
-    }
-
-    /** Expand/collapse the Advanced mic settings panel, persisted. */
-    private void toggleAdvMic() {
-        boolean expanded = advMicPanel.getVisibility() != View.VISIBLE;
-        setAdvMicExpanded(expanded, true);
-        getSharedPreferences("soundlab", MODE_PRIVATE).edit()
-                .putBoolean("mic_adv_expanded", expanded).apply();
-    }
-
-    private void setAdvMicExpanded(boolean expanded, boolean animate) {
-        advMicPanel.setVisibility(expanded ? View.VISIBLE : View.GONE);
-        float target = expanded ? 180f : 0f;
-        if (animate) {
-            advMicChevron.animate().rotation(target).setDuration(200).start();
-        } else {
-            advMicChevron.setRotation(target);
-        }
-        advMicChevron.setContentDescription(expanded
-                ? "Collapse advanced mic settings" : "Expand advanced mic settings");
     }
 
     private void togglePlayPause() {        if (isPlayerPlaying()) {
@@ -2581,7 +2412,7 @@ public class MainActivity extends Activity {
     }
 
     // ------------------------------------------------------------------
-    // Tonic match check (Settings > DSP Lab, pref "tonic_match_check",
+    // Tonic match check (Settings > Multi-track, pref "tonic_match_check",
     // default OFF). When on: tracks with audio but no tonic yet get a
     // background Sa estimate (tonic only -- no melody tracing), shown
     // in the lane header like a notation result; when the estimated
@@ -2875,15 +2706,6 @@ public class MainActivity extends Activity {
         dialog.show();
     }
 
-    /** The pitch engine the one-click alignment writes into its
-     * ops: the DSP Lab pitch pref, same as the Pitch dialog's
-     * preselection. */
-    private String pitchEnginePref() {
-        return "formant".equals(getSharedPreferences("soundlab",
-                MODE_PRIVATE).getString("dsp_pitch_engine", "wsola"))
-                ? "formant" : "wsola";
-    }
-
     /** Apply the alignment plan: one undoable pitch_shift op per
      * out-of-tune track, rendered with the same incremental path
      * as a manual Pitch convert; a failed track's op is rolled
@@ -2905,7 +2727,7 @@ public class MainActivity extends Activity {
                 try {
                     String params = new JSONObject()
                             .put("semitones", s.shiftSemis)
-                            .put("engine", pitchEnginePref()).toString();
+                            .put("engine", "formant").toString();
                     String label = "Pitch "
                             + (s.shiftSemis >= 0 ? "+" : "")
                             + String.format(Locale.US, "%.2f",
@@ -3054,52 +2876,6 @@ public class MainActivity extends Activity {
         cur.setTextSize(15f);
         root.addView(cur);
 
-        // Engine choice (DSP-1): Classic (WSOLA) | Formant, preselected
-        // from the DSP Lab pref; the chosen value is written into the
-        // op params at Convert time (renders stay reproducible after
-        // the pref changes).
-        TextView engineLbl = new TextView(this);
-        engineLbl.setText("Engine");
-        engineLbl.setTextColor(getColor(R.color.sl_mut));
-        engineLbl.setTextSize(12.5f);
-        LinearLayout.LayoutParams engineLblLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        engineLblLp.topMargin = (int) (12 * dp);
-        root.addView(engineLbl, engineLblLp);
-
-        LinearLayout engineRow = new LinearLayout(this);
-        engineRow.setOrientation(LinearLayout.HORIZONTAL);
-        engineRow.setBackgroundResource(R.drawable.bg_sel_chip_empty);
-        int segPad = (int) (3 * dp);
-        engineRow.setPadding(segPad, segPad, segPad, segPad);
-        LinearLayout.LayoutParams engineRowLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        engineRowLp.topMargin = (int) (6 * dp);
-        final TextView segClassic = segmentTextView("Classic");
-        final TextView segFormant = segmentTextView("Formant");
-        engineRow.addView(segClassic);
-        engineRow.addView(segFormant);
-        root.addView(engineRow, engineRowLp);
-        final String[] engineSel = {"formant".equals(
-                getSharedPreferences("soundlab", MODE_PRIVATE)
-                        .getString("dsp_pitch_engine", "wsola"))
-                ? "formant" : "wsola"};
-        final Runnable paintEngine = () -> {
-            paintSegment(segClassic, "wsola".equals(engineSel[0]));
-            paintSegment(segFormant, "formant".equals(engineSel[0]));
-        };
-        paintEngine.run();
-        segClassic.setOnClickListener(v -> {
-            engineSel[0] = "wsola";
-            paintEngine.run();
-        });
-        segFormant.setOnClickListener(v -> {
-            engineSel[0] = "formant";
-            paintEngine.run();
-        });
-
         TextView targetLbl = new TextView(this);
         targetLbl.setText("Shift to (target tonic):");
         targetLbl.setTextColor(getColor(R.color.sl_mut));
@@ -3229,7 +3005,7 @@ public class MainActivity extends Activity {
                     try {
                         params = new JSONObject()
                                 .put("semitones", rounded)
-                                .put("engine", engineSel[0]).toString();
+                                .put("engine", "formant").toString();
                     } catch (Exception e) {
                         return;
                     }
@@ -4495,11 +4271,10 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    /** Master dialog (DSP-2): opened from the Diagnose report's
-     * Master button. Engine segmented control (Classic | Multiband,
-     * preselected from pref dsp_mastering_default) plus a preset
-     * spinner (gentle / punch / broadcast); the preset drives only
-     * the Multiband path. */
+    /** Master dialog: opened from the Diagnose report's Master
+     * button. Multiband is the only engine (the Classic alternative
+     * was removed); the preset spinner picks gentle / punch /
+     * broadcast. */
     private void showMasterDialog(final String findingsJson) {
         final float dp = getResources().getDisplayMetrics().density;
         LinearLayout root = new LinearLayout(this);
@@ -4507,53 +4282,11 @@ public class MainActivity extends Activity {
         int pad = (int) (20 * dp);
         root.setPadding(pad, pad, pad, 0);
 
-        TextView engineLbl = new TextView(this);
-        engineLbl.setText("Engine");
-        engineLbl.setTextColor(getColor(R.color.sl_mut));
-        engineLbl.setTextSize(12.5f);
-        root.addView(engineLbl);
-
-        LinearLayout engineRow = new LinearLayout(this);
-        engineRow.setOrientation(LinearLayout.HORIZONTAL);
-        engineRow.setBackgroundResource(R.drawable.bg_sel_chip_empty);
-        int segPad = (int) (3 * dp);
-        engineRow.setPadding(segPad, segPad, segPad, segPad);
-        LinearLayout.LayoutParams engineRowLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        engineRowLp.topMargin = (int) (6 * dp);
-        final TextView segClassic = segmentTextView("Classic");
-        final TextView segMultiband = segmentTextView("Multiband");
-        engineRow.addView(segClassic);
-        engineRow.addView(segMultiband);
-        root.addView(engineRow, engineRowLp);
-        final String[] engineSel = {"multiband".equals(
-                getSharedPreferences("soundlab", MODE_PRIVATE)
-                        .getString("dsp_mastering_default", "classic"))
-                ? "multiband" : "classic"};
-        final Runnable paintEngine = () -> {
-            paintSegment(segClassic, "classic".equals(engineSel[0]));
-            paintSegment(segMultiband, "multiband".equals(engineSel[0]));
-        };
-        paintEngine.run();
-        segClassic.setOnClickListener(v -> {
-            engineSel[0] = "classic";
-            paintEngine.run();
-        });
-        segMultiband.setOnClickListener(v -> {
-            engineSel[0] = "multiband";
-            paintEngine.run();
-        });
-
         TextView presetLbl = new TextView(this);
-        presetLbl.setText("Preset (Multiband)");
+        presetLbl.setText("Preset");
         presetLbl.setTextColor(getColor(R.color.sl_mut));
         presetLbl.setTextSize(12.5f);
-        LinearLayout.LayoutParams presetLblLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        presetLblLp.topMargin = (int) (14 * dp);
-        root.addView(presetLbl, presetLblLp);
+        root.addView(presetLbl);
 
         final Spinner presetSp = new Spinner(this);
         final String[] presets = {"gentle", "punch", "broadcast"};
@@ -4563,9 +4296,11 @@ public class MainActivity extends Activity {
                 android.R.layout.simple_spinner_dropdown_item);
         presetSp.setAdapter(presetAd);
         presetSp.setMinimumHeight((int) (52 * dp));
-        root.addView(presetSp, new LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams presetLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        presetLp.topMargin = (int) (6 * dp);
+        root.addView(presetSp, presetLp);
 
         final AlertDialog dialog = new AlertDialog.Builder(
                 this, R.style.Theme_SoundLab_Dialog)
@@ -4580,115 +4315,8 @@ public class MainActivity extends Activity {
                     String preset =
                             presets[presetSp.getSelectedItemPosition()];
                     dialog.dismiss();
-                    if ("multiband".equals(engineSel[0])) {
-                        runMasterMultiband(preset);
-                    } else {
-                        runMasterClassic(findingsJson);
-                    }
+                    runMasterMultiband(preset);
                 });
-    }
-
-    /** Classic Master: apply the same eq_balance + loudness ops Tune
-     * Up applies for the current profile, with Tune Up's own params.
-     * The fixes are derived by the bridge's tune_up_build -- the exact
-     * reduction Tune Up runs (tune_up_fixes: detection-derived params
-     * merged with the profile's overrides, de-duplicated, in Tune Up
-     * order) -- filtered to the Classic mastering pair, then applied
-     * one op at a time through applyLibraryOp, eq_balance first (Tune
-     * Up order) with loudness chained from its onRendered. No params
-     * are invented here; when neither fix is in the Tune Up set, tone
-     * and loudness are already on target and nothing is applied. */
-    private void runMasterClassic(final String findingsJson) {
-        final String entryId = currentEntryId;
-        final LibraryDb.Track track = getSelectedTrack();
-        if (entryId == null || track == null) {
-            setStatus("Open or record audio first.");
-            return;
-        }
-        if (!checkTrackUnlocked(track.id)) {
-            return;
-        }
-        if (!trackHasAudio(track)) {
-            setStatus("The selected track has no audio to master.");
-            return;
-        }
-        final String trackId = track.id;
-        if (diagTrackId != null && !diagTrackId.equals(trackId)) {
-            setStatus("Track changed since diagnosis. Diagnose again first.");
-            return;
-        }
-        final String profile = currentTuneUpProfile();
-        setBusy(true);
-        setStatus("Mastering...");
-        new Thread(() -> {
-            JSONObject eqFix = null;
-            JSONObject loudFix = null;
-            try {
-                if (!Python.isStarted()) {
-                    Python.start(new AndroidPlatform(this));
-                }
-                String tuneUpJson = Python.getInstance()
-                        .getModule("audiofx.android_bridge")
-                        .callAttr("tune_up_build", findingsJson, profile)
-                        .toString();
-                JSONArray fixes = new JSONObject(tuneUpJson)
-                        .getJSONObject("params").getJSONArray("fixes");
-                for (int i = 0; i < fixes.length(); i++) {
-                    JSONObject fix = fixes.optJSONObject(i);
-                    if (fix == null) {
-                        continue;
-                    }
-                    if ("eq_balance".equals(fix.optString("op"))) {
-                        eqFix = fix;
-                    } else if ("loudness".equals(fix.optString("op"))) {
-                        loudFix = fix;
-                    }
-                }
-            } catch (Exception e) {
-                runOnUiThread(() -> {
-                    setBusy(false);
-                    setStatus("Master failed: " + e.getMessage());
-                });
-                return;
-            }
-            final JSONObject eq = eqFix;
-            final JSONObject loud = loudFix;
-            runOnUiThread(() -> {
-                setBusy(false);
-                if (eq == null && loud == null) {
-                    setStatus("Master (Classic): tone and loudness are "
-                            + "already on target -- nothing to apply.");
-                    return;
-                }
-                final JSONObject eqParams = eq != null
-                        ? eq.optJSONObject("params") : null;
-                final JSONObject loudParams = loud != null
-                        ? loud.optJSONObject("params") : null;
-                final String eqJson = eqParams != null
-                        ? eqParams.toString() : "{}";
-                final String loudJson = loudParams != null
-                        ? loudParams.toString() : "{}";
-                final String eqLabel = eq != null
-                        ? eq.optString("label", "Balance tone") : "";
-                final String loudLabel = loud != null
-                        ? loud.optString("label", "Normalize loudness") : "";
-                if (eq != null && loud != null) {
-                    applyLibraryOp("eq_balance", eqJson, eqLabel,
-                            "Mastering (Classic)...", "EQ applied.",
-                            () -> applyLibraryOp("loudness", loudJson,
-                                    loudLabel, "Mastering (Classic)...",
-                                    "Master applied (Classic).", null));
-                } else if (eq != null) {
-                    applyLibraryOp("eq_balance", eqJson, eqLabel,
-                            "Mastering (Classic)...",
-                            "Master applied (Classic).", null);
-                } else {
-                    applyLibraryOp("loudness", loudJson, loudLabel,
-                            "Mastering (Classic)...",
-                            "Master applied (Classic).", null);
-                }
-            });
-        }).start();
     }
 
     /** Multiband Master: expand the preset through the bridge
@@ -6314,13 +5942,13 @@ public class MainActivity extends Activity {
     /** Start the mic capture (UI thread); the monitor mix is already fresh. */
     private void beginCapture(File monitorMixFile) {
         pendingSoundcheck = soundcheckMode;
-        if (switchLiveFx.isChecked()) {
+        if (micPref("mic_livefx", false)) {
             startLiveRecording(monitorMixFile);
             return;
         }
-        recorder.setPreprocessing(switchAgc.isChecked(), switchNs.isChecked(),
-                switchLimiter.isChecked());
-        recorder.setTruePeak(truePeakPref());
+        recorder.setPreprocessing(micPref("mic_agc", false),
+                micPref("mic_ns", true), micPref("mic_limiter", true));
+        recorder.setTruePeak(true);
         recorder.setPhoneMicDevice(captureInputDevice());
         File take = new File(getCacheDir(), "rec_take.wav");
         if (!recorder.start(take)) {
@@ -6341,12 +5969,12 @@ public class MainActivity extends Activity {
         StringBuilder fx = new StringBuilder();
         if (recorder.agcActive()) {
             fx.append(" + AGC");
-        } else if (switchAgc.isChecked()) {
+        } else if (micPref("mic_agc", false)) {
             fx.append(" (AGC unavailable on this device)");
         }
         if (recorder.nsActive()) {
             fx.append(" + noise suppression");
-        } else if (switchNs.isChecked()) {
+        } else if (micPref("mic_ns", true)) {
             fx.append(" (noise suppression unavailable on this device)");
         }
         setStatus("Recording " + recorder.activeLabel() + fx
@@ -6370,11 +5998,11 @@ public class MainActivity extends Activity {
         double warmth = seekWarmth.getProgress() / 100.0;
         double echo = seekEcho.getProgress() / 100.0;
         File take = new File(getCacheDir(), "rec_take.wav");
-        liveMonitor.setTruePeak(truePeakPref());
+        liveMonitor.setTruePeak(true);
         liveMonitor.setPhoneMicDevice(captureInputDevice());
         if (!liveMonitor.start(take, warmth, reverbPreset, echo,
-                switchAgc.isChecked(), switchNs.isChecked(),
-                switchLimiter.isChecked())) {
+                micPref("mic_agc", false), micPref("mic_ns", true),
+                micPref("mic_limiter", true))) {
             pendingRecordTrackId = null;
             pendingSoundcheck = false;
             setStatus("Live FX unavailable on this device.");
@@ -6695,7 +6323,7 @@ public class MainActivity extends Activity {
                                 + reverbDisplayName(livePreset)
                                 + ", Echo " + liveEchoPct + "%");
             }
-            if (switchAutoNorm.isChecked()) {
+            if (micPref("mic_autonorm", true)) {
                 // Track-scoped op; rendered with the track below.
                 libraryDb.addOp(entryId, trackId, "normalize",
                         normalizeParamsJson(), "Normalize to -1 dBFS");
@@ -6738,7 +6366,7 @@ public class MainActivity extends Activity {
                     + "track for clipping...");
         } else {
             onTrackContentChanged(trackId);
-            setStatus(switchAutoNorm.isChecked()
+            setStatus(micPref("mic_autonorm", true)
                     ? "Take saved and normalized."
                     : "Take saved.");
         }

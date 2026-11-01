@@ -1,58 +1,258 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- App settings dialog: a tab strip over per-tab content
-     (Soundcheck | DSP Lab). -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- App settings dialog: ONE vertically scrollable panel with
+     sections (Microphone | Soundcheck cues | Multi-track). The
+     old DSP Lab tab is gone: its engine choices are now fixed
+     (pitch = Formant, mastering = Multiband, notation = Classic,
+     quality = Estimate, true-peak detection always on). -->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:orientation="vertical"
-    android:padding="18dp">
+    android:fillViewport="true">
 
     <LinearLayout
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="@drawable/bg_sel_chip_empty"
-        android:orientation="horizontal"
-        android:padding="3dp">
+        android:orientation="vertical"
+        android:padding="18dp">
 
         <TextView
-            android:id="@+id/tab_soundcheck"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:background="@drawable/bg_chip"
-            android:paddingStart="14dp"
-            android:paddingEnd="14dp"
-            android:paddingTop="5dp"
-            android:paddingBottom="5dp"
-            android:text="Soundcheck"
+            android:text="Microphone"
             android:textColor="@color/sl_teal2"
             android:textSize="13sp"
             android:textStyle="bold" />
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp">
+
+            <Switch
+                android:id="@+id/switch_agc"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Automatic gain control"
+                    android:textColor="@color/sl_txt"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Evens out loud and quiet parts"
+                    android:textColor="@color/sl_mut"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp">
+
+            <Switch
+                android:id="@+id/switch_ns"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Noise suppression"
+                    android:textColor="@color/sl_txt"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Cuts background hiss and hum"
+                    android:textColor="@color/sl_mut"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp">
+
+            <Switch
+                android:id="@+id/switch_limiter"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Limiter"
+                    android:textColor="@color/sl_txt"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Stops loud peaks from clipping"
+                    android:textColor="@color/sl_mut"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp">
+
+            <Switch
+                android:id="@+id/switch_phone_mic"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Phone microphone"
+                    android:textColor="@color/sl_txt"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Record with the phone's mic, not the earphone mic"
+                    android:textColor="@color/sl_mut"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp">
+
+            <Switch
+                android:id="@+id/switch_livefx"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Live effects"
+                    android:textColor="@color/sl_txt"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Hear Warmth, Reverb, Echo while recording; baked into the take"
+                    android:textColor="@color/sl_mut"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp">
+
+            <Switch
+                android:id="@+id/switch_autonorm"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Auto-normalize takes"
+                    android:textColor="@color/sl_txt"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Peak-normalize recordings to -1 dBFS; undoable"
+                    android:textColor="@color/sl_mut"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="10dp"
+            android:layout_marginBottom="10dp"
+            android:background="@color/sl_line" />
+
         <TextView
-            android:id="@+id/tab_dsplab"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:paddingStart="14dp"
-            android:paddingEnd="14dp"
-            android:paddingTop="5dp"
-            android:paddingBottom="5dp"
-            android:text="DSP Lab"
-            android:textColor="@color/sl_mut"
-            android:textSize="13sp" />
-    </LinearLayout>
-
-    <View
-        android:layout_width="match_parent"
-        android:layout_height="1dp"
-        android:layout_marginTop="12dp"
-        android:layout_marginBottom="6dp"
-        android:background="@color/sl_line" />
-
-    <LinearLayout
-        android:id="@+id/settings_tab_soundcheck"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical">
+            android:text="Soundcheck cues"
+            android:textColor="@color/sl_teal2"
+            android:textSize="13sp"
+            android:textStyle="bold" />
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -197,244 +397,21 @@
                     android:textSize="12sp" />
             </LinearLayout>
         </LinearLayout>
-    </LinearLayout>
 
-    <LinearLayout
-        android:id="@+id/settings_tab_dsplab"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:visibility="gone">
-
-        <LinearLayout
+        <View
             android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="10dp"
+            android:layout_marginBottom="10dp"
+            android:background="@color/sl_line" />
+
+        <TextView
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:paddingTop="8dp"
-            android:paddingBottom="8dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Pitch shift engine"
-                android:textColor="@color/sl_txt"
-                android:textSize="14sp" />
-
-            <LinearLayout
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:background="@drawable/bg_sel_chip_empty"
-                android:orientation="horizontal"
-                android:padding="3dp">
-
-                <TextView
-                    android:id="@+id/seg_pitch_classic"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:paddingStart="14dp"
-                    android:paddingEnd="14dp"
-                    android:paddingTop="5dp"
-                    android:paddingBottom="5dp"
-                    android:text="Classic"
-                    android:textSize="13sp" />
-
-                <TextView
-                    android:id="@+id/seg_pitch_formant"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:paddingStart="14dp"
-                    android:paddingEnd="14dp"
-                    android:paddingTop="5dp"
-                    android:paddingBottom="5dp"
-                    android:text="Formant"
-                    android:textSize="13sp" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:paddingTop="8dp"
-            android:paddingBottom="8dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Notation engine"
-                android:textColor="@color/sl_txt"
-                android:textSize="14sp" />
-
-            <LinearLayout
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:background="@drawable/bg_sel_chip_empty"
-                android:orientation="horizontal"
-                android:padding="3dp">
-
-                <TextView
-                    android:id="@+id/seg_notation_classic"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:paddingStart="14dp"
-                    android:paddingEnd="14dp"
-                    android:paddingTop="5dp"
-                    android:paddingBottom="5dp"
-                    android:text="Classic"
-                    android:textSize="13sp" />
-
-                <TextView
-                    android:id="@+id/seg_notation_neural"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:alpha="0.35"
-                    android:enabled="false"
-                    android:paddingStart="14dp"
-                    android:paddingEnd="14dp"
-                    android:paddingTop="5dp"
-                    android:paddingBottom="5dp"
-                    android:text="Neural"
-                    android:textSize="13sp" />
-            </LinearLayout>
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="The neural engine is not included in this build."
-                android:textColor="@color/sl_dim"
-                android:textSize="12sp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:paddingTop="8dp"
-            android:paddingBottom="8dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Quality score"
-                android:textColor="@color/sl_txt"
-                android:textSize="14sp" />
-
-            <LinearLayout
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:background="@drawable/bg_sel_chip_empty"
-                android:orientation="horizontal"
-                android:padding="3dp">
-
-                <TextView
-                    android:id="@+id/seg_quality_off"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:paddingStart="14dp"
-                    android:paddingEnd="14dp"
-                    android:paddingTop="5dp"
-                    android:paddingBottom="5dp"
-                    android:text="Off"
-                    android:textSize="13sp" />
-
-                <TextView
-                    android:id="@+id/seg_quality_estimate"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:paddingStart="14dp"
-                    android:paddingEnd="14dp"
-                    android:paddingTop="5dp"
-                    android:paddingBottom="5dp"
-                    android:text="Estimate"
-                    android:textSize="13sp" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:paddingTop="8dp"
-            android:paddingBottom="8dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Mastering default"
-                android:textColor="@color/sl_txt"
-                android:textSize="14sp" />
-
-            <LinearLayout
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:background="@drawable/bg_sel_chip_empty"
-                android:orientation="horizontal"
-                android:padding="3dp">
-
-                <TextView
-                    android:id="@+id/seg_master_classic"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:paddingStart="14dp"
-                    android:paddingEnd="14dp"
-                    android:paddingTop="5dp"
-                    android:paddingBottom="5dp"
-                    android:text="Classic"
-                    android:textSize="13sp" />
-
-                <TextView
-                    android:id="@+id/seg_master_multiband"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:paddingStart="14dp"
-                    android:paddingEnd="14dp"
-                    android:paddingTop="5dp"
-                    android:paddingBottom="5dp"
-                    android:text="Multiband"
-                    android:textSize="13sp" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingTop="8dp"
-            android:paddingBottom="8dp">
-
-            <Switch
-                android:id="@+id/sw_truepeak"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content" />
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="10dp"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="True-peak detection"
-                    android:textColor="@color/sl_txt"
-                    android:textSize="14sp" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Limiter also catches peaks that occur between samples"
-                    android:textColor="@color/sl_mut"
-                    android:textSize="12sp" />
-            </LinearLayout>
-        </LinearLayout>
+            android:text="Multi-track"
+            android:textColor="@color/sl_teal2"
+            android:textSize="13sp"
+            android:textStyle="bold" />
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -472,4 +449,4 @@
             </LinearLayout>
         </LinearLayout>
     </LinearLayout>
-</LinearLayout>
+</ScrollView>

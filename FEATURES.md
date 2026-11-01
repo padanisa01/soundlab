@@ -140,9 +140,12 @@ or the plan changes.
 - **Auto-naming**: when a recording still has its auto-generated
   "Recording ..." name, exporting with a user-chosen filename renames
   the project to match. Manual renames are never overridden.
-- **Advanced mic settings**: AGC, noise suppression, limiter, live
-  effects and auto-normalize live in a collapsible panel, collapsed by
-  default (expansion persisted).
+- **Mic settings**: AGC, noise suppression, limiter, phone
+  microphone, live effects and auto-normalize live in the Settings
+  panel's Microphone section (moved off the main screen
+  2026-10-31); the capture flows read the stored prefs
+  (`mic_agc` / `mic_ns` / `mic_limiter` / `mic_phone_mic` /
+  `mic_livefx` / `mic_autonorm`) at capture start / take save.
 - **Limiter** (on by default): lookahead peak limiter on the mic capture
   path (both dry and live-FX recording), ceiling -1 dBFS, 5 ms lookahead,
   linked stereo — loud peaks can never clip a take, and it is
@@ -150,21 +153,22 @@ or the plan changes.
   (`audiofx/limiter.py`, unit-tested incl. zero-overshoot guarantee)
   ported 1:1 to `LiveLimiter.java`; differential check passes
   bit-for-bit.
-- **True-peak detection** (opt-in, default OFF): when enabled, the
-  limiter's detector oversamples the capture 4x (32-tap windowed-sinc
-  interpolation FIR, one coefficient table shared by the Python
-  reference `audiofx/limiter.py` and `LiveLimiter.java`) and runs the
-  same envelope follower on the inter-sample peak stream, so peaks
-  that occur *between* samples — invisible to sample-peak detection —
-  are also held to the -1 dBFS ceiling. Delay (5 ms), stereo linking
-  and the Limiter master switch are unchanged; governed by the
-  `mic_truepeak` preference (default false, wired in
-  `AudioRecorder.setTruePeak` / `LiveFxMonitor.setTruePeak`).
+- **True-peak detection** (always ON since 2026-10-31; previously
+  an opt-in DSP Lab switch): the limiter's detector oversamples the
+  capture 4x (32-tap windowed-sinc interpolation FIR, one
+  coefficient table shared by the Python reference
+  `audiofx/limiter.py` and `LiveLimiter.java`) and runs the same
+  envelope follower on the inter-sample peak stream, so peaks that
+  occur *between* samples — invisible to sample-peak detection —
+  are also held to the -1 dBFS ceiling. Delay (5 ms), stereo
+  linking and the Limiter master switch are unchanged;
+  `AudioRecorder.setTruePeak(true)` / `LiveFxMonitor.setTruePeak(true)`
+  are applied at every capture start.
 - **Phone microphone** (on by default): when earphones with an
   integrated mic are plugged in, capture still uses the phone's
   built-in microphone, so the earphones act purely as the overdub
-  monitor. Governed by the `mic_phone_mic` preference (Advanced mic
-  settings); the built-in mic is passed to `MicCapture` as the
+  monitor. Governed by the `mic_phone_mic` preference (Settings >
+  Microphone); the built-in mic is passed to `MicCapture` as the
   AudioRecord's preferred input device
   (`AudioRecorder.setPhoneMicDevice` / `LiveFxMonitor.setPhoneMicDevice`,
   API 28+). It is a preference, not a guarantee — Android can still
@@ -346,40 +350,25 @@ or the plan changes.
   result cannot regress Overall. Some takes no fix set improves
   (quiet + hissy, where gain costs more Background than the
   Signal it buys); there the tool honestly applies nothing.
-- **DSP Lab tab** (DSP-6): Settings is now a two-tab dialog
-  (Soundcheck | DSP Lab); the Soundcheck tab's four cue switches are
-  unchanged. The DSP Lab tab holds the five engine defaults, each
-  stored live in prefs on change (segmented rows extend the
-  `bindCueSwitch` pattern) and each defaulting to the pre-upgrade
-  behavior: Pitch shift engine (Classic | Formant, pref
-  `dsp_pitch_engine`), Notation engine (Classic | Neural, pref
-  `notation_engine`), Quality score (Off | Estimate, pref
-  `quality_engine` — no DNSMOS segment in v1), Mastering default
-  (Classic | Multiband, pref `dsp_mastering_default`), and a
-  True-peak detection switch (pref `mic_truepeak`, default off).
-  The Notation row keeps its Neural segment visible but DISABLED —
-  dimmed and not tappable, with a note that the neural engine is not
-  included in this build (the DSP-0 spike projected 132–408 s of
-  phone inference per 3-minute song against the ~90 s gate, so the
-  neural engine was descoped; PRD amendment A2). In-context
-  controls complete the picture: the pitch dialog gains a
-  Classic | Formant segmented control preselected from
-  `dsp_pitch_engine`, written into the pitch op's params as
-  `"engine"` at Convert time; the Diagnose report gains a Master
-  button beside Tune Up, opening a dialog (engine preselected from
-  `dsp_mastering_default`, plus a gentle / punch / broadcast preset
-  spinner) whose Classic path applies the same `eq_balance` +
-  `loudness` ops Tune Up applies — same fixes, same params, via
-  `applyLibraryOp` — and whose Multiband path applies one
-  `mastering` op with the preset expanded to full numeric params
-  through the `mastering_preset_params` bridge accessor; the
-  true-peak switch is applied live to `AudioRecorder` /
-  `LiveFxMonitor` and re-applied at every capture start alongside
-  the Limiter choice; and when the Quality score is set to
-  Estimate, the Diagnose report's score hero shows a "Quality score
-  (estimate)" line with the SIG / BAK / OVRL values (the diagnose
-  cache key includes the quality engine, so switching engines never
-  serves a stale report).
+- **Settings panel** (reworked 2026-10-31): Settings is ONE
+  vertically scrollable panel with three sections -- Microphone
+  (the capture switches, moved off the main screen), Soundcheck
+  cues (the four cue switches, unchanged), and Multi-track (the
+  tonic match check). The old DSP Lab tab and its engine choices
+  are gone; the choices are now FIXED, with no settings rows and
+  no prefs: pitch shift always uses the Formant engine (written
+  into the pitch op's params as `"engine": "formant"` at Convert
+  time; older ops recorded with `"wsola"` still render through
+  the WSOLA path), Master (in the Diagnose report) always applies
+  one Multiband `mastering` op with the chosen preset
+  (gentle / punch / broadcast) expanded to full numeric params
+  through the `mastering_preset_params` bridge accessor, notation
+  is always the Classic engine, the Diagnose report always shows
+  the "Quality score (estimate)" line (SIG / BAK / OVRL), and
+  true-peak detection is always on at capture. The neural
+  notation engine and all its code (the NumPy CREPE core
+  `audiofx/nn.py`, weights, spike tooling and tests) were REMOVED
+  entirely.
 
 ### Tonic and notation
 - **Notation** is per track: the Notation icon button sits in the
@@ -398,7 +387,7 @@ or the plan changes.
   across edits, new recordings, and project re-opens — until
   Notation is run again on that track (which replaces it). Picked
   files (no project) notate the current render or pristine input.
-- **Tonic match check** (Settings > DSP Lab, `tonic_match_check`,
+- **Tonic match check** (Settings > Multi-track, `tonic_match_check`,
   default OFF -- the switch gates the whole experience): with it on,
   every track that has audio but no tonic yet gets a background
   Sa-only estimate (`tonic_detect_file` in the bridge --
@@ -414,7 +403,7 @@ or the plan changes.
   track's Sa and the exact raise/lower (in semitones) that would
   align every out-of-tune track to the FIRST track's tonic; its
   "Align pitches" button applies those as ordinary undoable
-  `pitch_shift` ops (engine from the DSP Lab pitch pref), advancing
+  `pitch_shift` ops (Formant engine), advancing
   each shifted track's stored tonic analytically so headers and
   re-checks agree without a fresh Notation run. Locked tracks are
   reported but never shifted. The popup shows at most once per
@@ -448,8 +437,7 @@ or the plan changes.
   absorbed into the plateaus they connect instead of becoming
   notes, and a sustained oscillation around one centre is emitted
   as a single note carrying the existing `fixed: False`
-  (kampita) flag. The segmenter is shared, so the later neural
-  engine will feed it the same way; `detect_tonic`, the swara
+  (kampita) flag. `detect_tonic`, the swara
   stats and the event dict shape are unchanged.
 - Landing notes (2026-10-29): a transit gap between two plateaus
   can still carry a note the voice dwells on briefly -- the
@@ -636,15 +624,9 @@ or the plan changes.
 
 ## Planned / known gaps
 - Compressed formats (MP3, etc.) as *input* — v1 is WAV-only.
-- DSP Lab spike (DSP-0, branch dsp/spike, 2026-10-28): CREPE-tiny
-  weights converted offline to `audiofx/crepe_tiny.npz`
-  (1,537,288 bytes — passes the ≤2 MB in-APK gate) and a pure-NumPy
-  inference core (`audiofx/nn.py`) written and unit-tested. The
-  benchmark verdict is NO-GO for on-device neural pitch in this
-  branch: the measured forward-pass rates project to
-  ~132–408 s of phone inference for a 3-minute song (empirical
-  range across implementer and reviewer measurements; no floor
-  claim is made), over the
-  ~90 s PRD gate, so neural Notation (DSP-4) is descoped pending a
-  separate TFLite proposal and quality scoring ships Tier 1 only.
-  Details: `SPIKE_MEMO.md` in the spike worktree / branch.
+- Neural notation: REMOVED (2026-10-31) — the DSP-0 spike's
+  NumPy CREPE core, weights, tooling and tests were deleted;
+  notation is the Classic engine only. (A TFLite implementation
+  was separately prototyped on the `dsp/tflite-spike` branch and
+  a fine-tuning experiment was run offline; neither is in this
+  branch.)
