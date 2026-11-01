@@ -161,7 +161,6 @@ SCAFFOLD_CHECKS = [
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "pausePlayback"),
     ("app/src/main/java/com/audiofx/app/WaveformView.java", "startProgressAnimation(float fromFrac"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "isPlayingInput"),
-    ("app/src/main/java/com/audiofx/app/WaveformView.java", "zoomBy"),
     ("app/src/main/res/layout/activity_main.xml", "btn_play_pause"),
     ("app/src/main/res/layout/activity_main.xml", "seek_warmth"),
     ("app/src/main/res/layout/activity_main.xml", "seek_echo"),

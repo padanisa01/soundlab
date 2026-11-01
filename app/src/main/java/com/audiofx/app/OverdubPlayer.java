@@ -27,7 +27,6 @@ public class OverdubPlayer {
     private RandomAccessFile raf;
     private Thread worker;
     private volatile boolean playing;
-    private volatile long playedFrames;
 
     /** Parsed WAV format info needed to configure playback. */
     private static final class WavInfo {
@@ -39,11 +38,6 @@ public class OverdubPlayer {
 
     public synchronized boolean isPlaying() {
         return playing;
-    }
-
-    /** Frames written to the AudioTrack since start(). */
-    public long framesPlayed() {
-        return playedFrames;
     }
 
     /**
@@ -177,8 +171,6 @@ public class OverdubPlayer {
         track = t;
         raf = r;
         playing = true;
-        playedFrames = 0;
-        final int frameBytes = info.channels * 2;
         worker = new Thread(() -> {
             byte[] buf = new byte[16384];
             try {
@@ -212,7 +204,6 @@ public class OverdubPlayer {
                         }
                         off += w;
                     }
-                    playedFrames += off / frameBytes;
                     if (off < n) {
                         break;
                     }

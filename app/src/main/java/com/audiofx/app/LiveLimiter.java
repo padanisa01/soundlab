@@ -215,20 +215,4 @@ public final class LiveLimiter {
         }
     }
 
-    /** Clear delay line and state (call when starting a new take). */
-    public void reset() {
-        for (float[] dl : delay) {
-            java.util.Arrays.fill(dl, 0f);
-        }
-        delayPos = 0;
-        peak = 0.0;
-        hold = 0;
-        gain = 1.0;
-        if (tpRing != null) {
-            for (float[] ring : tpRing) {
-                java.util.Arrays.fill(ring, 0f);
-            }
-            tpFrame = 0;
-        }
-    }
 }

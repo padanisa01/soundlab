@@ -291,22 +291,9 @@ public class LibraryDb extends SQLiteOpenHelper {
     // ------------------------------------------------------------------
 
     /**
-     * Creates an entry with a generated UUID. updated_at is set to createdAt.
-     * Returns the new entry id.
-     */
-    public synchronized String createEntry(String name, long createdAt,
-            double durationS, int sampleRate, int channels,
-            String source, String captureLabel, String dspVersion,
-            String pristinePath) {
-        return createEntryWithId(UUID.randomUUID().toString(), name, createdAt,
-                durationS, sampleRate, channels, source, captureLabel,
-                dspVersion, pristinePath);
-    }
-
-    /**
      * Creates an entry with a caller-supplied id (lets MainActivity know the
-     * UUID before copying the take into takeFile(id)). Otherwise identical to
-     * {@link #createEntry}: updated_at is set to createdAt, returns the id.
+     * UUID before copying the take into takeFile(id)): updated_at is set to
+     * createdAt, returns the id.
      *
      * @throws IllegalArgumentException if id is null/empty or an entry with
      *         that id already exists

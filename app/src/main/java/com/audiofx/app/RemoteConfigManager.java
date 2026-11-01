@@ -24,7 +24,6 @@ public final class RemoteConfigManager {
     private volatile boolean adsEnabled = true;
     private volatile boolean podcastUnlocked = false;
     private volatile boolean musicUnlocked = false;
-    private volatile boolean fetched;
 
     /** Fetch and activate; safe to call on the UI thread.
      * @param onFetched run on the UI thread after the fetch completes
@@ -47,7 +46,6 @@ public final class RemoteConfigManager {
                             config.getBoolean(KEY_PODCAST_UNLOCKED);
                     musicUnlocked = config.getBoolean(KEY_MUSIC_UNLOCKED);
                 }
-                fetched = true;
                 if (onFetched != null) {
                     onFetched.run();
                 }
@@ -55,7 +53,6 @@ public final class RemoteConfigManager {
         } catch (Exception ignored) {
             // Firebase not configured (no google-services.json yet):
             // stay on the fail-closed defaults.
-            fetched = true;
             if (onFetched != null) {
                 onFetched.run();
             }
@@ -77,9 +74,5 @@ public final class RemoteConfigManager {
 
     public boolean isMusicUnlocked() {
         return musicUnlocked;
-    }
-
-    public boolean isFetched() {
-        return fetched;
     }
 }
