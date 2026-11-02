@@ -622,10 +622,40 @@ public class LibraryDb extends SQLiteOpenHelper {
      * trackTakeFile(newId). position = max existing + 1, starting at 1.
      * Returns the new Track.
      */
+    /** First free variant of baseName among the entry's tracks:
+     * baseName itself, else baseName_1, baseName_2, ... (the track
+     * excludeTrackId, when renaming, does not collide with itself).
+     * Track names are display-only — identity is the track id — but
+     * duplicates confuse the library list and WAV export names, so
+     * create/rename uniquify here, at the single choke point every
+     * naming flow passes through. Caller must hold a transaction
+     * on db. */
+    private String uniqueTrackName(SQLiteDatabase db, String entryId,
+            String baseName, String excludeTrackId) {
+        List<String> taken = new ArrayList<>();
+        try (Cursor c = db.query("tracks", new String[]{"id", "name"},
+                "entry_id=?", new String[]{entryId}, null, null, null)) {
+            while (c.moveToNext()) {
+                if (!c.getString(0).equals(excludeTrackId)) {
+                    taken.add(c.getString(1));
+                }
+            }
+        }
+        if (!taken.contains(baseName)) {
+            return baseName;
+        }
+        int n = 1;
+        while (taken.contains(baseName + "_" + n)) {
+            n++;
+        }
+        return baseName + "_" + n;
+    }
+
     public synchronized Track createTrack(String entryId, String name) {
         String newId = UUID.randomUUID().toString();
         long now = System.currentTimeMillis();
         String wavPath = trackTakeFile(newId).getAbsolutePath();
+        String uniqueName = name;
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         int position;
@@ -638,10 +668,11 @@ public class LibraryDb extends SQLiteOpenHelper {
                     position = c.getInt(0) + 1;
                 }
             }
+            uniqueName = uniqueTrackName(db, entryId, name, null);
             ContentValues cv = new ContentValues();
             cv.put("id", newId);
             cv.put("entry_id", entryId);
-            cv.put("name", name);
+            cv.put("name", uniqueName);
             cv.put("wav_path", wavPath);
             cv.put("locked", 0);
             cv.put("position", position);
@@ -652,7 +683,7 @@ public class LibraryDb extends SQLiteOpenHelper {
         } finally {
             db.endTransaction();
         }
-        return new Track(newId, entryId, name, wavPath, false, false, 1.0, position,
+        return new Track(newId, entryId, uniqueName, wavPath, false, false, 1.0, position,
                 now, now, null, null);
     }
 
@@ -694,6 +725,7 @@ public class LibraryDb extends SQLiteOpenHelper {
                 }
             }
             if (entryId != null) {
+                name = uniqueTrackName(db, entryId, name, trackId);
                 ContentValues cv = new ContentValues();
                 cv.put("name", name);
                 cv.put("updated_at", System.currentTimeMillis());

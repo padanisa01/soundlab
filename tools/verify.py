@@ -103,6 +103,7 @@ SCAFFOLD_CHECKS = [
     ("app/src/main/java/com/audiofx/app/model/TrackModel.java", "hasAudio"),
     ("app/src/main/java/com/audiofx/app/model/ProjectSettings.java", "class ProjectSettings"),
     ("app/src/main/java/com/audiofx/app/LibraryDb.java", "loadProject"),
+    ("app/src/main/java/com/audiofx/app/LibraryDb.java", "uniqueTrackName"),
     ("app/src/main/java/com/audiofx/app/LibraryDb.java", "DB_VERSION = 5"),
     ("app/src/main/java/com/audiofx/app/LibraryDb.java", "tonic_json"),
     ("app/src/main/java/com/audiofx/app/LibraryDb.java", "notation_json"),
