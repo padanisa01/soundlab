@@ -1393,8 +1393,14 @@ public class MainActivity extends Activity {
     /** Effect history panel: library ops or legacy picked-file history. */
     private void refreshHistoryPanel() {
         List<String[]> rows = new ArrayList<>();
+        String headerPrefix = null;
         if (currentProject != null && selectedId() != null) {
-            // History follows the selected track.
+            // History follows the selected track; the header names it
+            // so the user can see whose history this is.
+            LibraryDb.Track sel = selectedRow();
+            if (sel != null && sel.name != null) {
+                headerPrefix = sel.name + " — ";
+            }
             try {
                 for (Effect effect
                         : historyOf(openEntryId(), selectedId()).effects()) {
@@ -1415,7 +1421,8 @@ public class MainActivity extends Activity {
         }
         histCard.setVisibility(View.VISIBLE);
         histList.removeAllViews();
-        tvHistCount.setText(rows.size()
+        tvHistCount.setText((headerPrefix != null ? headerPrefix : "")
+                + rows.size()
                 + (rows.size() == 1 ? " effect" : " effects"));
         float density = getResources().getDisplayMetrics().density;
         int n = 1;
@@ -4794,6 +4801,8 @@ public class MainActivity extends Activity {
             return;
         }
         final String trackId = track.id;
+        final String trackName = track.name != null
+                ? track.name : "the selected track";
         final Effect last;
         try {
             EffectHistory history = historyOf(entryId, trackId);
@@ -4802,7 +4811,8 @@ public class MainActivity extends Activity {
             if (found == null
                     || !effects.get(effects.size() - 1).renderable()) {
                 // Nothing renderable to undo; display-only ops are never popped.
-                Toast.makeText(this, "Nothing to undo", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "Nothing to undo on " + trackName,
+                        Toast.LENGTH_SHORT).show();
                 return;
             }
             last = found;
@@ -4848,9 +4858,10 @@ public class MainActivity extends Activity {
                         transposeStoredTonic(trackId,
                                 -pitchShiftSemitones(last.paramsJson));
                     }
-                    setStatus("Undone: " + last.label + (depth > 0
-                            ? " — " + depth + " op(s) left."
-                            : " — back to the original audio."));
+                    setStatus("Undone: " + last.label + " on " + trackName
+                            + (depth > 0
+                                    ? " — " + depth + " op(s) left."
+                                    : " — back to the original audio."));
                 });
             } catch (Exception e) {
                 // Roll the popped op back on: re-add with the same content

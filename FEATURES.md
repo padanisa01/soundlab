@@ -149,6 +149,8 @@ or the plan changes.
   the standalone Save button are gone.
 - **Effect history panel**: the main page shows the full op history
   (label + timestamp per op) for library entries and picked files alike.
+  For projects the panel header names the selected track, and the
+  undo / "Nothing to undo" messages name the track they acted on.
 - **Auto-naming**: when a recording still has its auto-generated
   "Recording ..." name, exporting with a user-chosen filename renames
   the project to match. Manual renames are never overridden.

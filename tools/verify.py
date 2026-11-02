@@ -216,6 +216,13 @@ SCAFFOLD_CHECKS = [
     ("app/src/main/res/values/themes.xml", "Theme.SoundLab"),
     ("app/src/main/res/drawable/bg_apply.xml", "gradient"),
     ("app/src/main/res/drawable/ic_play.xml", "path"),
+    # History panel header + undo messages name the track (display-only
+    # attribution; a refactor must not silently drop it).
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", 'headerPrefix = sel.name + " — "'),
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", "(headerPrefix != null ? headerPrefix : \"\")"),
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", "track.name != null"),
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", '"Nothing to undo on " + trackName'),
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", '"Undone: " + last.label + " on " + trackName'),
 ]
 
 
