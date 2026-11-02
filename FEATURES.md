@@ -555,7 +555,11 @@ or the plan changes.
   of different lengths align. A slim TRACKS bar (label + "+") sits
   above the lanes; the "+" button adds a track ("Track N").
 - Each lane's header shows the track name (tap to rename), a lock
-  toggle, and a mute toggle. Tap a lane's header or its waveform to
+  toggle, and a mute toggle. Track names are unique within a
+  project: creating or renaming to a name another track already
+  has auto-appends _1, _2, ... (LibraryDb.createTrack /
+  renameTrack uniquify), so library listings and WAV exports
+  are never ambiguous. Tap a lane's header or its waveform to
   select it (highlighted); the first tap on a non-selected lane's
   waveform selects only, taps on the selected lane's waveform place
   trim markers. Playback cursor and trim selection are shown on all
