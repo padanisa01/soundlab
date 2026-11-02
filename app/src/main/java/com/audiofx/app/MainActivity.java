@@ -2122,7 +2122,8 @@ public class MainActivity extends Activity {
      * the shape loadProject parses back), so the persisted and
      * in-memory values can never diverge. Called at every tonic
      * assignment site: applyNotation, the background-estimation
-     * store, and the pitch-align analytic update. */
+     * store, the pitch-align analytic update, and the pitch_shift
+     * apply/undo transposition (transposeStoredTonic). */
     private void persistTrackTonic(TrackModel tm) {
         // Best-effort: persistence is write-through bookkeeping —
         // a DB failure must never surface in the user flow (the
@@ -2154,6 +2155,44 @@ public class MainActivity extends Activity {
             libraryDb.setTrackNotation(tm.row.id,
                     tm.notation != null ? tm.notation.toString() : null);
         } catch (Exception ignored) {
+        }
+    }
+
+    /** Keep a track's stored tonic in step with a pitch_shift op
+     * that was just applied (+semitones) or undone (-semitones):
+     * the audio transposes by a known exact amount, so the tonic
+     * transposes analytically (the shiftedTonicInfo mechanism
+     * Align Pitches already uses) instead of being re-estimated.
+     * The track's notation is NOT touched: swaras are relative
+     * to Sa, so the notation stays valid across the shift.
+     * No-op when the track has no stored tonic (background
+     * estimation fills it later, as before). */
+    private void transposeStoredTonic(String trackId, double semis) {
+        if (semis == 0) {
+            return;
+        }
+        TrackModel tm = trackModelById(trackId);
+        if (tm == null || tm.tonic == null) {
+            return;
+        }
+        try {
+            tm.tonic = TonicInfo.fromJson(
+                    shiftedTonicInfo(tm.tonic.toJson(), semis));
+            persistTrackTonic(tm);
+            refreshLaneHeaderFor(trackId);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** The semitones a pitch_shift op's params carry (0 if absent). */
+    private static double pitchShiftSemitones(String paramsJson) {
+        if (paramsJson == null) {
+            return 0;
+        }
+        try {
+            return new JSONObject(paramsJson).optDouble("semitones", 0);
+        } catch (Exception e) {
+            return 0;
         }
     }
 
@@ -2454,6 +2493,10 @@ public class MainActivity extends Activity {
                     btnStop.setEnabled(false);
                     if (onRendered != null) {
                         onRendered.run();
+                    }
+                    if ("pitch_shift".equals(opType)) {
+                        transposeStoredTonic(trackId,
+                                pitchShiftSemitones(paramsJson));
                     }
                     setStatus(doneMsg);
                     setPlayPauseEnabled(true);
@@ -4801,6 +4844,10 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     updateUndoBadge();
                     refreshLanePeaks(trackId);
+                    if ("pitch_shift".equals(last.name)) {
+                        transposeStoredTonic(trackId,
+                                -pitchShiftSemitones(last.paramsJson));
+                    }
                     setStatus("Undone: " + last.label + (depth > 0
                             ? " — " + depth + " op(s) left."
                             : " — back to the original audio."));

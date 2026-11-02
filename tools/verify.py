@@ -141,6 +141,7 @@ SCAFFOLD_CHECKS = [
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "btn_normalize"),
     ("app/src/main/res/layout/activity_main.xml", "btn_normalize"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "progress_bar"),
+    ("app/src/main/java/com/audiofx/app/MainActivity.java", "transposeStoredTonic"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "btn_undo"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "EffectHistoryDb"),
     ("app/src/main/java/com/audiofx/app/MainActivity.java", "onSelectionChanged"),

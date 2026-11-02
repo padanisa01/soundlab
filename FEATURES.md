@@ -512,7 +512,12 @@ or the plan changes.
   field, prefilled with the current tonic. Convert applies a
   `pitch_shift` op (+/-12 semitones, kept in the track's op chain,
   so it is undoable and flows into renders and the mix) with the
-  lane waveform progress animation. The DSP (audiofx/pitch.py)
+  lane waveform progress animation. Applying the shift transposes
+  the track's stored Sa by the same amount — analytically, via
+  the same mechanism as Align pitches, so no re-estimation runs —
+  and the lane's tonic display updates to the new Sa; undoing
+  the shift transposes Sa back. The track's notation is kept
+  unchanged: swaras are relative to Sa, so it stays valid. The DSP (audiofx/pitch.py)
   preserves duration AND tempo: a WSOLA time-stretch by the shift
   ratio (waveform-similarity overlap-add, so attacks/onsets stay
   sharp and on time), then a resample back to the original length.
